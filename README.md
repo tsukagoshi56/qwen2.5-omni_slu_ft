@@ -96,11 +96,12 @@ Use `run_eval.py` to evaluate the trained model on the SLURP test set. This scri
 uv run run_eval.py \
   --model_path outputs/qwen2-audio-slurp/checkpoint-XXXX \
   --test_file slurp/dataset/slurp/test.jsonl \
-  --max_samples 200 \
+  --batch_size 16 \
   --device cuda
 ```
 
-- `--model_path`: Path to the trained checkpoint or model directory.
+- `--model_path`: Path to the trained LoRA checkpoint or full model directory.
+- `--batch_size`: Inference batch size. For high-end GPUs like **NVIDIA H200**, a batch size of **16-32** is recommended for optimal throughput.
 - `--max_samples`: (Optional) Limit the number of samples for quick testing (Dry Run).
 - `--add_text_only`: Add this flag if evaluating a text-only model.
 
@@ -119,6 +120,7 @@ uv run train_qwen2_audio_slurp.py \
 | Option | Description |
 |--------|-------------|
 | `--add_text_only` | Use text transcripts only (no audio) |
+| `--batch_size` | Inference batch size (default: 1) |
 | `--use_all_recordings` | Use all recordings per utterance (default: best WER) |
 | `--no_include_transcript` | Remove transcript from prompt |
 | `--push_to_hub` | Push trained model to Hugging Face Hub |
