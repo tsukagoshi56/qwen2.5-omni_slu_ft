@@ -88,6 +88,22 @@ uv run train_qwen2_audio_slurp.py \
   --bf16
 ```
 
+## Evaluation
+
+Use `run_eval.py` to evaluate the trained model on the SLURP test set. This script performs inference and calculates SLU metrics (F1, SLU-F1).
+
+```bash
+uv run run_eval.py \
+  --model_path outputs/qwen2-audio-slurp/checkpoint-XXXX \
+  --test_file slurp/dataset/slurp/test.jsonl \
+  --max_samples 200 \
+  --device cuda
+```
+
+- `--model_path`: Path to the trained checkpoint or model directory.
+- `--max_samples`: (Optional) Limit the number of samples for quick testing (Dry Run).
+- `--add_text_only`: Add this flag if evaluating a text-only model.
+
 ### Speech-MASSIVE Dataset
 
 ```bash
