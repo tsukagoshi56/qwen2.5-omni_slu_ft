@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoProcessor, Trainer, TrainingArguments
+from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
 try:
     from transformers import Qwen2AudioForConditionalGeneration
@@ -455,6 +455,69 @@ class CollatorConfig:
     audio_sampling_rate: Optional[int]
 
 
+class SampleGenerationCallback(TrainerCallback):
+    """Callback to generate samples during training to monitor progress."""
+    def __init__(self, processor, items, debug_steps=100, num_samples=3):
+        self.processor = processor
+        self.items = items[:num_samples]
+        self.debug_steps = debug_steps
+        self.tokenizer = processor.tokenizer
+        
+    def on_log(self, args, state, control, model=None, **kwargs):
+        if state.global_step % self.debug_steps == 0:
+            print(f"\n[Debug Generation] Step {state.global_step}")
+            model.eval()
+            with torch.no_grad():
+                for i, item in enumerate(self.items):
+                    transcript = item.get("transcript", "")
+                    prompt_text = f"{PROMPT}\nTranscript: {transcript}"
+                    target = item.get("target")
+                    
+                    # Prepare input
+                    messages = [
+                        {"role": "user", "content": [{"type": "text", "text": prompt_text}]}
+                    ]
+                    # Note: omitting audio for simplicity in debug callback if text-only, 
+                    # but if we want to debug audio training we should include it.
+                    # Assuming text-only debug for now or handled by processor.
+                    if item.get("audio_path"):
+                        # If audio exists, we should use it
+                        # But loading audio during callback might be slow/complex if not batched.
+                        pass
+
+                    text = self.processor.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                    
+                    inputs = self.processor(
+                        text=[text],
+                        return_tensors="pt",
+                        padding=True
+                    ).to(model.device)
+                    
+                    generated_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=128,
+                        do_sample=False
+                    )
+                    
+                    # Decode only the new tokens
+                    generated_ids = [
+                        output_ids[len(input_ids):] 
+                        for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
+                    ]
+                    response = self.processor.batch_decode(
+                        generated_ids, skip_special_tokens=True
+                    )[0]
+                    
+                    print(f"--- Sample {i+1} ---")
+                    print(f"Input: {transcript[:50]}...")
+                    print(f"Target: {target}")
+                    print(f"Pred:   {response}")
+            model.train()
+
+
+
 class Qwen2AudioCollator:
     def __init__(self, processor: AutoProcessor, config: CollatorConfig):
         self.processor = processor
@@ -620,6 +683,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
     )
     parser.add_argument("--push_to_hub", action="store_true", help="Push the trained model to the Hugging Face Hub.")
+    parser.add_argument("--debug_generation", action="store_true", help="Enable debug generation during training.")
+    parser.add_argument("--debug_generation_steps", type=int, default=5, help="Steps between debug generations.")
     return parser
 
 
@@ -798,6 +863,8 @@ def main() -> None:
     model_kwargs = {
         "torch_dtype": dtype,
         "trust_remote_code": True,
+        "_attn_implementation": "flash_attention_2",
+    }
     }
 
     model = MODEL_CLS.from_pretrained(
@@ -818,12 +885,25 @@ def main() -> None:
     eval_strategy = "steps" if eval_dataset else "no"
     training_args = make_training_arguments(args, eval_strategy)
 
+    trainer_callbacks = []
+    if args.debug_generation:
+        # Use eval items if available, else train items
+        debug_items = eval_items if eval_items else train_items
+        trainer_callbacks.append(
+            SampleGenerationCallback(
+                processor, 
+                debug_items, 
+                debug_steps=args.debug_generation_steps
+            )
+        )
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
+        callbacks=trainer_callbacks,
     )
     trainer.train()
     trainer.save_model(args.output_dir)
