@@ -716,12 +716,17 @@ def main() -> None:
         )
         if args.max_train_samples:
             train_items = train_items[: args.max_train_samples]
+        
+        print(f"Num train items: {len(train_items)}")
+        
         if os.path.exists(eval_path):
             eval_items = build_items(
                 eval_path, audio_dir, args.use_all_recordings, args.add_text_only
             )
             if args.max_eval_samples:
                 eval_items = eval_items[: args.max_eval_samples]
+            print(f"Num eval items: {len(eval_items)}")
+        
         train_dataset = SlurpDataset(train_items)
         eval_dataset = SlurpDataset(eval_items) if eval_items else None
     else:
