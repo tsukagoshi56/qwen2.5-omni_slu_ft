@@ -565,9 +565,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data_dir", default="slurp/dataset/slurp")
     parser.add_argument("--audio_dir", default="slurp/audio")
     parser.add_argument("--slurp_root", default=None)
-    parser.add_argument("--slurp_repo_url", default="https://github.com/pswietojanski/slurp")
-    parser.add_argument("--download_slurp", action="store_true", default=True)
-    parser.add_argument("--no_download_slurp", action="store_false", dest="download_slurp")
+    parser.add_argument(
+        "--download_slurp",
+        action="store_true",
+        default=False,
+        help="Force download/clone of SLURP repository. If not specified and dataset missing, will try to download.",
+    )
+    parser.add_argument(
+        "--no_download_slurp",
+        action="store_false",
+        dest="download_slurp",
+        help="Do not download SLURP repository (deprecated).",
+    )
     parser.add_argument("--download_audio", action="store_true", default=False)
     parser.add_argument("--massive_dataset_name", default="FBK-MT/Speech-MASSIVE")
     parser.add_argument("--massive_dataset_config", default="fr-FR")
@@ -676,10 +685,20 @@ def main() -> None:
     eval_items: List[Dict[str, Any]] = []
     if args.dataset == "slurp":
         slurp_root = resolve_slurp_root(args.data_dir, args.audio_dir, args.slurp_root)
-        ensure_slurp_repo(slurp_root, args.slurp_repo_url, args.download_slurp)
+        
+        # Check if dataset exists, if not, try to download (clone)
+        dataset_path = os.path.join(slurp_root, "dataset", "slurp")
+        should_download = args.download_slurp or not os.path.exists(dataset_path)
+        
+        if should_download and not os.path.exists(dataset_path):
+            print(f"SLURP dataset not found at {dataset_path}. Downloading...")
+        
+        ensure_slurp_repo(slurp_root, args.slurp_repo_url, download=should_download)
 
         data_dir = resolve_data_dir(slurp_root, os.path.abspath(args.data_dir))
         audio_dir = os.path.abspath(args.audio_dir)
+        
+        # Check if audio exists, if not and download is requested (or force check)
         if not args.add_text_only:
             audio_dir = ensure_audio(slurp_root, audio_dir, args.download_audio)
 
