@@ -49,7 +49,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading")
     parser.add_argument("--add_text_only", action="store_true", help="Use text transcript instead of audio")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--use_flash_attn", action="store_true", default=True, help="Use Flash Attention 2 if available")
+    parser.add_argument("--use_flash_attn", action="store_true", default=False, help="Use Flash Attention 2 if available")
     
     args = parser.parse_args()
     
