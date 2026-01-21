@@ -369,6 +369,7 @@ def build_items(
                 continue
             items.append(
                 {
+                    "slurp_id": record.get("slurp_id"),
                     "audio_path": audio_path,
                     "transcript": transcript,
                     "target": target,
@@ -377,6 +378,7 @@ def build_items(
         if add_text_only:
             items.append(
                 {
+                    "slurp_id": record.get("slurp_id"),
                     "audio_path": None,
                     "transcript": transcript,
                     "target": target,
