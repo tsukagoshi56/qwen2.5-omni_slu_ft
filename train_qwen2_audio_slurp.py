@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import os
 import random
@@ -22,11 +23,7 @@ except Exception:
 
     MODEL_CLS = AutoModelForCausalLM
 
-PROMPT = (
-    "Extract scenario, action, and entities (empty list if none) and "
-    "return a single-line JSON: {\"scenario\": \"<string>\", \"action\": "
-    "\"<string>\", \"entities\": [{\"<entity_type>\": \"<entity_value>\"}, ...]}"
-)
+PROMPT = 'Extract scenario, action, and entities (empty list if none) and return a single-line JSON: {"scenario": "<string>", "action": "<string>", "entities": [{"<entity_type>": "<entity_value>"}, ...]}'
 
 
 def set_seed(seed: int) -> None:
@@ -584,6 +581,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def make_training_arguments(
+    args: argparse.Namespace, eval_strategy: str
+) -> TrainingArguments:
+    kwargs = {
+        "output_dir": args.output_dir,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "num_train_epochs": args.num_train_epochs,
+        "max_steps": args.max_steps if args.max_steps > 0 else -1,
+        "warmup_ratio": args.warmup_ratio,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "eval_steps": args.eval_steps,
+        "save_total_limit": 2,
+        "fp16": args.fp16,
+        "bf16": args.bf16,
+        "report_to": "none",
+        "remove_unused_columns": False,
+        "dataloader_num_workers": 2,
+    }
+
+    params = inspect.signature(TrainingArguments.__init__).parameters
+    if "evaluation_strategy" in params:
+        kwargs["evaluation_strategy"] = eval_strategy
+    elif "eval_strategy" in params:
+        kwargs["eval_strategy"] = eval_strategy
+
+    return TrainingArguments(**kwargs)
+
+
 def maybe_apply_lora(model: torch.nn.Module, args: argparse.Namespace) -> torch.nn.Module:
     if not args.use_lora:
         return model
@@ -721,26 +750,7 @@ def main() -> None:
     )
 
     eval_strategy = "steps" if eval_dataset else "no"
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        num_train_epochs=args.num_train_epochs,
-        max_steps=args.max_steps if args.max_steps > 0 else -1,
-        warmup_ratio=args.warmup_ratio,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        evaluation_strategy=eval_strategy,
-        save_total_limit=2,
-        fp16=args.fp16,
-        bf16=args.bf16,
-        report_to="none",
-        remove_unused_columns=False,
-        dataloader_num_workers=2,
-    )
+    training_args = make_training_arguments(args, eval_strategy)
 
     trainer = Trainer(
         model=model,
