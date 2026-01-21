@@ -1,0 +1,23 @@
+[project]
+name = "qwen2-audio-slurp"
+version = "0.1.0"
+description = "Finetuning Qwen2-Audio on SLURP dataset"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "transformers>=4.40.0",
+    "peft>=0.10.0",
+    "soundfile>=0.12.0",
+    "librosa>=0.10.0",
+    "accelerate>=0.29.0",
+    "datasets>=2.18.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "black",
+    "isort",
+    "flake8",
+]
