@@ -462,10 +462,11 @@ class SampleGenerationCallback(TrainerCallback):
         self.items = items[:num_samples]
         self.debug_steps = debug_steps
         self.tokenizer = processor.tokenizer
+        print(f"SampleGenerationCallback initialized with {len(self.items)} samples. Debug steps: {self.debug_steps}", flush=True)
         
     def on_step_end(self, args, state, control, model=None, **kwargs):
-        if state.global_step % self.debug_steps == 0:
-            print(f"\n[Debug Generation] Step {state.global_step}")
+        if state.global_step > 0 and state.global_step % self.debug_steps == 0:
+            print(f"\n[Debug Generation] Step {state.global_step}", flush=True)
             model.eval()
             with torch.no_grad():
                 for i, item in enumerate(self.items):
@@ -510,10 +511,10 @@ class SampleGenerationCallback(TrainerCallback):
                         generated_ids, skip_special_tokens=True
                     )[0]
                     
-                    print(f"--- Sample {i+1} ---")
-                    print(f"Input: {transcript[:50]}...")
-                    print(f"Target: {target}")
-                    print(f"Pred:   {response}")
+                    print(f"--- Sample {i+1} ---", flush=True)
+                    print(f"Input: {transcript[:50]}...", flush=True)
+                    print(f"Target: {target}", flush=True)
+                    print(f"Pred:   {response}", flush=True)
             model.train()
 
 
