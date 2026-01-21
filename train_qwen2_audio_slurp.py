@@ -513,7 +513,25 @@ class Qwen2AudioCollator:
             features.append(feature)
             labels.append(label_ids)
 
-        batch_out = self.processor.pad(features, padding=True, return_tensors="pt")
+        # Separate text and audio
+        text_features = [
+            {k: v for k, v in f.items() if k in ["input_ids", "attention_mask"]}
+            for f in features
+        ]
+        batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
+
+        if "input_features" in features[0]:
+            audio_features = [{"input_features": f["input_features"]} for f in features]
+            if hasattr(self.processor.feature_extractor, "pad"):
+                audio_out = self.processor.feature_extractor.pad(
+                    audio_features, padding=True, return_tensors="pt"
+                )
+                batch_out["input_features"] = audio_out["input_features"]
+                if "feature_attention_mask" in audio_out:
+                    batch_out["feature_attention_mask"] = audio_out["feature_attention_mask"]
+            else:
+                batch_out["input_features"] = torch.stack([f["input_features"] for f in features])
+
         max_len = batch_out["input_ids"].shape[1]
         label_batch = torch.full((len(labels), max_len), -100, dtype=torch.long)
         for i, label_ids in enumerate(labels):
