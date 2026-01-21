@@ -54,25 +54,67 @@ def main():
     # Load Processor and Model
     logger.info(f"Loading model from {args.model_path}...")
     
-    processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+    # Check if it's a PEFT adapter
+    is_adapter = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
     
-    # Load model directly without AutoConfig to avoid "unrecognized model" error
-    try:
-        model = Qwen2AudioForConditionalGeneration.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16, 
-            device_map=args.device,
-            trust_remote_code=True
-        )
-    except Exception as e:
-        logger.info(f"Qwen2AudioForConditionalGeneration failed: {e}")
-        logger.info("Falling back to AutoModelForCausalLM")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_path, 
-            torch_dtype=torch.bfloat16, 
-            device_map=args.device,
-            trust_remote_code=True
-        )
+    if is_adapter:
+        try:
+            from peft import PeftConfig, PeftModel
+            peft_config = PeftConfig.from_pretrained(args.model_path)
+            base_model_path = peft_config.base_model_name_or_path
+            logger.info(f"Detected LoRA adapter. Base model: {base_model_path}")
+            
+            # Load processor (prefer adapter path, fallback to base)
+            try:
+                processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+            except Exception:
+                logger.info(f"Failed to load processor from {args.model_path}, trying base model {base_model_path}")
+                processor = AutoProcessor.from_pretrained(base_model_path, trust_remote_code=True)
+            
+            # Load base model
+            try:
+                model = Qwen2AudioForConditionalGeneration.from_pretrained(
+                    base_model_path,
+                    torch_dtype=torch.bfloat16,
+                    device_map=args.device,
+                    trust_remote_code=True
+                )
+            except Exception as e:
+                logger.info(f"Qwen2AudioForConditionalGeneration failed for base model: {e}")
+                model = AutoModelForCausalLM.from_pretrained(
+                    base_model_path,
+                    torch_dtype=torch.bfloat16,
+                    device_map=args.device,
+                    trust_remote_code=True
+                )
+                
+            # Load adapter
+            logger.info(f"Loading LoRA adapter from {args.model_path}...")
+            model = PeftModel.from_pretrained(model, args.model_path)
+            logger.info("LoRA adapter loaded successfully.")
+            
+        except ImportError:
+            logger.error("peft is required to load LoRA adapters. Please install it with 'pip install peft'.")
+            raise
+    else:
+        # Standard loading logic
+        processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+        try:
+            model = Qwen2AudioForConditionalGeneration.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16, 
+                device_map=args.device,
+                trust_remote_code=True
+            )
+        except Exception as e:
+            logger.info(f"Qwen2AudioForConditionalGeneration failed: {e}")
+            logger.info("Falling back to AutoModelForCausalLM")
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_path, 
+                torch_dtype=torch.bfloat16, 
+                device_map=args.device,
+                trust_remote_code=True
+            )
 
     # Load Dataset
     logger.info(f"Loading dataset from {args.test_file}...")
