@@ -463,7 +463,7 @@ class SampleGenerationCallback(TrainerCallback):
         self.debug_steps = debug_steps
         self.tokenizer = processor.tokenizer
         
-    def on_log(self, args, state, control, model=None, **kwargs):
+    def on_step_end(self, args, state, control, model=None, **kwargs):
         if state.global_step % self.debug_steps == 0:
             print(f"\n[Debug Generation] Step {state.global_step}")
             model.eval()
