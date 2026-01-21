@@ -25,12 +25,37 @@ logger = logging.getLogger(__name__)
 def extract_json(text: str) -> dict:
     """Extract JSON object from the model output."""
     try:
-        # Look for the JSON part starting with '{'
+        # 1. Try standard JSON extraction
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1:
             json_str = text[start : end + 1]
             return json.loads(json_str)
+    except json.JSONDecodeError:
+        # Fallback to repair or regex if standard parsing fails
+        import re
+        try:
+            # Common error: keys without quotes? (e.g. {scenario: "foo"})
+            # Or missing commas. 
+            # For now, let's try a simple regex to capture the main fields if JSON fails
+            scenario_match = re.search(r'"scenario":\s*"([^"]+)"', text)
+            action_match = re.search(r'"action":\s*"([^"]+)"', text)
+            
+            # If standard key-value pairs aren't found, try looser regex
+            if not scenario_match:
+                 scenario_match = re.search(r'scenario\W+([a-zA-Z_]+)', text)
+            if not action_match:
+                 action_match = re.search(r'action\W+([a-zA-Z_]+)', text)
+
+            scenario = scenario_match.group(1) if scenario_match else "none"
+            action = action_match.group(1) if action_match else "none"
+            
+            # Entities are harder to parse with regex, return empty list for safety on fallback
+            return {"scenario": scenario, "action": action, "entities": []}
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse JSON (fallback also failed): {e} | Text: {text}")
+
     except Exception as e:
         logger.warning(f"Failed to parse JSON: {e} | Text: {text}")
     
@@ -42,7 +67,8 @@ def main():
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model or checkpoint")
     parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl", help="Path to test data (jsonl)")
     parser.add_argument("--audio_dir", type=str, default="slurp/audio", help="Path to audio directory")
-    parser.add_argument("--output_file", type=str, default="predictions.jsonl", help="Output predictions file")
+    parser.add_argument("--output_dir", type=str, default="inference_outputs", help="Base directory for output predictions")
+    parser.add_argument("--output_file", type=str, default=None, help="Specific output filename (optional, overrides auto-naming)")
     parser.add_argument("--gold_file", type=str, default=None, help="Path to gold file for evaluation script (defaults to test_file)")
     parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples (for dry run)")
     parser.add_argument("--batch_size", type=int, default=1, help="Inference batch size")
@@ -55,6 +81,17 @@ def main():
     
     # Load Processor and Model
     logger.info(f"Loading model from {args.model_path}...")
+
+    # Determine Output Path
+    model_name = os.path.basename(os.path.normpath(args.model_path))
+    if args.output_file:
+        output_file = args.output_file
+    else:
+        output_dir = os.path.join(args.output_dir, model_name)
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, "predictions.jsonl")
+    
+    logger.info(f"Predictions will be saved to: {output_file}")
     
     # Check if it's a PEFT adapter
     is_adapter = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
@@ -155,7 +192,11 @@ def main():
             
             for item in batch:
                 transcript = item.get("transcript", "")
-                prompt_text = f"{PROMPT}\nTranscript: {transcript}" if self.add_text_only else PROMPT
+                transcript = item.get("transcript", "")
+                # Always include transcript in prompt to match training distribution, unless specifically not wanted?
+                # The training script (train_qwen2_audio_slurp.py) creates PROMPT + "\nTranscript: " + transcript if include_transcript is True (default).
+                # So we should mirror that here.
+                prompt_text = f"{PROMPT}\nTranscript: {transcript}"
                 
                 content = []
                 if not self.add_text_only:
@@ -219,8 +260,8 @@ def main():
             predictions.append(pred_entry)
             
     # Save predictions
-    logger.info(f"Saving predictions to {args.output_file}...")
-    with open(args.output_file, "w") as f:
+    logger.info(f"Saving predictions to {output_file}...")
+    with open(output_file, "w") as f:
         for p in predictions:
             f.write(json.dumps(p) + "\n")
             
@@ -233,7 +274,7 @@ def main():
     eval_cmd = [
         "python", "slurp/scripts/evaluation/evaluate.py",
         "--gold-data", gold_file,
-        "--prediction-file", args.output_file,
+        "--prediction-file", output_file,
         "--load-gold"
     ]
     
