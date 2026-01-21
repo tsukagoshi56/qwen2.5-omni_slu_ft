@@ -1,97 +1,114 @@
 # Qwen2-Audio SLURP Finetune
 
-This repo contains a training script to finetune Qwen2-Audio on SLURP or
-Speech-MASSIVE with the
-prompt:
-
-"""
-Extract scenario, action, and entities (empty list if none) and
-return a single-line JSON: {"scenario": "<string>", "action":
-"<string>", "entities": [{"<entity_type>": "<entity_value>"}, ...]}
-"""
-
-The script can automatically download the SLURP repo and (optionally) the audio.
-Speech-MASSIVE is loaded from Hugging Face datasets.
+Finetune Qwen2-Audio on SLURP or Speech-MASSIVE for Spoken Language Understanding.
 
 ## Requirements
 
 - Python 3.10+ (recommended: 3.11)
-- macOS/Linux with enough disk space (audio is ~6GB)
-- Access to Hugging Face to download Qwen2-Audio weights
+- ~10GB disk space for full SLURP audio (~4GB for real-only)
+- GPU with sufficient VRAM for Qwen2-Audio-7B
 
-## Setup (uv)
+## Quick Setup
 
 ```bash
-# Install uv if needed
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# 1. Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Linux/macOS
+# or: .venv\Scripts\activate  # Windows
 
-# Create venv
-~/.local/bin/uv venv --python 3.11 .venv
+# 2. Install dependencies
+pip install torch torchaudio transformers peft soundfile librosa accelerate datasets
 
-# Install dependencies
-~/.local/bin/uv pip install --python .venv \
-  torch torchaudio transformers peft soundfile librosa accelerate datasets
+# 3. Login to Hugging Face (for model access)
+huggingface-cli login
 ```
 
-## Quick Start (text-only dry run)
+## Data Preparation
 
-This runs on a very small subset without audio.
+The training script requires SLURP audio data. Use `prepare_data.py` to download and extract:
 
 ```bash
-.venv/bin/python train_qwen2_audio_slurp.py \
+# Download and extract all audio (~10GB total)
+python prepare_data.py
+
+# Or download only slurp_real (~4GB, recommended for testing)
+python prepare_data.py --real-only
+
+# If tar files already downloaded, just extract
+python prepare_data.py --skip-download
+
+# Validate existing data
+python prepare_data.py --validate-only
+```
+
+After preparation, you should have:
+```
+slurp/
+├── audio/
+│   ├── slurp_real/      # Real recordings (~4GB)
+│   │   └── *.flac
+│   └── slurp_synth/     # Synthetic recordings (~6GB)
+│       └── *.flac
+└── dataset/
+    └── slurp/
+        ├── train.jsonl
+        ├── devel.jsonl
+        └── test.jsonl
+```
+
+## Training
+
+### Text-only Dry Run (no audio required)
+
+```bash
+python train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --add_text_only \
   --max_train_samples 4 \
-  --max_eval_samples 2 \
   --max_steps 1 \
-  --per_device_train_batch_size 1 \
-  --per_device_eval_batch_size 1 \
-  --gradient_accumulation_steps 1 \
-  --logging_steps 1 \
-  --save_steps 1 \
-  --eval_steps 1 \
-  --max_length 512
+  --output_dir outputs/dry-run
 ```
 
-## Full Training (audio + text)
-
-This will download the SLURP repo and audio if missing.
+### Full Training with Audio
 
 ```bash
-.venv/bin/python train_qwen2_audio_slurp.py \
+python train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
-  --download_audio \
   --output_dir outputs/qwen2-audio-slurp \
   --bf16
 ```
 
-## Speech-MASSIVE (audio + text)
-
-Speech-MASSIVE uses intent and slot labels from MASSIVE.
-We map `scenario_str` -> `scenario`, `intent_str` -> `action`, and slot labels
-to `entities`.
+### Speech-MASSIVE Dataset
 
 ```bash
-.venv/bin/python train_qwen2_audio_slurp.py \
+python train_qwen2_audio_slurp.py \
   --dataset speech_massive \
   --massive_dataset_config fr-FR \
   --massive_train_split train_115 \
-  --massive_eval_split validation
+  --output_dir outputs/speech-massive
 ```
 
-For full training data, use `fr-FR` or `de-DE` with `--massive_train_split train`.
+## Key Options
 
-## Notes
+| Option | Description |
+|--------|-------------|
+| `--add_text_only` | Use text transcripts only (no audio) |
+| `--use_all_recordings` | Use all recordings per utterance (default: best WER) |
+| `--no_include_transcript` | Remove transcript from prompt |
+| `--push_to_hub` | Push trained model to Hugging Face Hub |
+| `--bf16` / `--fp16` | Use mixed precision training |
+| `--use_lora` / `--no_lora` | Enable/disable LoRA (default: enabled) |
 
-- Use `--dataset slurp` (default) or `--dataset speech_massive`.
-- `--download_slurp` is ON by default. Use `--no_download_slurp` to disable.
-- Audio download is large; use `--download_audio` when you want it.
-- If you are not authenticated with Hugging Face, run `huggingface-cli login`.
-- The script looks for audio under `slurp/audio/` with `slurp_real/` and
-  `slurp_synth/` subfolders.
-- By default the prompt also includes the transcript (`Transcript: ...`).
-  Use `--no_include_transcript` to remove it.
+## Output Format
 
-## Outputs
+The model outputs JSON with scenario, action, and entities:
 
-- Model checkpoints are written to `outputs/qwen2-audio-slurp` by default.
+```json
+{"scenario": "alarm", "action": "set", "entities": [{"time": "eight o'clock"}]}
+```
+
+## License
+
+- Training code: MIT
+- SLURP text data: CC BY 4.0
+- SLURP audio data: CC BY-NC 4.0
