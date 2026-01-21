@@ -78,6 +78,7 @@ def main():
     parser.add_argument("--use_flash_attn", action="store_true", default=False, help="Use Flash Attention 2 if available")
     parser.add_argument("--debug", action="store_true", default=False, help="Print raw model output for first N samples")
     parser.add_argument("--debug_count", type=int, default=5, help="Number of samples to show in debug mode")
+    parser.add_argument("--max_new_tokens", type=int, default=256, help="Maximum new tokens to generate (increase if output is truncated)")
     
     args = parser.parse_args()
     
@@ -242,7 +243,7 @@ def main():
         
         # Generate for the whole batch
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+            generated_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens, do_sample=False)
         
         # Decode
         generated_ids = generated_ids[:, inputs.input_ids.size(1):]
