@@ -827,7 +827,17 @@ def main() -> None:
     trainer.save_model(args.output_dir)
     
     # Explicitly save config and processor to ensure checkpoint is complete
-    model.config.save_pretrained(args.output_dir)
+    # When using LoRA/PEFT, model is wrapped in PeftModel, so we need to get base model's config
+    try:
+        from peft import PeftModel
+        if isinstance(model, PeftModel):
+            base_config = model.get_base_model().config
+        else:
+            base_config = model.config
+    except ImportError:
+        base_config = model.config
+    
+    base_config.save_pretrained(args.output_dir)
     processor.save_pretrained(args.output_dir)
 
 
