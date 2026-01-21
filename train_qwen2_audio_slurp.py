@@ -865,7 +865,7 @@ def main() -> None:
         "trust_remote_code": True,
         "_attn_implementation": "flash_attention_2",
     }
-    }
+
 
     model = MODEL_CLS.from_pretrained(
         args.model_name_or_path, **model_kwargs
