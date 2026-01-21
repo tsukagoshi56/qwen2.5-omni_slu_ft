@@ -105,20 +105,15 @@ uv run run_eval.py \
 - `--max_samples`: (Optional) Limit the number of samples for quick testing (Dry Run).
 - `--add_text_only`: Add this flag if evaluating a text-only model.
 
-### Debug Mode (Troubleshooting)
+### Debugging Training Data
 
-If predictions are mostly "none" or unexpected, use debug mode to inspect raw model output:
+If you suspect issues with the training data format, use `debug_training_data.py` to inspect exactly what the model sees:
 
 ```bash
-uv run run_eval.py \
-  --model_path outputs/qwen2-text-slurp/checkpoint-4000 \
-  --test_file slurp/dataset/slurp/test.jsonl \
-  --add_text_only \
-  --max_samples 10 \
-  --debug
+uv run debug_training_data.py --add_text_only --num_samples 3
 ```
 
-This will print the first 5 samples' raw model output to help diagnose issues.
+This will output the prompt, raw data item, and the full processed text (input + target) for verification.
 
 ### Speech-MASSIVE Dataset
 
