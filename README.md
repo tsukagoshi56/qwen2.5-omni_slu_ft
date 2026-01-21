@@ -42,9 +42,7 @@ After preparation, you should have:
 ```
 slurp/
 ├── audio/
-│   ├── slurp_real/      # Real recordings (~4GB)
-│   │   └── *.flac
-│   └── slurp_synth/     # Synthetic recordings (~6GB)
+│   └── slurp_real/      # Real recordings (~4GB)
 │       └── *.flac
 └── dataset/
     └── slurp/

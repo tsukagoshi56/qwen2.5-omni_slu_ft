@@ -169,14 +169,12 @@ def has_audio(audio_dir: str) -> bool:
     # Check in audio_dir itself
     if os.path.isdir(os.path.join(audio_dir, "slurp_real")):
         return True
-    if os.path.isdir(os.path.join(audio_dir, "slurp_synth")):
-        return True
+    
     # Check in parent directory (slurp/slurp_real instead of slurp/audio/slurp_real)
     parent_dir = os.path.dirname(audio_dir)
     if os.path.isdir(os.path.join(parent_dir, "slurp_real")):
         return True
-    if os.path.isdir(os.path.join(parent_dir, "slurp_synth")):
-        return True
+    
     # Check for .flac files directly in audio_dir
     if os.path.isdir(audio_dir):
         for name in os.listdir(audio_dir):
@@ -223,10 +221,8 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     candidates = [
         os.path.join(audio_root, filename),
         os.path.join(audio_root, "slurp_real", filename),
-        os.path.join(audio_root, "slurp_synth", filename),
-        # Also check if slurp_real/slurp_synth are siblings to audio_root
+        # Also check if slurp_real is sibling to audio_root
         os.path.join(parent_dir, "slurp_real", filename),
-        os.path.join(parent_dir, "slurp_synth", filename),
     ]
     for path in candidates:
         if os.path.exists(path):
