@@ -594,11 +594,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_eval_samples", type=int, default=None)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=8)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
-    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=0)
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--save_steps", type=int, default=500)
@@ -609,6 +609,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_lora", action="store_true", default=True)
     parser.add_argument("--no_lora", action="store_false", dest="use_lora")
+    parser.add_argument("--use_flash_attention_2", action="store_true", help="Use Flash Attention 2")
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
@@ -788,8 +789,15 @@ def main() -> None:
     elif args.fp16:
         dtype = torch.float16
 
+    model_kwargs = {
+        "torch_dtype": dtype,
+        "trust_remote_code": True,
+    }
+    if args.use_flash_attention_2:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+
     model = MODEL_CLS.from_pretrained(
-        args.model_name_or_path, torch_dtype=dtype, trust_remote_code=True
+        args.model_name_or_path, **model_kwargs
     )
     model.config.use_cache = False
     model = maybe_apply_lora(model, args)

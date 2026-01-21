@@ -93,6 +93,7 @@ uv run train_qwen2_audio_slurp.py \
 | `--push_to_hub` | Push trained model to Hugging Face Hub |
 | `--bf16` / `--fp16` | Use mixed precision training |
 | `--use_lora` / `--no_lora` | Enable/disable LoRA (default: enabled) |
+| `--use_flash_attention_2` | Enable Flash Attention 2 (recommended for H100/H200) |
 
 ## Output Format
 
