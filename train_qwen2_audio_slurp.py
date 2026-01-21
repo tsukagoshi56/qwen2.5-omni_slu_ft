@@ -825,6 +825,10 @@ def main() -> None:
     )
     trainer.train()
     trainer.save_model(args.output_dir)
+    
+    # Explicitly save config and processor to ensure checkpoint is complete
+    model.config.save_pretrained(args.output_dir)
+    processor.save_pretrained(args.output_dir)
 
 
 if __name__ == "__main__":
