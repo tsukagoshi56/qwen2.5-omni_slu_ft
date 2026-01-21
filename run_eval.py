@@ -51,19 +51,38 @@ def main():
     
     args = parser.parse_args()
     
-    # Load Model and Processor
+    # Load Config and Processor
     logger.info(f"Loading model from {args.model_path}...")
+    try:
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+        if not hasattr(config, "model_type") and not config.model_type:
+            logger.warning("Config is missing 'model_type'. Setting it to 'qwen2_audio'.")
+            config.model_type = "qwen2_audio"
+    except Exception as e:
+        logger.warning(f"Failed to load config directly: {e}. Proceeding with standard load.")
+        config = None
+
     processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
     
     try:
-        model = Qwen2AudioForConditionalGeneration.from_pretrained(
-            args.model_path, 
-            torch_dtype=torch.bfloat16, 
-            device_map=args.device,
-            trust_remote_code=True
-        )
-    except Exception:
-        logger.info("Falling back to AutoModelForCausalLM")
+        if config:
+            model = Qwen2AudioForConditionalGeneration.from_pretrained(
+                args.model_path,
+                config=config, 
+                torch_dtype=torch.bfloat16, 
+                device_map=args.device,
+                trust_remote_code=True
+            )
+        else:
+            model = Qwen2AudioForConditionalGeneration.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16, 
+                device_map=args.device,
+                trust_remote_code=True
+            )
+    except Exception as e:
+        logger.info(f"Falling back to AutoModelForCausalLM due to: {e}")
         model = AutoModelForCausalLM.from_pretrained(
             args.model_path, 
             torch_dtype=torch.bfloat16, 
