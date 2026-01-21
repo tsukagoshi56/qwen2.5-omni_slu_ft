@@ -70,7 +70,21 @@ uv run train_qwen2_audio_slurp.py \
 uv run train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --output_dir outputs/qwen2-audio-slurp \
-  --bf16
+  --bf16 \
+  --use_flash_attention_2
+```
+
+### Text-only Training (Gold Transcript)
+
+Train using only the text transcripts (Gold Text). No audio files required.
+
+```bash
+uv run train_qwen2_audio_slurp.py \
+  --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
+  --add_text_only \
+  --output_dir outputs/qwen2-text-slurp \
+  --bf16 \
+  --use_flash_attention_2
 ```
 
 ### Speech-MASSIVE Dataset
