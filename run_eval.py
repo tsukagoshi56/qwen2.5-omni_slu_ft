@@ -76,6 +76,8 @@ def main():
     parser.add_argument("--add_text_only", action="store_true", help="Use text transcript instead of audio")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use_flash_attn", action="store_true", default=False, help="Use Flash Attention 2 if available")
+    parser.add_argument("--debug", action="store_true", default=False, help="Print raw model output for first N samples")
+    parser.add_argument("--debug_count", type=int, default=5, help="Number of samples to show in debug mode")
     
     args = parser.parse_args()
     
@@ -248,6 +250,13 @@ def main():
         
         # Parse and collect predictions
         for item, response_text in zip(batch_items, responses):
+            # Debug mode: print raw output for first N samples
+            if args.debug and len(predictions) < args.debug_count:
+                logger.info(f"=== DEBUG Sample {len(predictions)+1} ===")
+                logger.info(f"Transcript: {item.get('transcript', 'N/A')[:100]}...")
+                logger.info(f"Raw Model Output: {response_text}")
+                logger.info("=" * 40)
+            
             parsed = extract_json(response_text)
             
             pred_entry = {
