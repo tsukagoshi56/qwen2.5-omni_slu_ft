@@ -1,6 +1,7 @@
 # Qwen2-Audio SLURP Finetune
 
-This repo contains a training script to finetune Qwen2-Audio on SLURP with the
+This repo contains a training script to finetune Qwen2-Audio on SLURP or
+Speech-MASSIVE with the
 prompt:
 
 """
@@ -10,6 +11,7 @@ return a single-line JSON: {"scenario": "<string>", "action":
 """
 
 The script can automatically download the SLURP repo and (optionally) the audio.
+Speech-MASSIVE is loaded from Hugging Face datasets.
 
 ## Requirements
 
@@ -28,7 +30,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Install dependencies
 ~/.local/bin/uv pip install --python .venv \
-  torch torchaudio transformers peft soundfile librosa accelerate
+  torch torchaudio transformers peft soundfile librosa accelerate datasets
 ```
 
 ## Quick Start (text-only dry run)
@@ -63,8 +65,25 @@ This will download the SLURP repo and audio if missing.
   --bf16
 ```
 
+## Speech-MASSIVE (audio + text)
+
+Speech-MASSIVE uses intent and slot labels from MASSIVE.
+We map `scenario_str` -> `scenario`, `intent_str` -> `action`, and slot labels
+to `entities`.
+
+```bash
+.venv/bin/python train_qwen2_audio_slurp.py \
+  --dataset speech_massive \
+  --massive_dataset_config fr-FR \
+  --massive_train_split train_115 \
+  --massive_eval_split validation
+```
+
+For full training data, use `fr-FR` or `de-DE` with `--massive_train_split train`.
+
 ## Notes
 
+- Use `--dataset slurp` (default) or `--dataset speech_massive`.
 - `--download_slurp` is ON by default. Use `--no_download_slurp` to disable.
 - Audio download is large; use `--download_audio` when you want it.
 - If you are not authenticated with Hugging Face, run `huggingface-cli login`.

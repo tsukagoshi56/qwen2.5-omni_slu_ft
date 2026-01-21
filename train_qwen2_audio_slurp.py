@@ -5,8 +5,9 @@ import random
 import shutil
 import subprocess
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch.utils.data import Dataset
@@ -69,6 +70,69 @@ def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
                     "Resample required but torchaudio/librosa not available."
                 ) from exc
     return audio
+
+
+def load_audio_input(
+    audio_input: Any, target_sr: Optional[int]
+) -> Optional[torch.Tensor]:
+    if audio_input is None:
+        return None
+    if isinstance(audio_input, str):
+        return load_audio(audio_input, target_sr)
+
+    if isinstance(audio_input, (tuple, list)) and len(audio_input) == 2:
+        audio, sr = audio_input
+        audio = torch.tensor(audio, dtype=torch.float32)
+        return resample_audio(audio, sr, target_sr)
+
+    if isinstance(audio_input, dict):
+        if "array" in audio_input:
+            audio = torch.tensor(audio_input["array"], dtype=torch.float32)
+            sr = audio_input.get("sampling_rate")
+            return resample_audio(audio, sr, target_sr)
+        if "bytes" in audio_input:
+            try:
+                import soundfile as sf
+
+                audio, sr = sf.read(BytesIO(audio_input["bytes"]))
+                if hasattr(audio, "ndim") and audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                audio = torch.tensor(audio, dtype=torch.float32)
+                return resample_audio(audio, sr, target_sr)
+            except Exception:
+                import torchaudio
+
+                audio, sr = torchaudio.load(BytesIO(audio_input["bytes"]))
+                if audio.dim() > 1:
+                    audio = audio.mean(dim=0)
+                return resample_audio(audio, sr, target_sr)
+        if "path" in audio_input and isinstance(audio_input["path"], str):
+            return load_audio(audio_input["path"], target_sr)
+
+    raise ValueError("Unsupported audio input type.")
+
+
+def resample_audio(
+    audio: torch.Tensor, sr: Optional[int], target_sr: Optional[int]
+) -> torch.Tensor:
+    if target_sr is None or sr is None or sr == target_sr:
+        return audio
+    try:
+        import torchaudio
+
+        return torchaudio.functional.resample(audio, sr, target_sr)
+    except Exception as exc:
+        try:
+            import librosa
+
+            return torch.tensor(
+                librosa.resample(audio.numpy(), orig_sr=sr, target_sr=target_sr),
+                dtype=torch.float32,
+            )
+        except Exception:
+            raise RuntimeError(
+                "Resample required but torchaudio/librosa not available."
+            ) from exc
 
 
 def resolve_slurp_root(
@@ -158,6 +222,81 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
         if os.path.exists(path):
             return path
     return None
+
+
+def build_massive_entities(
+    tokens: Sequence[str], labels: Sequence[str], outside_label: str
+) -> List[Dict[str, str]]:
+    entities: List[Dict[str, str]] = []
+    current_label: Optional[str] = None
+    current_tokens: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_label, current_tokens
+        if current_label and current_tokens:
+            entities.append({current_label: " ".join(current_tokens)})
+        current_label = None
+        current_tokens = []
+
+    for token, label in zip(tokens, labels):
+        if label in {outside_label, "O", "Other"}:
+            flush()
+            continue
+        if current_label and label != current_label:
+            flush()
+        current_label = label
+        current_tokens.append(token)
+
+    flush()
+    return entities
+
+
+def build_massive_target(
+    record: Dict[str, Any], outside_label: str
+) -> str:
+    scenario = record.get("scenario_str") or str(record.get("scenario", ""))
+    action = record.get("intent_str") or str(record.get("intent", ""))
+    tokens = record.get("tokens") or []
+    labels = record.get("labels") or []
+    entities = build_massive_entities(tokens, labels, outside_label)
+    payload = {
+        "scenario": scenario,
+        "action": action,
+        "entities": entities,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def load_speech_massive_split(
+    dataset_name: str,
+    dataset_config: str,
+    split: str,
+    cache_dir: Optional[str],
+) -> Any:
+    try:
+        from datasets import Audio, load_dataset
+    except Exception as exc:
+        raise RuntimeError("datasets is required for Speech-MASSIVE.") from exc
+
+    dataset = load_dataset(
+        dataset_name,
+        dataset_config,
+        split=split,
+        cache_dir=cache_dir,
+    )
+    if "audio" in dataset.column_names:
+        dataset = dataset.cast_column("audio", Audio(decode=False))
+    return dataset
+
+
+def combine_datasets(datasets_list: List[Any]) -> Any:
+    if len(datasets_list) == 1:
+        return datasets_list[0]
+    try:
+        from datasets import concatenate_datasets
+    except Exception as exc:
+        raise RuntimeError("datasets is required for Speech-MASSIVE.") from exc
+    return concatenate_datasets(datasets_list)
 
 
 def build_entities(tokens: List[Dict[str, Any]], entities: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -251,6 +390,54 @@ class SlurpDataset(Dataset):
         return self.items[idx]
 
 
+class SpeechMassiveDataset(Dataset):
+    def __init__(
+        self,
+        dataset: Any,
+        transcript_field: str,
+        outside_label: str,
+        add_text_only: bool,
+    ):
+        self.dataset = dataset
+        self.transcript_field = transcript_field
+        self.outside_label = outside_label
+        self.add_text_only = add_text_only
+
+    def __len__(self) -> int:
+        if self.add_text_only:
+            return len(self.dataset) * 2
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        if self.add_text_only:
+            base_idx = idx // 2
+            text_only = idx % 2 == 1
+        else:
+            base_idx = idx
+            text_only = False
+
+        record = self.dataset[base_idx]
+        transcript = (
+            record.get(self.transcript_field)
+            or record.get("utt")
+            or record.get("text")
+            or ""
+        )
+        target = build_massive_target(record, self.outside_label)
+        audio = None if text_only else record.get("audio")
+        audio_ref = None
+        if not text_only:
+            audio_ref = record.get("path")
+            if not audio_ref and isinstance(record.get("audio"), dict):
+                audio_ref = record["audio"].get("path")
+        return {
+            "audio": audio,
+            "audio_ref": audio_ref,
+            "transcript": transcript,
+            "target": target,
+        }
+
+
 @dataclass
 class CollatorConfig:
     include_transcript: bool
@@ -273,13 +460,21 @@ class Qwen2AudioCollator:
         labels: List[torch.Tensor] = []
         for item in batch:
             audio = None
-            if item["audio_path"]:
-                audio = load_audio(item["audio_path"], self.config.audio_sampling_rate)
+            audio_input = item.get("audio")
+            if audio_input is None:
+                audio_input = item.get("audio_path")
+            if audio_input:
+                audio = load_audio_input(audio_input, self.config.audio_sampling_rate)
 
             prompt_text = self.build_prompt(item["transcript"])
             user_content = []
             if audio is not None:
-                user_content.append({"type": "audio", "audio": item["audio_path"]})
+                audio_ref = item.get("audio_ref")
+                if not audio_ref and isinstance(audio_input, str):
+                    audio_ref = audio_input
+                if not audio_ref:
+                    audio_ref = "audio"
+                user_content.append({"type": "audio", "audio": audio_ref})
             user_content.append({"type": "text", "text": prompt_text})
 
             messages = [{"role": "user", "content": user_content}]
@@ -333,6 +528,12 @@ class Qwen2AudioCollator:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", default="Qwen/Qwen2-Audio-7B-Instruct")
+    parser.add_argument(
+        "--dataset",
+        choices=["slurp", "speech_massive"],
+        default="slurp",
+        help="Select dataset pipeline.",
+    )
     parser.add_argument("--data_dir", default="slurp/dataset/slurp")
     parser.add_argument("--audio_dir", default="slurp/audio")
     parser.add_argument("--slurp_root", default=None)
@@ -340,6 +541,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download_slurp", action="store_true", default=True)
     parser.add_argument("--no_download_slurp", action="store_false", dest="download_slurp")
     parser.add_argument("--download_audio", action="store_true", default=False)
+    parser.add_argument("--massive_dataset_name", default="FBK-MT/Speech-MASSIVE")
+    parser.add_argument("--massive_dataset_config", default="fr-FR")
+    parser.add_argument("--massive_train_split", default="train_115")
+    parser.add_argument("--massive_eval_split", default="validation")
+    parser.add_argument("--massive_cache_dir", default=None)
+    parser.add_argument("--massive_transcript_field", default="utt")
+    parser.add_argument("--massive_outside_label", default="Other")
     parser.add_argument("--train_file", default="train.jsonl")
     parser.add_argument("--eval_file", default="devel.jsonl")
     parser.add_argument("--output_dir", default="outputs/qwen2-audio-slurp")
@@ -403,35 +611,84 @@ def main() -> None:
     args = parser.parse_args()
     set_seed(args.seed)
 
-    slurp_root = resolve_slurp_root(args.data_dir, args.audio_dir, args.slurp_root)
-    ensure_slurp_repo(slurp_root, args.slurp_repo_url, args.download_slurp)
+    eval_items: List[Dict[str, Any]] = []
+    if args.dataset == "slurp":
+        slurp_root = resolve_slurp_root(args.data_dir, args.audio_dir, args.slurp_root)
+        ensure_slurp_repo(slurp_root, args.slurp_repo_url, args.download_slurp)
 
-    data_dir = resolve_data_dir(slurp_root, os.path.abspath(args.data_dir))
-    audio_dir = os.path.abspath(args.audio_dir)
-    if not args.add_text_only:
-        audio_dir = ensure_audio(slurp_root, audio_dir, args.download_audio)
+        data_dir = resolve_data_dir(slurp_root, os.path.abspath(args.data_dir))
+        audio_dir = os.path.abspath(args.audio_dir)
+        if not args.add_text_only:
+            audio_dir = ensure_audio(slurp_root, audio_dir, args.download_audio)
 
-    train_path = os.path.join(data_dir, args.train_file)
-    eval_path = os.path.join(data_dir, args.eval_file)
-    if not os.path.exists(train_path):
-        raise FileNotFoundError(f"Missing training file: {train_path}")
-    if not os.path.exists(audio_dir) and not args.add_text_only:
-        raise FileNotFoundError(
-            f"Missing audio directory: {audio_dir} (run scripts/download_audio.sh)"
+        train_path = os.path.join(data_dir, args.train_file)
+        eval_path = os.path.join(data_dir, args.eval_file)
+        if not os.path.exists(train_path):
+            raise FileNotFoundError(f"Missing training file: {train_path}")
+        if not os.path.exists(audio_dir) and not args.add_text_only:
+            raise FileNotFoundError(
+                f"Missing audio directory: {audio_dir} (run scripts/download_audio.sh)"
+            )
+
+        train_items = build_items(
+            train_path, audio_dir, args.use_all_recordings, args.add_text_only
         )
+        if args.max_train_samples:
+            train_items = train_items[: args.max_train_samples]
+        if os.path.exists(eval_path):
+            eval_items = build_items(
+                eval_path, audio_dir, args.use_all_recordings, args.add_text_only
+            )
+            if args.max_eval_samples:
+                eval_items = eval_items[: args.max_eval_samples]
+        train_dataset = SlurpDataset(train_items)
+        eval_dataset = SlurpDataset(eval_items) if eval_items else None
+    else:
+        configs = [
+            cfg.strip()
+            for cfg in args.massive_dataset_config.split(",")
+            if cfg.strip()
+        ]
+        train_datasets = [
+            load_speech_massive_split(
+                args.massive_dataset_name,
+                cfg,
+                args.massive_train_split,
+                args.massive_cache_dir,
+            )
+            for cfg in configs
+        ]
+        train_hf = combine_datasets(train_datasets)
+        if args.max_train_samples:
+            train_hf = train_hf.select(range(args.max_train_samples))
 
-    train_items = build_items(
-        train_path, audio_dir, args.use_all_recordings, args.add_text_only
-    )
-    if args.max_train_samples:
-        train_items = train_items[: args.max_train_samples]
-    eval_items = []
-    if os.path.exists(eval_path):
-        eval_items = build_items(
-            eval_path, audio_dir, args.use_all_recordings, args.add_text_only
+        eval_dataset = None
+        if args.massive_eval_split:
+            eval_datasets = [
+                load_speech_massive_split(
+                    args.massive_dataset_name,
+                    cfg,
+                    args.massive_eval_split,
+                    args.massive_cache_dir,
+                )
+                for cfg in configs
+            ]
+            eval_hf = combine_datasets(eval_datasets)
+            if args.max_eval_samples:
+                eval_hf = eval_hf.select(range(args.max_eval_samples))
+            eval_dataset = SpeechMassiveDataset(
+                eval_hf,
+                args.massive_transcript_field,
+                args.massive_outside_label,
+                args.add_text_only,
+            )
+
+        train_dataset = SpeechMassiveDataset(
+            train_hf,
+            args.massive_transcript_field,
+            args.massive_outside_label,
+            args.add_text_only,
         )
-        if args.max_eval_samples:
-            eval_items = eval_items[: args.max_eval_samples]
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     sampling_rate = None
@@ -453,9 +710,6 @@ def main() -> None:
     )
     model.config.use_cache = False
     model = maybe_apply_lora(model, args)
-
-    train_dataset = SlurpDataset(train_items)
-    eval_dataset = SlurpDataset(eval_items) if eval_items else None
 
     collator = Qwen2AudioCollator(
         processor,
