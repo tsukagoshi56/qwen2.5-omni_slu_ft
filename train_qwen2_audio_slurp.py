@@ -1,0 +1,503 @@
+import argparse
+import json
+import os
+import random
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import torch
+from torch.utils.data import Dataset
+from transformers import AutoProcessor, Trainer, TrainingArguments
+
+try:
+    from transformers import Qwen2AudioForConditionalGeneration
+
+    MODEL_CLS = Qwen2AudioForConditionalGeneration
+except Exception:
+    from transformers import AutoModelForCausalLM
+
+    MODEL_CLS = AutoModelForCausalLM
+
+PROMPT = (
+    "Extract scenario, action, and entities (empty list if none) and "
+    "return a single-line JSON: {\"scenario\": \"<string>\", \"action\": "
+    "\"<string>\", \"entities\": [{\"<entity_type>\": \"<entity_value>\"}, ...]}"
+)
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
+    try:
+        import soundfile as sf
+
+        audio, sr = sf.read(path)
+        if hasattr(audio, "ndim") and audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio = torch.tensor(audio, dtype=torch.float32)
+    except Exception:
+        import torchaudio
+
+        audio, sr = torchaudio.load(path)
+        if audio.dim() > 1:
+            audio = audio.mean(dim=0)
+    if target_sr is not None and sr != target_sr:
+        try:
+            import torchaudio
+
+            audio = torchaudio.functional.resample(audio, sr, target_sr)
+            sr = target_sr
+        except Exception as exc:
+            try:
+                import librosa
+
+                audio = torch.tensor(
+                    librosa.resample(audio.numpy(), orig_sr=sr, target_sr=target_sr),
+                    dtype=torch.float32,
+                )
+                sr = target_sr
+            except Exception:
+                raise RuntimeError(
+                    "Resample required but torchaudio/librosa not available."
+                ) from exc
+    return audio
+
+
+def resolve_slurp_root(
+    data_dir: str, audio_dir: str, slurp_root: Optional[str]
+) -> str:
+    if slurp_root:
+        return str(Path(slurp_root).resolve())
+
+    data_path = Path(data_dir).resolve()
+    if data_path.name == "slurp" and data_path.parent.name == "dataset":
+        return str(data_path.parent.parent)
+
+    audio_path = Path(audio_dir).resolve()
+    if audio_path.name == "audio":
+        return str(audio_path.parent)
+
+    return str(Path.cwd() / "slurp")
+
+
+def ensure_slurp_repo(slurp_root: str, repo_url: str, download_slurp: bool) -> None:
+    data_dir = os.path.join(slurp_root, "dataset", "slurp")
+    if os.path.exists(data_dir):
+        return
+    if not download_slurp:
+        raise FileNotFoundError(f"Missing SLURP data at {data_dir}.")
+    if os.path.exists(slurp_root) and os.listdir(slurp_root):
+        raise FileExistsError(
+            f"{slurp_root} exists but SLURP data is missing. "
+            "Set --slurp_root to an empty path or disable --download_slurp."
+        )
+    if shutil.which("git") is None:
+        raise RuntimeError("git is required to download the SLURP repository.")
+    subprocess.run(["git", "clone", repo_url, slurp_root], check=True)
+
+
+def has_audio(audio_dir: str) -> bool:
+    if os.path.isdir(os.path.join(audio_dir, "slurp_real")):
+        return True
+    if os.path.isdir(os.path.join(audio_dir, "slurp_synth")):
+        return True
+    if os.path.isdir(audio_dir):
+        for name in os.listdir(audio_dir):
+            if name.endswith(".flac"):
+                return True
+    return False
+
+
+def ensure_audio(slurp_root: str, audio_dir: str, download_audio: bool) -> str:
+    if has_audio(audio_dir):
+        return audio_dir
+    if not download_audio:
+        raise FileNotFoundError(
+            f"Missing audio directory: {audio_dir}. "
+            "Re-run with --download_audio or run slurp/scripts/download_audio.sh."
+        )
+    script_path = os.path.join(slurp_root, "scripts", "download_audio.sh")
+    if not os.path.exists(script_path):
+        raise FileNotFoundError(f"Missing download script: {script_path}")
+    subprocess.run(["bash", script_path], cwd=slurp_root, check=True)
+    default_audio_dir = os.path.join(slurp_root, "audio")
+    if audio_dir != default_audio_dir and has_audio(default_audio_dir):
+        return default_audio_dir
+    if not has_audio(audio_dir):
+        raise FileNotFoundError(
+            f"Audio download did not populate {audio_dir}. "
+            "Try setting --audio_dir to slurp/audio."
+        )
+    return audio_dir
+
+
+def resolve_data_dir(slurp_root: str, data_dir: str) -> str:
+    if os.path.exists(data_dir):
+        return data_dir
+    default_data = os.path.join(slurp_root, "dataset", "slurp")
+    if os.path.exists(default_data):
+        return default_data
+    return data_dir
+
+
+def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
+    candidates = [
+        os.path.join(audio_root, filename),
+        os.path.join(audio_root, "slurp_real", filename),
+        os.path.join(audio_root, "slurp_synth", filename),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def build_entities(tokens: List[Dict[str, Any]], entities: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    results: List[Dict[str, str]] = []
+    for ent in entities:
+        span = ent.get("span") or []
+        words = [tokens[i]["surface"] for i in span if i < len(tokens)]
+        value = " ".join(words)
+        results.append({ent["type"]: value})
+    return results
+
+
+def build_target(record: Dict[str, Any]) -> str:
+    entities = build_entities(record.get("tokens", []), record.get("entities", []))
+    payload = {
+        "scenario": record.get("scenario", ""),
+        "action": record.get("action", ""),
+        "entities": entities,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def select_recordings(
+    recordings: List[Dict[str, Any]], use_all: bool
+) -> List[Dict[str, Any]]:
+    if not recordings:
+        return []
+    correct = [r for r in recordings if r.get("status") == "correct"]
+    if use_all:
+        return correct or recordings
+    pool = correct or recordings
+
+    def wer_key(item: Dict[str, Any]) -> float:
+        wer = item.get("wer")
+        return wer if isinstance(wer, (int, float)) else 1e9
+
+    return [min(pool, key=wer_key)]
+
+
+def load_jsonl(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle]
+
+
+def build_items(
+    jsonl_path: str,
+    audio_root: str,
+    use_all_recordings: bool,
+    add_text_only: bool,
+) -> List[Dict[str, Any]]:
+    records = load_jsonl(jsonl_path)
+    items: List[Dict[str, Any]] = []
+    missing_audio = 0
+    for record in records:
+        target = build_target(record)
+        transcript = record.get("sentence", "")
+        recordings = select_recordings(record.get("recordings", []), use_all_recordings)
+        for rec in recordings:
+            audio_path = resolve_audio_path(audio_root, rec["file"])
+            if audio_path is None:
+                missing_audio += 1
+                continue
+            items.append(
+                {
+                    "audio_path": audio_path,
+                    "transcript": transcript,
+                    "target": target,
+                }
+            )
+        if add_text_only:
+            items.append(
+                {
+                    "audio_path": None,
+                    "transcript": transcript,
+                    "target": target,
+                }
+            )
+    if missing_audio:
+        print(f"Warning: {missing_audio} recordings missing from {audio_root}.")
+    return items
+
+
+class SlurpDataset(Dataset):
+    def __init__(self, items: List[Dict[str, Any]]):
+        self.items = items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.items[idx]
+
+
+@dataclass
+class CollatorConfig:
+    include_transcript: bool
+    max_length: int
+    audio_sampling_rate: Optional[int]
+
+
+class Qwen2AudioCollator:
+    def __init__(self, processor: AutoProcessor, config: CollatorConfig):
+        self.processor = processor
+        self.config = config
+
+    def build_prompt(self, transcript: str) -> str:
+        if self.config.include_transcript:
+            return f"{PROMPT}\nTranscript: {transcript}"
+        return PROMPT
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        features: List[Dict[str, torch.Tensor]] = []
+        labels: List[torch.Tensor] = []
+        for item in batch:
+            audio = None
+            if item["audio_path"]:
+                audio = load_audio(item["audio_path"], self.config.audio_sampling_rate)
+
+            prompt_text = self.build_prompt(item["transcript"])
+            user_content = []
+            if audio is not None:
+                user_content.append({"type": "audio", "audio": item["audio_path"]})
+            user_content.append({"type": "text", "text": prompt_text})
+
+            messages = [{"role": "user", "content": user_content}]
+            full_messages = messages + [
+                {"role": "assistant", "content": [{"type": "text", "text": item["target"]}]}
+            ]
+
+            prompt_text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            full_text = self.processor.apply_chat_template(
+                full_messages, tokenize=False, add_generation_prompt=False
+            )
+
+            call_kwargs = {
+                "return_tensors": "pt",
+                "truncation": True,
+                "max_length": self.config.max_length,
+            }
+            if audio is not None:
+                prompt_inputs = self.processor(text=prompt_text, audios=[audio], **call_kwargs)
+                full_inputs = self.processor(text=full_text, audios=[audio], **call_kwargs)
+            else:
+                prompt_inputs = self.processor(text=prompt_text, **call_kwargs)
+                full_inputs = self.processor(text=full_text, **call_kwargs)
+
+            prompt_len = prompt_inputs["input_ids"].shape[1]
+            full_ids = full_inputs["input_ids"].squeeze(0)
+            if prompt_len >= full_ids.shape[0]:
+                raise ValueError(
+                    "Prompt length exceeds or equals full sequence length. "
+                    "Increase max_length."
+                )
+
+            label_ids = full_ids.clone()
+            label_ids[:prompt_len] = -100
+
+            feature = {k: v.squeeze(0) for k, v in full_inputs.items()}
+            features.append(feature)
+            labels.append(label_ids)
+
+        batch_out = self.processor.pad(features, padding=True, return_tensors="pt")
+        max_len = batch_out["input_ids"].shape[1]
+        label_batch = torch.full((len(labels), max_len), -100, dtype=torch.long)
+        for i, label_ids in enumerate(labels):
+            label_batch[i, : label_ids.shape[0]] = label_ids
+        batch_out["labels"] = label_batch
+        return batch_out
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name_or_path", default="Qwen/Qwen2-Audio-7B-Instruct")
+    parser.add_argument("--data_dir", default="slurp/dataset/slurp")
+    parser.add_argument("--audio_dir", default="slurp/audio")
+    parser.add_argument("--slurp_root", default=None)
+    parser.add_argument("--slurp_repo_url", default="https://github.com/pswietojanski/slurp")
+    parser.add_argument("--download_slurp", action="store_true", default=True)
+    parser.add_argument("--no_download_slurp", action="store_false", dest="download_slurp")
+    parser.add_argument("--download_audio", action="store_true", default=False)
+    parser.add_argument("--train_file", default="train.jsonl")
+    parser.add_argument("--eval_file", default="devel.jsonl")
+    parser.add_argument("--output_dir", default="outputs/qwen2-audio-slurp")
+    parser.add_argument("--include_transcript", action="store_true", default=True)
+    parser.add_argument("--no_include_transcript", action="store_false", dest="include_transcript")
+    parser.add_argument("--add_text_only", action="store_true")
+    parser.add_argument("--use_all_recordings", action="store_true")
+    parser.add_argument("--max_length", type=int, default=2048)
+    parser.add_argument("--max_train_samples", type=int, default=None)
+    parser.add_argument("--max_eval_samples", type=int, default=None)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--learning_rate", type=float, default=2e-5)
+    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--max_steps", type=int, default=0)
+    parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument("--save_steps", type=int, default=500)
+    parser.add_argument("--eval_steps", type=int, default=500)
+    parser.add_argument("--warmup_ratio", type=float, default=0.03)
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--use_lora", action="store_true", default=True)
+    parser.add_argument("--no_lora", action="store_false", dest="use_lora")
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+    )
+    return parser
+
+
+def maybe_apply_lora(model: torch.nn.Module, args: argparse.Namespace) -> torch.nn.Module:
+    if not args.use_lora:
+        return model
+    try:
+        from peft import LoraConfig, get_peft_model
+    except Exception as exc:
+        raise RuntimeError("peft is required for --use_lora.") from exc
+
+    target_modules = [name.strip() for name in args.lora_target_modules.split(",") if name.strip()]
+    lora_config = LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=target_modules,
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+    return model
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    set_seed(args.seed)
+
+    slurp_root = resolve_slurp_root(args.data_dir, args.audio_dir, args.slurp_root)
+    ensure_slurp_repo(slurp_root, args.slurp_repo_url, args.download_slurp)
+
+    data_dir = resolve_data_dir(slurp_root, os.path.abspath(args.data_dir))
+    audio_dir = os.path.abspath(args.audio_dir)
+    if not args.add_text_only:
+        audio_dir = ensure_audio(slurp_root, audio_dir, args.download_audio)
+
+    train_path = os.path.join(data_dir, args.train_file)
+    eval_path = os.path.join(data_dir, args.eval_file)
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(f"Missing training file: {train_path}")
+    if not os.path.exists(audio_dir) and not args.add_text_only:
+        raise FileNotFoundError(
+            f"Missing audio directory: {audio_dir} (run scripts/download_audio.sh)"
+        )
+
+    train_items = build_items(
+        train_path, audio_dir, args.use_all_recordings, args.add_text_only
+    )
+    if args.max_train_samples:
+        train_items = train_items[: args.max_train_samples]
+    eval_items = []
+    if os.path.exists(eval_path):
+        eval_items = build_items(
+            eval_path, audio_dir, args.use_all_recordings, args.add_text_only
+        )
+        if args.max_eval_samples:
+            eval_items = eval_items[: args.max_eval_samples]
+
+    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    sampling_rate = None
+    if hasattr(processor, "feature_extractor") and hasattr(
+        processor.feature_extractor, "sampling_rate"
+    ):
+        sampling_rate = processor.feature_extractor.sampling_rate
+    if hasattr(processor, "sampling_rate"):
+        sampling_rate = processor.sampling_rate
+
+    dtype = None
+    if args.bf16:
+        dtype = torch.bfloat16
+    elif args.fp16:
+        dtype = torch.float16
+
+    model = MODEL_CLS.from_pretrained(
+        args.model_name_or_path, torch_dtype=dtype, trust_remote_code=True
+    )
+    model.config.use_cache = False
+    model = maybe_apply_lora(model, args)
+
+    train_dataset = SlurpDataset(train_items)
+    eval_dataset = SlurpDataset(eval_items) if eval_items else None
+
+    collator = Qwen2AudioCollator(
+        processor,
+        CollatorConfig(
+            include_transcript=args.include_transcript,
+            max_length=args.max_length,
+            audio_sampling_rate=sampling_rate,
+        ),
+    )
+
+    eval_strategy = "steps" if eval_dataset else "no"
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        num_train_epochs=args.num_train_epochs,
+        max_steps=args.max_steps if args.max_steps > 0 else -1,
+        warmup_ratio=args.warmup_ratio,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
+        evaluation_strategy=eval_strategy,
+        save_total_limit=2,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        report_to="none",
+        remove_unused_columns=False,
+        dataloader_num_workers=2,
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=collator,
+    )
+    trainer.train()
+    trainer.save_model(args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
