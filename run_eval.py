@@ -130,93 +130,84 @@ def main():
     
     # Inference Loop
     model.eval()
-    with torch.no_grad():
-        for item in tqdm(items):
+    
+    # Set padding side to left for batch generation
+    if processor.tokenizer.padding_side != "left":
+        logger.info("Setting tokenizer padding_side to 'left' for batch inference")
+        processor.tokenizer.padding_side = "left"
+    
+    # Check if we need to load audio tools
+    has_librosa = False
+    try:
+        import librosa
+        has_librosa = True
+    except ImportError:
+        pass
+    
+    from train_qwen2_audio_slurp import load_audio
+
+    batch_size = args.batch_size
+    for i in tqdm(range(0, len(items), batch_size)):
+        batch_items = items[i : i + batch_size]
+        
+        batch_texts = []
+        batch_audios = []
+        
+        for item in batch_items:
             # Prepare inputs
             transcript = item.get("transcript", "")
             prompt_text = f"{PROMPT}\nTranscript: {transcript}" if args.add_text_only else PROMPT
             
-            messages = []
             content = []
-            
             if not args.add_text_only:
-                audio_input = item.get("audio") or item.get("audio_path")
-                if audio_input:
-                    # Load and process audio
-                    # Note: We process one by one for simplicity and correctness with Qwen2Audio
-                    # For batched inference, padding handling is complex.
-                    audio_tensor = load_audio_input(audio_input, processor.feature_extractor.sampling_rate)
-                    content.append({"type": "audio", "audio": audio_input}) # Processor will handle path or we need to pass tensor? 
-                    # Actually apply_chat_template expects paths or specific format.
-                    # Let's check how processor handles inputs.
-                    # Qwen2AudioProcessor.apply_chat_template prepares text prompt.
-                    # Then we call processor(images/audios=..., text=...)
-                    pass
+                audio_path = item.get("audio") or item.get("audio_path")
+                if audio_path:
+                    content.append({"type": "audio", "audio": audio_path})
             
             content.append({"type": "text", "text": prompt_text})
-            messages.append({"role": "user", "content": content})
+            messages = [{"role": "user", "content": content}]
             
             # Apply chat template
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            batch_texts.append(text)
             
-            # Prepare model inputs
-            # If using audio, we need to load it. 
-            # item["audio"] is typically a path string in our build_items
-            audios = []
+            # Load audio
             if not args.add_text_only:
-                 # Check if the inputs need to be loaded raw or if processor handles paths
-                 # Qwen2Audio processor usually handles list of audios. 
-                 # But let's look at how the training script does it: 
-                 # It calls processor(text=..., audios=..., ...)
-                 # We'll load the audio tensor manually to be safe/consistent with training script utils
-                 audio_path = item.get("audio") or item.get("audio_path")
-                 if audio_path:
-                     # We use the tensor loaded by helper or pass path? 
-                     # The processor CAN accept paths, but let's stick to what we know works.
-                     # Actually, to use 'audios' arg in processor, we often pass the raw waveform list.
-                     if isinstance(audio_path, str):
-                        import librosa 
-                        # Use our load_audio helper
-                        from train_qwen2_audio_slurp import load_audio
-                        wav = load_audio(audio_path, target_sr=processor.feature_extractor.sampling_rate)
-                        audios.append(wav.numpy()) # processor expects numpy or tensor
-            
-            inputs = processor(
-                text=[text],
-                audios=audios if audios else None,
-                return_tensors="pt",
-                padding=True
-            )
-            inputs = inputs.to(model.device)
-            
-            # Generate
-            # max_new_tokens=128 should be enough for JSON output
+                audio_path = item.get("audio") or item.get("audio_path")
+                if audio_path and isinstance(audio_path, str):
+                    wav = load_audio(audio_path, target_sr=processor.feature_extractor.sampling_rate)
+                    batch_audios.append(wav.numpy())
+        
+        # Prepare model inputs for the whole batch
+        inputs = processor(
+            text=batch_texts,
+            audios=batch_audios if batch_audios else None,
+            return_tensors="pt",
+            padding=True
+        )
+        inputs = inputs.to(model.device)
+        
+        # Generate for the whole batch
+        # max_new_tokens=128 should be enough for JSON output
+        with torch.no_grad():
             generated_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
-            
-            # Decode
-            # Only decode the new tokens
-            generated_ids = generated_ids[:, inputs.input_ids.size(1):]
-            response_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            
-            # Parse JSON
+        
+        # Decode
+        # Only decode the new tokens
+        generated_ids = generated_ids[:, inputs.input_ids.size(1):]
+        responses = processor.batch_decode(generated_ids, skip_special_tokens=True)
+        
+        # Parse and collect predictions
+        for item, response_text in zip(batch_items, responses):
             parsed = extract_json(response_text)
-            
-            # Add to predictions
-            # evaluate.py expects: {"file": filename or "slurp_id": id, "scenario": ..., ...}
-            # key depends on load_gold=False (implies 'file' key) or True (implies 'slurp_id' key)
-            # We'll include both if possible, but evaluate.py logic:
-            # result[example.pop("slurp_id" if load_gold else "file")]
-            # So we should output slurp_id if we plan to use --load-gold, which is better for direct comparison.
-            # However, build_items returns items with 'slurp_id'.
             
             pred_entry = {
                 "slurp_id": item["slurp_id"],
-                "file": item.get("audio_path", "unknown"), # evaluate.py uses 'file' if load_gold=False
+                "file": item.get("audio_path", "unknown"),
                 "scenario": parsed.get("scenario", ""),
                 "action": parsed.get("action", ""),
                 "entities": parsed.get("entities", [])
             }
-            # Write line immediately (or collect) - let's write to file at the end
             predictions.append(pred_entry)
             
     # Save predictions
