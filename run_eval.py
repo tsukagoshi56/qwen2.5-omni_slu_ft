@@ -45,9 +45,11 @@ def main():
     parser.add_argument("--output_file", type=str, default="predictions.jsonl", help="Output predictions file")
     parser.add_argument("--gold_file", type=str, default=None, help="Path to gold file for evaluation script (defaults to test_file)")
     parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples (for dry run)")
-    parser.add_argument("--batch_size", type=int, default=1, help="Inference batch size (currently only 1 supported securely)")
+    parser.add_argument("--batch_size", type=int, default=1, help="Inference batch size")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading")
     parser.add_argument("--add_text_only", action="store_true", help="Use text transcript instead of audio")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--use_flash_attn", action="store_true", default=True, help="Use Flash Attention 2 if available")
     
     args = parser.parse_args()
     
@@ -57,6 +59,16 @@ def main():
     # Check if it's a PEFT adapter
     is_adapter = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
     
+    model_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "device_map": args.device,
+        "trust_remote_code": True,
+    }
+    
+    if args.use_flash_attn:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+        logger.info("Flash Attention 2 enabled.")
+
     if is_adapter:
         try:
             from peft import PeftConfig, PeftModel
@@ -75,17 +87,13 @@ def main():
             try:
                 model = Qwen2AudioForConditionalGeneration.from_pretrained(
                     base_model_path,
-                    torch_dtype=torch.bfloat16,
-                    device_map=args.device,
-                    trust_remote_code=True
+                    **model_kwargs
                 )
             except Exception as e:
                 logger.info(f"Qwen2AudioForConditionalGeneration failed for base model: {e}")
                 model = AutoModelForCausalLM.from_pretrained(
                     base_model_path,
-                    torch_dtype=torch.bfloat16,
-                    device_map=args.device,
-                    trust_remote_code=True
+                    **model_kwargs
                 )
                 
             # Load adapter
@@ -102,18 +110,14 @@ def main():
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 args.model_path,
-                torch_dtype=torch.bfloat16, 
-                device_map=args.device,
-                trust_remote_code=True
+                **model_kwargs
             )
         except Exception as e:
             logger.info(f"Qwen2AudioForConditionalGeneration failed: {e}")
             logger.info("Falling back to AutoModelForCausalLM")
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_path, 
-                torch_dtype=torch.bfloat16, 
-                device_map=args.device,
-                trust_remote_code=True
+                **model_kwargs
             )
 
     # Load Dataset
@@ -136,64 +140,68 @@ def main():
         logger.info("Setting tokenizer padding_side to 'left' for batch inference")
         processor.tokenizer.padding_side = "left"
     
-    # Check if we need to load audio tools
-    has_librosa = False
-    try:
-        import librosa
-        has_librosa = True
-    except ImportError:
-        pass
-    
     from train_qwen2_audio_slurp import load_audio
+    from torch.utils.data import DataLoader
 
-    batch_size = args.batch_size
-    for i in tqdm(range(0, len(items), batch_size)):
-        batch_items = items[i : i + batch_size]
-        
-        batch_texts = []
-        batch_audios = []
-        
-        for item in batch_items:
-            # Prepare inputs
-            transcript = item.get("transcript", "")
-            prompt_text = f"{PROMPT}\nTranscript: {transcript}" if args.add_text_only else PROMPT
+    class EvalCollator:
+        def __init__(self, processor, add_text_only):
+            self.processor = processor
+            self.add_text_only = add_text_only
+
+        def __call__(self, batch):
+            batch_texts = []
+            batch_audios = []
+            batch_items = []
             
-            content = []
-            if not args.add_text_only:
-                audio_path = item.get("audio") or item.get("audio_path")
-                if audio_path:
-                    content.append({"type": "audio", "audio": audio_path})
-            
-            content.append({"type": "text", "text": prompt_text})
-            messages = [{"role": "user", "content": content}]
-            
-            # Apply chat template
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            batch_texts.append(text)
-            
-            # Load audio
-            if not args.add_text_only:
-                audio_path = item.get("audio") or item.get("audio_path")
-                if audio_path and isinstance(audio_path, str):
-                    wav = load_audio(audio_path, target_sr=processor.feature_extractor.sampling_rate)
-                    batch_audios.append(wav.numpy())
-        
-        # Prepare model inputs for the whole batch
-        inputs = processor(
-            text=batch_texts,
-            audios=batch_audios if batch_audios else None,
-            return_tensors="pt",
-            padding=True
-        )
+            for item in batch:
+                transcript = item.get("transcript", "")
+                prompt_text = f"{PROMPT}\nTranscript: {transcript}" if self.add_text_only else PROMPT
+                
+                content = []
+                if not self.add_text_only:
+                    audio_path = item.get("audio") or item.get("audio_path")
+                    if audio_path:
+                        content.append({"type": "audio", "audio": audio_path})
+                
+                content.append({"type": "text", "text": prompt_text})
+                messages = [{"role": "user", "content": content}]
+                
+                text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                batch_texts.append(text)
+                batch_items.append(item)
+                
+                if not self.add_text_only:
+                    audio_path = item.get("audio") or item.get("audio_path")
+                    if audio_path and isinstance(audio_path, str):
+                        wav = load_audio(audio_path, target_sr=self.processor.feature_extractor.sampling_rate)
+                        batch_audios.append(wav.numpy())
+
+            inputs = self.processor(
+                text=batch_texts,
+                audios=batch_audios if batch_audios else None,
+                return_tensors="pt",
+                padding=True
+            )
+            return inputs, batch_items
+
+    dataset = SlurpDataset(items)
+    collator = EvalCollator(processor, args.add_text_only)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=args.num_workers,
+        collate_fn=collator
+    )
+
+    for inputs, batch_items in tqdm(dataloader):
         inputs = inputs.to(model.device)
         
         # Generate for the whole batch
-        # max_new_tokens=128 should be enough for JSON output
         with torch.no_grad():
             generated_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
         
         # Decode
-        # Only decode the new tokens
         generated_ids = generated_ids[:, inputs.input_ids.size(1):]
         responses = processor.batch_decode(generated_ids, skip_special_tokens=True)
         
