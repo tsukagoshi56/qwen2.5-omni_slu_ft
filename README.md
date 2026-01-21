@@ -8,19 +8,16 @@ Finetune Qwen2-Audio on SLURP or Speech-MASSIVE for Spoken Language Understandin
 - ~10GB disk space for full SLURP audio (~4GB for real-only)
 - GPU with sufficient VRAM for Qwen2-Audio-7B
 
-## Quick Setup
+## Setup (uv)
+
+This project uses `uv` for dependency management.
 
 ```bash
-# 1. Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# or: .venv\Scripts\activate  # Windows
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Install dependencies
-pip install torch torchaudio transformers peft soundfile librosa accelerate datasets
-
-# 3. Login to Hugging Face (for model access)
-huggingface-cli login
+# Install dependencies (creates .venv automatically)
+uv sync
 ```
 
 ## Data Preparation
