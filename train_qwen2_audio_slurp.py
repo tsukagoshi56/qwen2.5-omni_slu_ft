@@ -578,6 +578,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
     )
+    parser.add_argument("--push_to_hub", action="store_true", help="Push the trained model to the Hugging Face Hub.")
     return parser
 
 
@@ -602,6 +603,7 @@ def make_training_arguments(
         "report_to": "none",
         "remove_unused_columns": False,
         "dataloader_num_workers": 2,
+        "push_to_hub": args.push_to_hub,
     }
 
     params = inspect.signature(TrainingArguments.__init__).parameters
@@ -727,6 +729,9 @@ def main() -> None:
         sampling_rate = processor.feature_extractor.sampling_rate
     if hasattr(processor, "sampling_rate"):
         sampling_rate = processor.sampling_rate
+
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
     dtype = None
     if args.bf16:
