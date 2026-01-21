@@ -565,6 +565,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data_dir", default="slurp/dataset/slurp")
     parser.add_argument("--audio_dir", default="slurp/audio")
     parser.add_argument("--slurp_root", default=None)
+    parser.add_argument("--slurp_repo_url", default="https://github.com/pswietojanski/slurp")
     parser.add_argument(
         "--download_slurp",
         action="store_true",
