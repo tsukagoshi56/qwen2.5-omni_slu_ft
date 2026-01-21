@@ -67,11 +67,13 @@ uv run train_qwen2_audio_slurp.py \
 ### Full Training with Audio
 
 ```bash
+### Full Training with Audio
+
+```bash
 uv run train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --output_dir outputs/qwen2-audio-slurp \
-  --bf16 \
-  --use_flash_attention_2
+  --bf16
 ```
 
 ### Text-only Training (Gold Transcript)
@@ -83,8 +85,7 @@ uv run train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --add_text_only \
   --output_dir outputs/qwen2-text-slurp \
-  --bf16 \
-  --use_flash_attention_2
+  --bf16
 ```
 
 ### Speech-MASSIVE Dataset
@@ -107,7 +108,6 @@ uv run train_qwen2_audio_slurp.py \
 | `--push_to_hub` | Push trained model to Hugging Face Hub |
 | `--bf16` / `--fp16` | Use mixed precision training |
 | `--use_lora` / `--no_lora` | Enable/disable LoRA (default: enabled) |
-| `--use_flash_attention_2` | Enable Flash Attention 2 (recommended for H100/H200) |
 
 ## Output Format
 

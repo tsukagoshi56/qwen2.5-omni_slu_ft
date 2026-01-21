@@ -609,7 +609,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_lora", action="store_true", default=True)
     parser.add_argument("--no_lora", action="store_false", dest="use_lora")
-    parser.add_argument("--use_flash_attention_2", action="store_true", help="Use Flash Attention 2")
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
@@ -798,8 +797,6 @@ def main() -> None:
         "torch_dtype": dtype,
         "trust_remote_code": True,
     }
-    if args.use_flash_attention_2:
-        model_kwargs["attn_implementation"] = "flash_attention_2"
 
     model = MODEL_CLS.from_pretrained(
         args.model_name_or_path, **model_kwargs
