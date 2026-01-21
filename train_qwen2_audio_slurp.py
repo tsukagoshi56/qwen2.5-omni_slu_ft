@@ -694,7 +694,7 @@ def main() -> None:
         if should_download and not os.path.exists(dataset_path):
             print(f"SLURP dataset not found at {dataset_path}. Downloading...")
         
-        ensure_slurp_repo(slurp_root, args.slurp_repo_url, download=should_download)
+        ensure_slurp_repo(slurp_root, args.slurp_repo_url, download_slurp=should_download)
 
         data_dir = resolve_data_dir(slurp_root, os.path.abspath(args.data_dir))
         audio_dir = os.path.abspath(args.audio_dir)
