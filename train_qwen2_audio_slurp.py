@@ -223,6 +223,8 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
         os.path.join(audio_root, "slurp_real", filename),
         # Also check if slurp_real is sibling to audio_root
         os.path.join(parent_dir, "slurp_real", filename),
+        # Explicitly check slurp/slurp_real relative to CWD
+        os.path.join("slurp", "slurp_real", filename),
     ]
     for path in candidates:
         if os.path.exists(path):
