@@ -26,16 +26,16 @@ The training script requires SLURP audio data. Use `prepare_data.py` to download
 
 ```bash
 # Download and extract all audio (~10GB total)
-python prepare_data.py
+uv run prepare_data.py
 
 # Or download only slurp_real (~4GB, recommended for testing)
-python prepare_data.py --real-only
+uv run prepare_data.py --real-only
 
 # If tar files already downloaded, just extract
-python prepare_data.py --skip-download
+uv run prepare_data.py --skip-download
 
 # Validate existing data
-python prepare_data.py --validate-only
+uv run prepare_data.py --validate-only
 ```
 
 After preparation, you should have:
@@ -56,7 +56,7 @@ slurp/
 ### Text-only Dry Run (no audio required)
 
 ```bash
-python train_qwen2_audio_slurp.py \
+uv run train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --add_text_only \
   --max_train_samples 4 \
@@ -67,7 +67,7 @@ python train_qwen2_audio_slurp.py \
 ### Full Training with Audio
 
 ```bash
-python train_qwen2_audio_slurp.py \
+uv run train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --output_dir outputs/qwen2-audio-slurp \
   --bf16
@@ -76,7 +76,7 @@ python train_qwen2_audio_slurp.py \
 ### Speech-MASSIVE Dataset
 
 ```bash
-python train_qwen2_audio_slurp.py \
+uv run train_qwen2_audio_slurp.py \
   --dataset speech_massive \
   --massive_dataset_config fr-FR \
   --massive_train_split train_115 \
