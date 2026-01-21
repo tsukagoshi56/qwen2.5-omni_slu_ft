@@ -863,7 +863,6 @@ def main() -> None:
     model_kwargs = {
         "torch_dtype": dtype,
         "trust_remote_code": True,
-        "_attn_implementation": "flash_attention_2",
     }
 
 
