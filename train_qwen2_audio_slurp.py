@@ -313,7 +313,7 @@ def build_entities(tokens: List[Dict[str, Any]], entities: List[Dict[str, Any]])
         span = ent.get("span") or []
         words = [tokens[i]["surface"] for i in span if i < len(tokens)]
         value = " ".join(words)
-        results.append({ent["type"]: value})
+        results.append({ent.get("type", "unknown"): value})
     return results
 
 
