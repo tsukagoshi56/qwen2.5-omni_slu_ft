@@ -298,7 +298,7 @@ def main():
     # We use --load-gold because we are predicting against the gold jsonl (test.jsonl)
     # matching by slurp_id is more robust than filename.
     eval_cmd = [
-        "python", "slurp/scripts/evaluation/evaluate.py",
+        "python", "scripts/evaluation/evaluate.py",
         "--gold-data", gold_file,
         "--prediction-file", output_file,
         "--load-gold"
