@@ -459,10 +459,14 @@ class SampleGenerationCallback(TrainerCallback):
     """Callback to generate samples during training to monitor progress."""
     def __init__(self, processor, items, debug_steps=100, num_samples=3):
         self.processor = processor
-        self.items = items[:num_samples]
+        # Randomly sample items for debugging
+        if len(items) > num_samples:
+            self.items = random.sample(items, num_samples)
+        else:
+            self.items = items
         self.debug_steps = debug_steps
         self.tokenizer = processor.tokenizer
-        print(f"SampleGenerationCallback initialized with {len(self.items)} samples. Debug steps: {self.debug_steps}", flush=True)
+        print(f"SampleGenerationCallback initialized with {len(self.items)} random samples. Debug steps: {self.debug_steps}", flush=True)
         
     def on_step_end(self, args, state, control, model=None, **kwargs):
         if state.global_step > 0 and state.global_step % self.debug_steps == 0:
