@@ -685,8 +685,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--use_lora", action="store_true", default=True)
-    parser.add_argument("--no_lora", action="store_false", dest="use_lora")
+    parser.add_argument("--use_lora", action="store_true", default=False)
+    # parser.add_argument("--no_lora", action="store_false", dest="use_lora") # Deprecated since False is default
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)

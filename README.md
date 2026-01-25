@@ -135,7 +135,7 @@ uv run train_qwen2_audio_slurp.py \
 | `--no_include_transcript` | Remove transcript from prompt |
 | `--push_to_hub` | Push trained model to Hugging Face Hub |
 | `--bf16` / `--fp16` | Use mixed precision training |
-| `--use_lora` / `--no_lora` | Enable/disable LoRA (default: enabled) |
+| `--use_lora` | Enable LoRA (default: disabled, full finetune) |
 | `--debug_generation` | Enable periodical generation logging during training |
 | `--debug_generation_steps` | Steps interval for generation logging (default: 5) |
 
