@@ -277,7 +277,7 @@ def main():
             parsed = extract_json(response_text)
             
             pred_entry = {
-                "slurp_id": item["slurp_id"],
+                "slurp_id": str(item["slurp_id"]),
                 "file": item.get("audio_path", "unknown"),
                 "scenario": parsed.get("scenario", ""),
                 "action": parsed.get("action", ""),
