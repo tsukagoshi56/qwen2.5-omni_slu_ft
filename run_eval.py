@@ -149,7 +149,20 @@ def main():
             raise
     else:
         # Standard loading logic
-        processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+        try:
+            processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+        except Exception as e:
+            logger.warning(f"Failed to load processor from {args.model_path}: {e}")
+            parent_dir = os.path.dirname(args.model_path)
+            if os.path.exists(parent_dir):
+                logger.info(f"Trying to load processor from parent directory: {parent_dir}")
+                try:
+                    processor = AutoProcessor.from_pretrained(parent_dir, trust_remote_code=True)
+                except Exception as e2:
+                    logger.error(f"Also failed to load processor from parent directory: {e2}")
+                    raise e
+            else:
+                raise e
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 args.model_path,
