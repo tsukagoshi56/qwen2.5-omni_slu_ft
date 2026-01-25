@@ -83,6 +83,9 @@ def main():
     args = parser.parse_args()
     
     # Load Processor and Model
+    if not os.path.exists(args.model_path):
+        raise FileNotFoundError(f"Model path not found: {args.model_path}")
+        
     logger.info(f"Loading model from {args.model_path}...")
 
     # Determine Output Path
