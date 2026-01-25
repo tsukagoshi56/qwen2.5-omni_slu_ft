@@ -475,26 +475,38 @@ class SampleGenerationCallback(TrainerCallback):
                     target = item.get("target")
                     
                     # Prepare input
-                    messages = [
-                        {"role": "user", "content": [{"type": "text", "text": prompt_text}]}
-                    ]
-                    # Note: omitting audio for simplicity in debug callback if text-only, 
-                    # but if we want to debug audio training we should include it.
-                    # Assuming text-only debug for now or handled by processor.
+                    user_content = []
+                    audio_input = None
+                    
                     if item.get("audio_path"):
-                        # If audio exists, we should use it
-                        # But loading audio during callback might be slow/complex if not batched.
-                        pass
-
+                        audio_path = item["audio_path"]
+                        # Load audio using the script's global helper if available or local logic
+                        # Reusing load_audio helper from global scope
+                        try: 
+                            target_sr = self.processor.feature_extractor.sampling_rate
+                            audio_input = load_audio(audio_path, target_sr=target_sr)
+                            user_content.append({"type": "audio", "audio": audio_path}) # Placeholder for template, actual audio passed to processor
+                        except Exception as e:
+                            print(f"Failed to load audio for debug sample {i}: {e}")
+                            
+                    user_content.append({"type": "text", "text": prompt_text})
+                    
+                    messages = [{"role": "user", "content": user_content}]
+                    
                     text = self.processor.apply_chat_template(
                         messages, tokenize=False, add_generation_prompt=True
                     )
                     
-                    inputs = self.processor(
-                        text=[text],
-                        return_tensors="pt",
-                        padding=True
-                    ).to(model.device)
+                    # Prepare arguments for processor
+                    process_kwargs = {
+                        "text": [text],
+                        "return_tensors": "pt",
+                        "padding": True
+                    }
+                    if audio_input is not None:
+                        process_kwargs["audios"] = [audio_input]
+
+                    inputs = self.processor(**process_kwargs).to(model.device)
                     
                     generated_ids = model.generate(
                         **inputs,
