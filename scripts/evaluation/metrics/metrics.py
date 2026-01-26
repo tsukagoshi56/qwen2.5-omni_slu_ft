@@ -131,11 +131,11 @@ class FMeasure(ErrorMetric):
         :param prediction: The predicted label.
         """
         try:
-            if prediction == gold:
-                self._true_positives[prediction] += 1
+            if str(prediction) == str(gold):
+                self._true_positives[str(prediction)] += 1
             else:
-                self._false_positives[prediction] += 1
-                self._false_negatives[gold] += 1
+                self._false_positives[str(prediction)] += 1
+                self._false_negatives[str(gold)] += 1
         except TypeError as e:
             print(f"\\n[ERROR] FMeasure failed. Error: {e}")
             print(f"Gold: {gold} (Type: {type(gold)})")
@@ -190,9 +190,9 @@ class SLUF1(ErrorMetric):
         try:
             for label in results:
                 if label != "overall":
-                    self._true_positives[label] += results[label][3]
-                    self._false_positives[label] += results[label][4]
-                    self._false_negatives[label] += results[label][5]
+                    self._true_positives[str(label)] += results[label][3]
+                    self._false_positives[str(label)] += results[label][4]
+                    self._false_negatives[str(label)] += results[label][5]
         except TypeError as e:
             print(f"\\n[ERROR] SLUF1 failed. Error: {e}")
             print(f"Results: {results}")
