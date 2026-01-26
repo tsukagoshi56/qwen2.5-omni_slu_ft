@@ -294,5 +294,5 @@ def split_spans(entities: List[Dict[str, str]]) -> Tuple[List[str], List[str]]:
     fillers = []
     for entity in entities:
         labels.append(entity.get("type", "unknown"))
-        fillers.append(entity["filler"])
+        fillers.append(entity.get("filler", ""))
     return labels, fillers
