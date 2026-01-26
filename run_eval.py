@@ -276,12 +276,27 @@ def main():
             
             parsed = extract_json(response_text)
             
+            # Convert entities from compact format {"type": "filler"} to standard format [{"type": "type", "filler": "filler"}]
+            # This handles the mismatch between training target format and evaluation expectation
+            entities_list = parsed.get("entities", [])
+            standard_entities = []
+            for ent in entities_list:
+                # If ent is already in standard format {"type": ..., "filler": ...}, use it
+                if "type" in ent and "filler" in ent:
+                    standard_entities.append(ent)
+                # If ent is compact format {"key": "value"}
+                else:
+                    for k, v in ent.items():
+                        # unexpected keys like 'span' might be present? No, compact format is just one key usually.
+                        # But loop over items to be safe.
+                        standard_entities.append({"type": str(k), "filler": str(v)})
+
             pred_entry = {
                 "slurp_id": str(item["slurp_id"]),
                 "file": item.get("audio_path", "unknown"),
                 "scenario": parsed.get("scenario", ""),
                 "action": parsed.get("action", ""),
-                "entities": parsed.get("entities", [])
+                "entities": standard_entities
             }
             predictions.append(pred_entry)
             

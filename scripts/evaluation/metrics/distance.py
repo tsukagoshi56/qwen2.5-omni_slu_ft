@@ -48,7 +48,7 @@ class WordDistance(Distance):
         :param hypothesis: The hypothesis sentence as a string or list of words.
         :return: The word-level distance.
         """
-        return wer(truth=truth, hypothesis=hypothesis)
+        return wer(reference=truth, hypothesis=hypothesis)
 
 
 class CharDistance(Distance):
