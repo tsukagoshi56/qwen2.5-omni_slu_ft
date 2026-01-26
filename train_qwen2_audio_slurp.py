@@ -23,7 +23,7 @@ except Exception:
 
     MODEL_CLS = AutoModelForCausalLM
 
-PROMPT = 'Extract scenario, action, and entities (empty list if none) and return a single-line JSON: {"scenario": "<string>", "action": "<string>", "entities": [{"<entity_type>": "<entity_value>"}, ...]}'
+PROMPT = 'Extract scenario, action, and entities (empty list if none) and return a single-line JSON: {"scenario": "<string>", "action": "<string>", "entities": [{"type": "<entity_type>", "filler": "<entity_value>"}, ...]}'
 
 
 def set_seed(seed: int) -> None:
@@ -313,7 +313,7 @@ def build_entities(tokens: List[Dict[str, Any]], entities: List[Dict[str, Any]])
         span = ent.get("span") or []
         words = [tokens[i]["surface"] for i in span if i < len(tokens)]
         value = " ".join(words)
-        results.append({ent.get("type", "unknown"): value})
+        results.append({"type": ent.get("type", "unknown"), "filler": value})
     return results
 
 
