@@ -130,11 +130,17 @@ class FMeasure(ErrorMetric):
         :param gold: The gold label.
         :param prediction: The predicted label.
         """
-        if prediction == gold:
-            self._true_positives[prediction] += 1
-        else:
-            self._false_positives[prediction] += 1
-            self._false_negatives[gold] += 1
+        try:
+            if prediction == gold:
+                self._true_positives[prediction] += 1
+            else:
+                self._false_positives[prediction] += 1
+                self._false_negatives[gold] += 1
+        except TypeError as e:
+            print(f"\\n[ERROR] FMeasure failed. Error: {e}")
+            print(f"Gold: {gold} (Type: {type(gold)})")
+            print(f"Pred: {prediction} (Type: {type(prediction)})")
+            raise e
 
 
 class SpanFMeasure(ErrorMetric):
@@ -150,16 +156,22 @@ class SpanFMeasure(ErrorMetric):
         :param gold: A list of gold entities, each defined by a dictionary with `type` and `filler` keys.
         :param prediction: A list of gold entities, each defined by a dictionary with `type` and `filler` keys.
         """
-        gold = copy(gold)
-        for entity in prediction:
-            if entity in gold:
-                self._true_positives[str(entity.get("type", "unknown"))] += 1
-                gold.remove(entity)
-            else:
-                self._false_positives[str(entity.get("type", "unknown"))] += 1
-        # These spans weren't predicted.
-        for entity in gold:
-            self._false_negatives[str(entity.get("type", "unknown"))] += 1
+        try:
+            gold = copy(gold)
+            for entity in prediction:
+                if entity in gold:
+                    self._true_positives[str(entity.get("type", "unknown"))] += 1
+                    gold.remove(entity)
+                else:
+                    self._false_positives[str(entity.get("type", "unknown"))] += 1
+            # These spans weren't predicted.
+            for entity in gold:
+                self._false_negatives[str(entity.get("type", "unknown"))] += 1
+        except TypeError as e:
+            print(f"\\n[ERROR] SpanFMeasure failed. Error: {e}")
+            print(f"Gold: {gold}")
+            print(f"Pred: {prediction}")
+            raise e
 
 
 class SLUF1(ErrorMetric):
@@ -175,11 +187,16 @@ class SLUF1(ErrorMetric):
 
         :param results: The dictionary output by another metric.
         """
-        for label in results:
-            if label != "overall":
-                self._true_positives[label] += results[label][3]
-                self._false_positives[label] += results[label][4]
-                self._false_negatives[label] += results[label][5]
+        try:
+            for label in results:
+                if label != "overall":
+                    self._true_positives[label] += results[label][3]
+                    self._false_positives[label] += results[label][4]
+                    self._false_negatives[label] += results[label][5]
+        except TypeError as e:
+            print(f"\\n[ERROR] SLUF1 failed. Error: {e}")
+            print(f"Results: {results}")
+            raise e
 
 
 class SpanDistanceFMeasure(ErrorMetric):
@@ -213,24 +230,30 @@ class SpanDistanceFMeasure(ErrorMetric):
         :param gold: A list of gold entities, each defined by a dictionary with `type` and `filler` keys.
         :param prediction: A list of gold entities, each defined by a dictionary with `type` and `filler` keys.
         """
-        gold_labels, gold_fillers = split_spans(gold)
-        predicted_labels, predicted_fillers = split_spans(prediction)
+        try:
+            gold_labels, gold_fillers = split_spans(gold)
+            predicted_labels, predicted_fillers = split_spans(prediction)
 
-        for j, pred_label in enumerate(predicted_labels):
-            if pred_label in gold_labels:
-                idx_to_remove, distance = self._get_lowest_distance(pred_label,
-                                                                    predicted_fillers[j],
-                                                                    gold_labels,
-                                                                    gold_fillers)
-                self._true_positives[pred_label] += 1
-                self._false_positives[pred_label] += distance
-                self._false_negatives[pred_label] += distance
-                gold_labels.pop(idx_to_remove)
-                gold_fillers.pop(idx_to_remove)
-            else:
-                self._false_positives[pred_label] += 1
-        for i, gold_label in enumerate(gold_labels):
-            self._false_negatives[gold_label] += 1
+            for j, pred_label in enumerate(predicted_labels):
+                if pred_label in gold_labels:
+                    idx_to_remove, distance = self._get_lowest_distance(pred_label,
+                                                                        predicted_fillers[j],
+                                                                        gold_labels,
+                                                                        gold_fillers)
+                    self._true_positives[pred_label] += 1
+                    self._false_positives[pred_label] += distance
+                    self._false_negatives[pred_label] += distance
+                    gold_labels.pop(idx_to_remove)
+                    gold_fillers.pop(idx_to_remove)
+                else:
+                    self._false_positives[pred_label] += 1
+            for i, gold_label in enumerate(gold_labels):
+                self._false_negatives[gold_label] += 1
+        except TypeError as e:
+            print(f"\\n[ERROR] SpanDistanceFMeasure failed. Error: {e}")
+            print(f"Gold: {gold}")
+            print(f"Pred: {prediction}")
+            raise e
 
     def _get_lowest_distance(self,
                              target_label: str,
