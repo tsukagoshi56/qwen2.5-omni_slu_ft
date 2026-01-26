@@ -153,13 +153,13 @@ class SpanFMeasure(ErrorMetric):
         gold = copy(gold)
         for entity in prediction:
             if entity in gold:
-                self._true_positives[entity.get("type", "unknown")] += 1
+                self._true_positives[str(entity.get("type", "unknown"))] += 1
                 gold.remove(entity)
             else:
-                self._false_positives[entity.get("type", "unknown")] += 1
+                self._false_positives[str(entity.get("type", "unknown"))] += 1
         # These spans weren't predicted.
         for entity in gold:
-            self._false_negatives[entity.get("type", "unknown")] += 1
+            self._false_negatives[str(entity.get("type", "unknown"))] += 1
 
 
 class SLUF1(ErrorMetric):
@@ -293,6 +293,6 @@ def split_spans(entities: List[Dict[str, str]]) -> Tuple[List[str], List[str]]:
     labels = []
     fillers = []
     for entity in entities:
-        labels.append(entity.get("type", "unknown"))
-        fillers.append(entity.get("filler", ""))
+        labels.append(str(entity.get("type", "unknown")))
+        fillers.append(str(entity.get("filler", "")))
     return labels, fillers
