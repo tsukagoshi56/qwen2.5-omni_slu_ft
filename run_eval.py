@@ -307,7 +307,10 @@ def main():
         
     else:
         logger.info(f"Loading dataset from {args.test_file}...")
-        items = build_items(args.test_file, args.audio_dir, use_all_recordings=False, add_text_only=args.add_text_only)
+        # Audio mode: use all recordings (each file is a separate prediction keyed by filename)
+        # Text-only mode: one item per slurp_id (prediction keyed by slurp_id)
+        use_all = not args.add_text_only
+        items = build_items(args.test_file, args.audio_dir, use_all_recordings=use_all, add_text_only=args.add_text_only)
         dataset = SlurpDataset(items)
 
     if args.max_samples:
