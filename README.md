@@ -92,6 +92,8 @@ uv run train_qwen2_audio_slurp.py \
 
 Use `run_eval.py` to evaluate the trained model on the SLURP test set. This script performs inference and calculates SLU metrics (F1, SLU-F1).
 
+### Single-GPU Evaluation
+
 ```bash
 uv run run_eval.py \
   --model_path outputs/qwen2-audio-slurp/checkpoint-XXXX \
@@ -100,10 +102,25 @@ uv run run_eval.py \
   --device cuda
 ```
 
+### Multi-GPU Evaluation (Recommended)
+
+To accelerate inference using multiple GPUs (e.g., 2x NVIDIA H200), use `torchrun`. This will automatically distribute the workload and merge the results.
+
+```bash
+# Example: Run on 2 GPUs
+torchrun --nproc_per_node=2 run_eval.py \
+  --model_path outputs/qwen2-audio-slurp/checkpoint-XXXX \
+  --test_file slurp/dataset/slurp/test.jsonl \
+  --batch_size 16 \
+  --num_beams 3 \
+  --device cuda
+```
+
+- `--nproc_per_node`: Number of GPUs to use.
 - `--model_path`: Path to the trained LoRA checkpoint or full model directory.
-- `--batch_size`: Inference batch size. For high-end GPUs like **NVIDIA H200**, a batch size of **16-32** is recommended for optimal throughput.
-- `--max_samples`: (Optional) Limit the number of samples for quick testing (Dry Run).
+- `--batch_size`: Inference batch size per GPU.
 - `--add_text_only`: Add this flag if evaluating a text-only model.
+- `--no_transcript`: Use this flag for audio models to exclude transcript from prompt (Audio input only).
 
 ### Debugging Training Data
 
