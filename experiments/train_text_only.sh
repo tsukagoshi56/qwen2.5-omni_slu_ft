@@ -17,13 +17,24 @@ WARMUP_RATIO=0.04
 PER_DEVICE_BATCH=2
 GRAD_ACCUMULATION=64
 
+# Generate specific output directory with timestamp and config
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+OUTPUT_ROOT="outputs/text_only"
+run_id="${TIMESTAMP}_ep${NUM_EPOCHS}_lr${LEARNING_RATE}_bs$((PER_DEVICE_BATCH * GRAD_ACCUMULATION))"
+OUTPUT_DIR="${OUTPUT_ROOT}/${run_id}"
+
+mkdir -p "$OUTPUT_DIR"
+
 echo "============================================================"
 echo " Text-Only Fine-tuning"
 echo "============================================================"
 echo " Model:          $MODEL_NAME"
-echo " Output:         $OUTPUT_DIR"
+echo " Output Dir:     $OUTPUT_DIR"
 echo " Global Batch:   $((PER_DEVICE_BATCH * GRAD_ACCUMULATION))"
 echo "============================================================"
+
+# Save a copy of this script to the output directory for reproducibility
+cp "$0" "$OUTPUT_DIR/train_script_copy.sh"
 
 uv run train_qwen2_audio_slurp.py \
   --model_name_or_path "$MODEL_NAME" \

@@ -362,8 +362,8 @@ def main():
             for item in batch:
                 transcript = item.get("transcript", "")
                 
-                if self.include_transcript:
-                    prompt_text = f"{PROMPT}\n{transcript}"
+                if self.include_transcript and transcript:
+                    prompt_text = f"{transcript}\n{PROMPT}"
                 else:
                     prompt_text = PROMPT
                 
