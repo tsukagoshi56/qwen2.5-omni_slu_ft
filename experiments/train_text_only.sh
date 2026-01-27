@@ -13,9 +13,9 @@ NUM_EPOCHS=3
 LEARNING_RATE=5e-6
 WARMUP_RATIO=0.04
 
-# H200 Optimized Batch Configuration
+# H200 optimized for 1 GPU (Total Batch 128 = 2 * 64)
 PER_DEVICE_BATCH=2
-GRAD_ACCUMULATION=8
+GRAD_ACCUMULATION=64
 
 echo "============================================================"
 echo " Text-Only Fine-tuning"
