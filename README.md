@@ -168,43 +168,32 @@ The inference script (`run_eval.py`) automatically converts the model output bac
 
 ## Paper Compliance (2509.15389v2)
 
-This codebase is aligned with the following specifications from the paper:
-- **Prompt**: Matches Fig 1(a).
-- **Target Format**: Single-line JSON with key-value entities.
-- **Model Frozen**: Audio Encoder and Modality Adapter are frozen during fine-tuning.
-- **Hyperparameters**: AdamW, bf16, Cosine Scheduler, LR 5e-6.
-- **Inference**: Beam search (num_beams=3).
+This codebase is aligned with the specifications from Paper 2509.15389v2.
 
-To run strictly according to the paper (Text-only stage):
+### Quick Start (Recommended)
+
+Use the pre-configured scripts in the `experiments/` folder:
 
 ```bash
-# General (Simulated 8 GPUs environment)
-uv run train_qwen2_audio_slurp.py \
-  --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
-  --output_dir outputs/qwen2-text-slurp-paper \
-  --add_text_only \
-  --num_train_epochs 3 \
-  --learning_rate 5e-6 \
-  --warmup_ratio 0.04 \
-  --per_device_train_batch_size 2 \
-  --gradient_accumulation_steps 8 \
-  --bf16
+# 1. Text-only Training (Stage 1)
+bash experiments/text_only_stage1.sh
+
+# 2. Evaluation (auto-detects text-only mode)
+bash experiments/evaluate.sh
 ```
 
-### H200 Optimized (Single GPU)
-For a single H200 (141GB VRAM), you can increase the per-device batch size to match the paper's effective global batch size (128) more efficiently:
-```bash
-uv run train_qwen2_audio_slurp.py \
-  --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
-  --output_dir outputs/qwen2-text-slurp-paper-h200 \
-  --add_text_only \
-  --num_train_epochs 3 \
-  --learning_rate 5e-6 \
-  --warmup_ratio 0.04 \
-  --per_device_train_batch_size 16 \
-  --gradient_accumulation_steps 8 \
-  --bf16
-```
+See [experiments/README.md](experiments/README.md) for detailed configuration.
+
+### Training Configuration Summary
+
+| Parameter | Value |
+|-----------|-------|
+| Frozen | Audio Encoder, Modality Adapter |
+| Trainable | LLM (full fine-tuning) |
+| Epochs | 3 |
+| Learning Rate | 5e-6 (cosine decay) |
+| Global Batch Size | 128 |
+| Precision | bfloat16 |
 
 ## License
 
