@@ -56,6 +56,13 @@ def main():
                         is_null = (scenario in ["none", None] and action in ["none", None])
                         if is_null:
                             nulls += 1
+                        
+                        raw_out = d.get("raw_output", "")
+                        if not raw_out or not raw_out.strip():
+                             print("    [Warning] Found EMPTY raw_output!")
+                        elif "none" in raw_out.lower():
+                             # Just a sample check
+                             pass
                     except:
                         malformed += 1
             
@@ -63,6 +70,11 @@ def main():
                 print(f"  - Total Predictions: {total}")
                 print(f"  - Null Outputs (scenario=none, action=none): {nulls} ({100*nulls/total:.1f}%)")
                 print(f"  - Malformed/Unparseable: {malformed} ({100*malformed/total:.1f}%)")
+
+                # Sample raw output
+                with open(p, 'r') as f:
+                    first_line = json.loads(f.readline())
+                    print(f"  - Sample Raw Output (First line): {first_line.get('raw_output', 'N/A')[:100]}...")
                 
                 if nulls / total > 0.9:
                     print("\n  >> DIAGNOSIS: HIGH NULL RATE. Model is generating valid JSON but predicting 'none'.")
