@@ -280,22 +280,10 @@ def main():
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         logger.info(f"Set pad_token to eos_token: {processor.tokenizer.pad_token}")
 
-    # Auto-detect text_only_mode from model config
-    detected_text_only = False
-    if hasattr(model, "config") and getattr(model.config, "text_only_mode", False):
-        detected_text_only = True
-    elif hasattr(model, "base_model") and hasattr(model.base_model, "config"):
-        if getattr(model.base_model.config, "text_only_mode", False):
-            detected_text_only = True
-    
-    if args.force_audio:
-         logger.info("Forcing audio mode (--force_audio). Ignoring model config text_only_mode.")
-         args.add_text_only = False
-    elif detected_text_only and not args.add_text_only:
-        logger.info("Auto-detected text_only_mode=True from model config. Enabling --add_text_only automatically.")
-        args.add_text_only = True
-    elif args.add_text_only:
+    if args.add_text_only:
         logger.info("Using text-only mode (--add_text_only flag provided)")
+    elif args.force_audio:
+        logger.info("Using audio mode (--force_audio flag provided)")
 
     # Load Dataset
     if args.dataset == "speech_massive":
