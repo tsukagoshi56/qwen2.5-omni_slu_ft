@@ -272,12 +272,19 @@ def main():
                         wav = load_audio(audio_path, target_sr=self.processor.feature_extractor.sampling_rate)
                         batch_audios.append(wav.numpy())
 
-            inputs = self.processor(
-                text=batch_texts,
-                audios=batch_audios if batch_audios else None,
-                return_tensors="pt",
-                padding=True
-            )
+            if self.add_text_only:
+                inputs = self.processor(
+                    text=batch_texts,
+                    return_tensors="pt",
+                    padding=True
+                )
+            else:
+                inputs = self.processor(
+                    text=batch_texts,
+                    audios=batch_audios if batch_audios else None,
+                    return_tensors="pt",
+                    padding=True
+                )
             return inputs, batch_items
 
     dataset = SlurpDataset(items)
