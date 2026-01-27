@@ -285,7 +285,7 @@ def main():
                     return_tensors="pt",
                     padding=True
                 )
-            return inputs, batch_items
+            return inputs, batch_items, batch_texts
 
     dataset = SlurpDataset(items)
     collator = EvalCollator(processor, args.add_text_only)
@@ -297,7 +297,7 @@ def main():
         collate_fn=collator
     )
 
-    for inputs, batch_items in tqdm(dataloader):
+    for inputs, batch_items, batch_texts in tqdm(dataloader):
         inputs = inputs.to(model.device)
         
         # Generate for the whole batch
