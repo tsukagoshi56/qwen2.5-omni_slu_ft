@@ -528,7 +528,7 @@ class SampleGenerationCallback(TrainerCallback):
                     )[0]
                     
                     print(f"--- Sample {i+1} ---", flush=True)
-                    print(f"Input: {transcript[:50]}...", flush=True)
+                    print(f"Input (len={len(transcript)}): {transcript}", flush=True)
                     print(f"Target: {target}", flush=True)
                     print(f"Pred:   {response}", flush=True)
             model.train()
