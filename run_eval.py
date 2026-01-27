@@ -314,6 +314,8 @@ def main():
             if args.debug and len(predictions) < args.debug_count:
                 logger.info(f"=== DEBUG Sample {len(predictions)+1} ===")
                 logger.info(f"Transcript: {item.get('transcript', 'N/A')[:100]}...")
+                logger.info(f"Input length: {inputs.input_ids.size(1)}, Generated length: {generated_ids.size(1)}")
+                logger.info(f"First 20 generated token IDs: {generated_ids[0, :20].tolist()}")
                 logger.info(f"Raw Model Output: {response_text}")
                 logger.info("=" * 40)
             
