@@ -150,12 +150,27 @@ def main():
             raise
     else:
         # Standard loading logic
-        try:
-            processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
-        except Exception as e:
-            logger.warning(f"Failed to load processor from {args.model_path}: {e}")
-            
-            # Fallback 1: Try reading _name_or_path from config.json to find base model
+        processor = None
+        processor_load_paths = [args.model_path]
+        
+        # If path looks like a checkpoint, try parent directory first
+        if "checkpoint-" in os.path.basename(os.path.normpath(args.model_path)):
+            parent_dir = os.path.dirname(os.path.normpath(args.model_path))
+            processor_load_paths.insert(0, parent_dir)
+            logger.info(f"Detected checkpoint path. Will try parent directory first: {parent_dir}")
+        
+        for load_path in processor_load_paths:
+            try:
+                logger.info(f"Attempting to load processor from: {load_path}")
+                processor = AutoProcessor.from_pretrained(load_path, trust_remote_code=True)
+                logger.info(f"Successfully loaded processor from: {load_path}")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load processor from {load_path}: {e}")
+                continue
+        
+        # Fallback: Try reading _name_or_path from config.json to find base model
+        if processor is None:
             try:
                 config_path = os.path.join(args.model_path, "config.json")
                 if os.path.exists(config_path):
@@ -163,26 +178,13 @@ def main():
                         config_dict = json.load(f)
                     base_model = config_dict.get("_name_or_path")
                     if base_model and base_model != args.model_path:
-                        logger.info(f"Fallback: Loading processor from base model configured in config.json: {base_model}")
+                        logger.info(f"Fallback: Loading processor from base model in config.json: {base_model}")
                         processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
-                    else:
-                        raise ValueError("No distinct _name_or_path found in config.json")
-                else:
-                    raise FileNotFoundError("No config.json found")
             except Exception as e2:
-                logger.warning(f"Fallback 1 (config.json) failed: {e2}")
-                
-                # Fallback 2: Try parent directory
-                parent_dir = os.path.dirname(os.path.normpath(args.model_path))
-                if os.path.exists(parent_dir) and parent_dir != args.model_path:
-                    logger.info(f"Fallback 2: Trying to load processor from parent directory: {parent_dir}")
-                    try:
-                        processor = AutoProcessor.from_pretrained(parent_dir, trust_remote_code=True)
-                    except Exception as e3:
-                        logger.error(f"Fallback 2 failed: {e3}")
-                        raise e
-                else:
-                    raise e
+                logger.warning(f"Fallback (config.json) also failed: {e2}")
+        
+        if processor is None:
+            raise RuntimeError(f"Could not load processor from any path. Tried: {processor_load_paths}")
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 args.model_path,
