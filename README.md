@@ -113,6 +113,14 @@ If you suspect issues with the training data format, use `debug_training_data.py
 uv run debug_training_data.py --add_text_only --num_samples 3
 ```
 
+To save the full processed training data (input prompts and targets) to a file for inspection:
+```bash
+uv run debug_training_data.py \
+  --add_text_only \
+  --num_samples 0 \
+  --save_path processed_train.jsonl
+```
+
 This will output the prompt, raw data item, and the full processed text (input + target) for verification.
 
 ### Speech-MASSIVE Dataset
