@@ -5,7 +5,7 @@ set -e
 # Uses audio input for inference
 
 MODEL_PATH="${1:-outputs/speech_massive_audio_text_mix}"
-LANG_CODE="${2:-en-US}"
+LANG_CODE="${2:-fr-FR}"
 OUTPUT_DIR="${3:-inference_outputs}"
 
 # Find latest checkpoint if directory given

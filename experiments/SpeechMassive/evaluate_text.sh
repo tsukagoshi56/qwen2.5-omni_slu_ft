@@ -5,7 +5,7 @@ set -e
 # Uses slurp_id-style key for gold text evaluation
 
 MODEL_PATH="${1:-outputs/speech_massive_text_only}"
-LANG_CODE="${2:-en-US}"
+LANG_CODE="${2:-fr-FR}"
 OUTPUT_DIR="${3:-inference_outputs}"
 
 # Find latest checkpoint if directory given

@@ -8,7 +8,7 @@ MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
 OUTPUT_DIR="outputs/speech_massive_text_only"
 
 # Configuration
-LANG_CODE="${1:-en-US}"
+LANG_CODE="${1:-fr-FR}"
 TRAIN_SPLIT="${2:-train}"
 EVAL_SPLIT="${3:-validation}"
 
