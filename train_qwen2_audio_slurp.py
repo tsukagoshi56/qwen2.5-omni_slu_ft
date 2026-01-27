@@ -611,6 +611,7 @@ class Qwen2AudioCollator:
             labels.append(label_ids)
 
         # Separate text and audio
+        text_features = [
             {k: v for k, v in f.items() if k in ["input_ids", "attention_mask"]}
             for f in features
         ]
