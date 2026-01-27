@@ -19,17 +19,22 @@ This folder contains scripts for reproducing the experiments from Paper 2509.153
 
 ## Scripts
 
-### 1. Text-only Training (Stage 1)
+### Full Experiment (Training + Evaluation)
 ```bash
-bash experiments/text_only_stage1.sh
+bash experiments/run_experiment.sh
 ```
 
-### 2. Evaluation
-```bash
-# Auto-detect latest checkpoint and evaluate
-bash experiments/evaluate.sh
+This runs the complete pipeline:
+1. Text-only Training (Stage 1) 
+2. Evaluation on test set
 
-# Or specify checkpoint manually
+### Individual Steps
+
+```bash
+# Training only
+bash experiments/text_only_stage1.sh
+
+# Evaluation only (specify checkpoint)
 bash experiments/evaluate.sh outputs/text_only_stage1/checkpoint-XXX
 ```
 
