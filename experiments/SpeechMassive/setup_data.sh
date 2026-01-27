@@ -5,7 +5,7 @@ set -e
 # Downloads and prepares the Speech-MASSIVE dataset from HuggingFace
 
 # Configuration
-LANG_CODE="${1:-en-US}"  # Default to English, can be changed (e.g., fr-FR, de-DE, ja-JP)
+LANG_CODE="${1:-fr-FR}"  # Default to French (en-US not available), can be changed
 CACHE_DIR="${2:-~/.cache/huggingface/datasets}"
 
 echo "============================================================"
@@ -32,6 +32,9 @@ dataset = load_dataset(
     cache_dir='$CACHE_DIR',
     trust_remote_code=True
 )
+# Avoid automatic decoding to prevent torchcodec errors if not available
+if 'audio' in dataset.column_names:
+    dataset = dataset.cast_column('audio', Audio(decode=False))
 
 print(f'Dataset loaded successfully!')
 print(f'Number of examples: {len(dataset)}')
