@@ -53,7 +53,6 @@ uv run train_qwen2_audio_slurp.py \
   --num_train_epochs $NUM_EPOCHS \
   --learning_rate $LEARNING_RATE \
   --warmup_ratio $WARMUP_RATIO \
-  --lr_scheduler_type $LR_SCHEDULER \
   --per_device_train_batch_size $PER_DEVICE_BATCH \
   --gradient_accumulation_steps $GRAD_ACCUMULATION \
   --logging_steps 10 \
