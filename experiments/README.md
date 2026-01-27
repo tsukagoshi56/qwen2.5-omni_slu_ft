@@ -31,8 +31,11 @@ This runs the complete pipeline:
 ### Individual Steps
 
 ```bash
-# Training only
+# Text-only Training (Stage 1)
 bash experiments/text_only_stage1.sh
+
+# Audio Training
+bash experiments/audio_stage.sh
 
 # Evaluation only (specify checkpoint)
 bash experiments/evaluate.sh outputs/text_only_stage1/checkpoint-XXX
