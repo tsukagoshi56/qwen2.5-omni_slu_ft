@@ -10,12 +10,13 @@ OUTPUT_DIR="outputs/text_only"
 
 # Paper Hyperparameters
 NUM_EPOCHS=3
-LEARNING_RATE=5e-6
+LEARNING_RATE=3e-5
 WARMUP_RATIO=0.04
 
-# H200 optimized for 1 GPU (Total Batch 128 = 2 * 64)
-PER_DEVICE_BATCH=2
-GRAD_ACCUMULATION=64
+# H200 optimized for 1 GPU (Total Batch 128 = 32 * 4)
+# Maximize per-device batch size for H200 utilization
+PER_DEVICE_BATCH=32
+GRAD_ACCUMULATION=4
 
 # Generate specific output directory with timestamp and config
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
