@@ -901,11 +901,13 @@ def main() -> None:
 
     model = maybe_apply_lora(model, args)
 
-    # Add custom config flag heavily relying on duck-typing model config
+    # Add custom config flags heavily relying on duck-typing model config
     if hasattr(model, "config"):
         model.config.slurp_fmt = "paper_v2"
+        model.config.text_only_mode = args.add_text_only
     elif hasattr(model, "module") and hasattr(model.module, "config"):
         model.module.config.slurp_fmt = "paper_v2"
+        model.module.config.text_only_mode = args.add_text_only
 
     collator = Qwen2AudioCollator(
         processor,

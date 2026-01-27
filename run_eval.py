@@ -198,6 +198,20 @@ def main():
                 **model_kwargs
             )
 
+    # Auto-detect text_only_mode from model config
+    detected_text_only = False
+    if hasattr(model, "config") and getattr(model.config, "text_only_mode", False):
+        detected_text_only = True
+    elif hasattr(model, "base_model") and hasattr(model.base_model, "config"):
+        if getattr(model.base_model.config, "text_only_mode", False):
+            detected_text_only = True
+    
+    if detected_text_only and not args.add_text_only:
+        logger.info("Auto-detected text_only_mode=True from model config. Enabling --add_text_only automatically.")
+        args.add_text_only = True
+    elif args.add_text_only:
+        logger.info("Using text-only mode (--add_text_only flag provided)")
+
     # Load Dataset
     logger.info(f"Loading dataset from {args.test_file}...")
     items = build_items(args.test_file, args.audio_dir, use_all_recordings=False, add_text_only=args.add_text_only)
