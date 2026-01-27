@@ -343,20 +343,23 @@ def main():
                         for k, v in ent.items():
                             standard_entities.append({"type": str(k), "filler": str(v)})
 
-            pred_entry = {
-                "scenario": parsed.get("scenario", ""),
-                "action": parsed.get("action", ""),
-                "entities": standard_entities
-            }
             if args.add_text_only:
-                pred_entry["slurp_id"] = str(item["slurp_id"])
+                pred_entry = {
+                    "slurp_id": str(item["slurp_id"]),
+                    "scenario": parsed.get("scenario", ""),
+                    "action": parsed.get("action", ""),
+                    "entities": standard_entities
+                }
             else:
-                 # Audio mode uses file key
-                 audio_path = item.get("audio") or item.get("audio_path")
-                 if audio_path:
-                     pred_entry["file"] = os.path.basename(audio_path)
-                 else:
-                     pred_entry["file"] = "unknown"
+                # Audio mode uses file key
+                audio_path = item.get("audio") or item.get("audio_path")
+                file_key = os.path.basename(audio_path) if audio_path else "unknown"
+                pred_entry = {
+                    "file": file_key,
+                    "scenario": parsed.get("scenario", ""),
+                    "action": parsed.get("action", ""),
+                    "entities": standard_entities
+                }
             predictions.append(pred_entry)
             
     # Save predictions
