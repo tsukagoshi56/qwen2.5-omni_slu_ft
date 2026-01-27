@@ -72,6 +72,7 @@ def main():
     parser.add_argument("--gold_file", type=str, default=None, help="Path to gold file for evaluation script (defaults to test_file)")
     parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples (for dry run)")
     parser.add_argument("--batch_size", type=int, default=1, help="Inference batch size")
+    parser.add_argument("--num_beams", type=int, default=3, help="Beam search size (default 3 per paper)")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading")
     parser.add_argument("--add_text_only", action="store_true", help="Use text transcript instead of audio")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -278,7 +279,7 @@ def main():
         
         # Generate for the whole batch
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens, do_sample=False)
+            generated_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens, num_beams=args.num_beams, do_sample=False)
         
         # Decode
         generated_ids = generated_ids[:, inputs.input_ids.size(1):]
@@ -297,26 +298,49 @@ def main():
             
             # Convert entities from compact format {"type": "filler"} to standard format [{"type": "type", "filler": "filler"}]
             # This handles the mismatch between training target format and evaluation expectation
+            # Check if using paper v2 format from model config
+            use_paper_format = False
+            if hasattr(model, "config") and getattr(model.config, "slurp_fmt", None) == "paper_v2":
+                use_paper_format = True
+            elif hasattr(model, "peft_config") and "base_model_name_or_path" in model.peft_config:
+                 # If adapter, we might need to check base model config or assume based on something else
+                 # For now, rely on base model config loaded into 'model'
+                 if hasattr(model, "base_model") and hasattr(model.base_model, "config"):
+                     if getattr(model.base_model.config, "slurp_fmt", None) == "paper_v2":
+                         use_paper_format = True
+
             entities_list = parsed.get("entities", [])
             standard_entities = []
-            for ent in entities_list:
-                # If ent is already in standard format {"type": ..., "filler": ...}, use it
-                if "type" in ent and "filler" in ent:
-                    standard_entities.append(ent)
-                # If ent is compact format {"key": "value"}
-                else:
-                    for k, v in ent.items():
-                        # unexpected keys like 'span' might be present? No, compact format is just one key usually.
-                        # But loop over items to be safe.
-                        standard_entities.append({"type": str(k), "filler": str(v)})
+            
+            if use_paper_format:
+                 # Convert [{"date": "thursday"}] -> [{"type": "date", "filler": "thursday"}]
+                 for ent in entities_list:
+                     if isinstance(ent, dict):
+                         for k, v in ent.items():
+                             standard_entities.append({"type": str(k), "filler": str(v)})
+            else:
+                # Existing logic for backward compat
+                for ent in entities_list:
+                    if "type" in ent and "filler" in ent:
+                        standard_entities.append(ent)
+                    else:
+                        for k, v in ent.items():
+                            standard_entities.append({"type": str(k), "filler": str(v)})
 
             pred_entry = {
-                "slurp_id": str(item["slurp_id"]),
-                "file": item.get("audio_path", "unknown"),
                 "scenario": parsed.get("scenario", ""),
                 "action": parsed.get("action", ""),
                 "entities": standard_entities
             }
+            if args.add_text_only:
+                pred_entry["slurp_id"] = str(item["slurp_id"])
+            else:
+                 # Audio mode uses file key
+                 audio_path = item.get("audio") or item.get("audio_path")
+                 if audio_path:
+                     pred_entry["file"] = os.path.basename(audio_path)
+                 else:
+                     pred_entry["file"] = "unknown"
             predictions.append(pred_entry)
             
     # Save predictions

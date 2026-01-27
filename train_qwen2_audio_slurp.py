@@ -23,7 +23,7 @@ except Exception:
 
     MODEL_CLS = AutoModelForCausalLM
 
-PROMPT = 'Extract scenario, action, and entities (empty list if none) and return a single-line JSON: {"scenario": "<string>", "action": "<string>", "entities": [{"type": "<entity_type>", "filler": "<entity_value>"}, ...]}'
+PROMPT = 'Extract scenario, action, and entities (empty list if none) and return a single-line JSON: {"scenario": "<string>", "action": "<string>", "entities": [{"<entity_type>": "<entity_value>"}, ...]}'
 
 
 def set_seed(seed: int) -> None:
@@ -313,7 +313,7 @@ def build_entities(tokens: List[Dict[str, Any]], entities: List[Dict[str, Any]])
         span = ent.get("span") or []
         words = [tokens[i]["surface"] for i in span if i < len(tokens)]
         value = " ".join(words)
-        results.append({"type": ent.get("type", "unknown"), "filler": value})
+        results.append({ent.get("type", "unknown"): value})
     return results
 
 
@@ -729,11 +729,14 @@ def make_training_arguments(
         "push_to_hub": args.push_to_hub,
     }
 
-    params = inspect.signature(TrainingArguments.__init__).parameters
     if "evaluation_strategy" in params:
         kwargs["evaluation_strategy"] = eval_strategy
     elif "eval_strategy" in params:
         kwargs["eval_strategy"] = eval_strategy
+
+    # Default to cosine decay per paper
+    if kwargs.get("lr_scheduler_type") is None:
+        kwargs["lr_scheduler_type"] = "cosine"
 
     return TrainingArguments(**kwargs)
 
@@ -887,7 +890,21 @@ def main() -> None:
         args.model_name_or_path, **model_kwargs
     )
     model.config.use_cache = False
+    # Freeze audio components as per paper
+    if hasattr(model, "audio_tower"):
+        for param in model.audio_tower.parameters():
+            param.requires_grad = False
+    if hasattr(model, "multi_modal_projector"):
+        for param in model.multi_modal_projector.parameters():
+            param.requires_grad = False
+
     model = maybe_apply_lora(model, args)
+
+    # Add custom config flag heavily relying on duck-typing model config
+    if hasattr(model, "config"):
+        model.config.slurp_fmt = "paper_v2"
+    elif hasattr(model, "module") and hasattr(model.module, "config"):
+        model.module.config.slurp_fmt = "paper_v2"
 
     collator = Qwen2AudioCollator(
         processor,
