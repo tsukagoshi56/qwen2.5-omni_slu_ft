@@ -14,7 +14,7 @@ LEARNING_RATE=5e-6
 WARMUP_RATIO=0.04
 
 # H200 Optimized Batch Configuration
-PER_DEVICE_BATCH=16
+PER_DEVICE_BATCH=2
 GRAD_ACCUMULATION=8
 
 echo "============================================================"

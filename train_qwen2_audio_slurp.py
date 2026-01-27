@@ -496,7 +496,7 @@ class SampleGenerationCallback(TrainerCallback):
             with torch.no_grad():
                 for i, item in enumerate(self.items):
                     transcript = item.get("transcript", "")
-                    prompt_text = f"{PROMPT}\nTranscript: {transcript}"
+                    prompt_text = f"{PROMPT}\n{transcript}"
                     target = item.get("target")
                     
                     # Prepare input
@@ -563,7 +563,7 @@ class Qwen2AudioCollator:
 
     def build_prompt(self, transcript: str) -> str:
         if self.config.include_transcript:
-            return f"{PROMPT}\nTranscript: {transcript}"
+            return f"{PROMPT}\n{transcript}"
         return PROMPT
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

@@ -363,7 +363,7 @@ def main():
                 transcript = item.get("transcript", "")
                 
                 if self.include_transcript:
-                    prompt_text = f"{PROMPT}\nTranscript: {transcript}"
+                    prompt_text = f"{PROMPT}\n{transcript}"
                 else:
                     prompt_text = PROMPT
                 
