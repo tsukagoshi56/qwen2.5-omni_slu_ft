@@ -108,7 +108,7 @@ To accelerate inference using multiple GPUs (e.g., 2x NVIDIA H200), use `torchru
 
 ```bash
 # Example: Run on 2 GPUs
-torchrun --nproc_per_node=2 run_eval.py \
+uv run torchrun --nproc_per_node=2 run_eval.py \
   --model_path outputs/qwen2-audio-slurp/checkpoint-XXXX \
   --test_file slurp/dataset/slurp/test.jsonl \
   --batch_size 16 \
