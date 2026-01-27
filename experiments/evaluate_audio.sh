@@ -29,7 +29,8 @@ uv run run_eval.py \
   --output_dir "$OUTPUT_DIR" \
   --batch_size 8 \
   --num_beams 3 \
-  --no_transcript
+  --no_transcript \
+  --force_audio
 
 # Run evaluation without --load-gold (uses filename as key)
 PRED_FILE="$OUTPUT_DIR/$(basename "$MODEL_PATH")/predictions.jsonl"

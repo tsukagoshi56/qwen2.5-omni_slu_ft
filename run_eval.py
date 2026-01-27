@@ -126,6 +126,7 @@ def main():
     
     parser.add_argument("--repetition_penalty", type=float, default=1.0, help="Repetition penalty (1.0 = no penalty)")
     parser.add_argument("--no_transcript", action="store_true", help="Do NOT include transcript in the prompt (Audio -> JSON only)")
+    parser.add_argument("--force_audio", action="store_true", help="Force audio evaluation even if model config suggests text_only_mode")
     
     args = parser.parse_args()
     
@@ -257,7 +258,10 @@ def main():
         if getattr(model.base_model.config, "text_only_mode", False):
             detected_text_only = True
     
-    if detected_text_only and not args.add_text_only:
+    if args.force_audio:
+         logger.info("Forcing audio mode (--force_audio). Ignoring model config text_only_mode.")
+         args.add_text_only = False
+    elif detected_text_only and not args.add_text_only:
         logger.info("Auto-detected text_only_mode=True from model config. Enabling --add_text_only automatically.")
         args.add_text_only = True
     elif args.add_text_only:
