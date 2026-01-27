@@ -16,10 +16,12 @@ echo " Cache:    $CACHE_DIR"
 echo "============================================================"
 
 # Install required packages
-pip install datasets soundfile
+# Install required packages
+# NOTE: Dependencies are managed by uv in pyproject.toml
+# pip install datasets soundfile
 
 # Test dataset loading
-python -c "
+uv run python -c "
 from datasets import load_dataset, Audio
 
 print('Loading Speech-MASSIVE dataset...')

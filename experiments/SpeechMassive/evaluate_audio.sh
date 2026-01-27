@@ -32,4 +32,13 @@ uv run run_eval.py \
   --num_beams 3 \
   --no_transcript
 
+
+# Run evaluation (calculate metrics)
+PRED_FILE="$OUTPUT_DIR/$(basename "$MODEL_PATH")/predictions.jsonl"
+GOLD_FILE="$OUTPUT_DIR/$(basename "$MODEL_PATH")/gold.jsonl"
+echo "Calculating metrics for $PRED_FILE..."
+uv run python scripts/evaluation/evaluate.py \
+  --gold-data "$GOLD_FILE" \
+  --prediction-file "$PRED_FILE"
+
 echo "Evaluation complete. Check $OUTPUT_DIR for predictions."

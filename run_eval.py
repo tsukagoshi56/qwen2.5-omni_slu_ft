@@ -15,6 +15,9 @@ try:
         build_items,
         SlurpDataset,
         load_audio_input,
+        load_speech_massive_split,
+        SpeechMassiveDataset,
+        resolve_slurp_root
     )
 except ImportError:
     raise ImportError("Could not import from train_qwen2_audio_slurp.py. Make sure it is in the same directory.")
@@ -62,10 +65,50 @@ def extract_json(text: str) -> dict:
     # Return empty valid structure if failed
     return {"scenario": "none", "action": "none", "entities": []}
 
+def bio_to_spans(tokens, labels):
+    """Convert bio labels to spans for evaluation."""
+    spans = []
+    current_type = None
+    current_span = []
+    
+    for i, label in enumerate(labels):
+        if label == "O" or label == "Other":
+            if current_type:
+                spans.append({"type": current_type, "span": current_span})
+                current_type = None
+                current_span = []
+            continue
+            
+        if label.startswith("B-"):
+            if current_type:
+                spans.append({"type": current_type, "span": current_span})
+            current_type = label[2:]
+            current_span = [i]
+        elif label.startswith("I-"):
+            if current_type == label[2:]:
+                current_span.append(i)
+            else:
+                # Mismatch or new start without B (shouldn't happen in valid BIO but handle it)
+                if current_type:
+                     spans.append({"type": current_type, "span": current_span})
+                current_type = label[2:]
+                current_span = [i]
+                
+    if current_type:
+        spans.append({"type": current_type, "span": current_span})
+        
+    # Convert to format expected by evaluate.py/util.py logic:
+    # Entities: [{"type": ..., "span": [...]}]
+    # But util.py expects "entities" list in "gold". 
+    # And tokens list of dicts.
+    return spans
+
 def main():
     parser = argparse.ArgumentParser(description="Run evaluation on SLURP dataset")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model or checkpoint")
-    parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl", help="Path to test data (jsonl)")
+    parser.add_argument("--dataset", type=str, default="slurp", choices=["slurp", "speech_massive"], help="Dataset to evaluate on")
+    parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl", help="Path to test data (jsonl) for SLURP")
+    parser.add_argument("--massive_dataset_config", type=str, default="en-US", help="Config for SpeechMassive (e.g. en-US)")
     parser.add_argument("--audio_dir", type=str, default="slurp/audio", help="Path to audio directory")
     parser.add_argument("--output_dir", type=str, default="inference_outputs", help="Base directory for output predictions")
     parser.add_argument("--output_file", type=str, default=None, help="Specific output filename (optional, overrides auto-naming)")
@@ -221,14 +264,62 @@ def main():
         logger.info("Using text-only mode (--add_text_only flag provided)")
 
     # Load Dataset
-    logger.info(f"Loading dataset from {args.test_file}...")
-    items = build_items(args.test_file, args.audio_dir, use_all_recordings=False, add_text_only=args.add_text_only)
-    
+    if args.dataset == "speech_massive":
+        logger.info(f"Loading SpeechMassive dataset ({args.massive_dataset_config})...")
+        massive_data = load_speech_massive_split(
+            "FBK-MT/Speech-MASSIVE", args.massive_dataset_config, "test", None 
+        )
+        dataset_obj = SpeechMassiveDataset(
+            massive_data, "utt", "Other", args.add_text_only, False
+        )
+        items = dataset_obj # SpeechMassiveDataset behaves like list of items in some ways but it's a Dataset
+        
+        # Build gold file for SpeechMassive
+        gold_file_path = os.path.join(os.path.dirname(output_file), "gold.jsonl")
+        logger.info(f"Generating gold file for SpeechMassive at {gold_file_path}")
+        with open(gold_file_path, "w") as f:
+            for i in range(len(dataset_obj)):
+                item = dataset_obj[i]
+                # Reconstruct tokens info
+                tokens = item.get("tokens", [])
+                labels = item.get("labels", [])
+                
+                # If audio is derived from HF, audio_ref is path
+                audio_path = item.get("audio_ref")
+                if not audio_path and isinstance(item.get("audio"), dict):
+                     audio_path = item["audio"].get("path")
+                
+                file_key = os.path.basename(audio_path) if audio_path else f"unknown_{i}"
+
+                gold_entry = {
+                    "tokens": [{"surface": t} for t in tokens],
+                    "scenario": item.get("scenario", "none"),
+                    "action": item.get("action", "none"),
+                    "entities": bio_to_spans(tokens, labels),
+                    "recordings": [{"file": file_key}]
+                }
+                # Fallback for text-only mode if needed? 
+                # Evaluator util.py expects 'recordings' list if load_gold=False
+                f.write(json.dumps(gold_entry) + "\n")
+        
+        # For compatibility with loop below
+        dataset = dataset_obj 
+        
+    else:
+        logger.info(f"Loading dataset from {args.test_file}...")
+        items = build_items(args.test_file, args.audio_dir, use_all_recordings=False, add_text_only=args.add_text_only)
+        dataset = SlurpDataset(items)
+
     if args.max_samples:
         logger.info(f"Limiting to {args.max_samples} samples for dry run.")
-        items = items[:args.max_samples]
+        if isinstance(items, list):
+            items = items[:args.max_samples]
+            dataset = SlurpDataset(items)
+        else:
+            # Subset torch dataset
+            dataset = torch.utils.data.Subset(dataset, range(args.max_samples))
     
-    logger.info(f"Num examples: {len(items)}")
+    logger.info(f"Num examples: {len(dataset)}")
     
     predictions = []
     
@@ -264,9 +355,15 @@ def main():
                 
                 content = []
                 if not self.add_text_only:
-                    audio_path = item.get("audio") or item.get("audio_path")
-                    if audio_path:
-                        content.append({"type": "audio", "audio": audio_path})
+                    audio_input = item.get("audio") or item.get("audio_path")
+                    if audio_input:
+                        # For chat template, we just need a placeholder capable logic or path
+                        # Here passing "audio" type uses the path if string, but if dict (HF)?
+                        # Processor apply_chat_template usually expects a dict with 'audio' key pointing to stuff or just placeholder?
+                        # It depends on how we handle it. 
+                        # In training script, we pass raw audio array to processor separately.
+                        # Template just needs placeholder.
+                        content.append({"type": "audio", "audio": "audio_placeholder"})
                 
                 content.append({"type": "text", "text": prompt_text})
                 messages = [{"role": "user", "content": content}]
@@ -276,9 +373,10 @@ def main():
                 batch_items.append(item)
                 
                 if not self.add_text_only:
-                    audio_path = item.get("audio") or item.get("audio_path")
-                    if audio_path and isinstance(audio_path, str):
-                        wav = load_audio(audio_path, target_sr=self.processor.feature_extractor.sampling_rate)
+                    audio_input = item.get("audio") or item.get("audio_path")
+                    # Use helper from training script that handles dict/path/etc
+                    if audio_input:
+                        wav = load_audio_input(audio_input, target_sr=self.processor.feature_extractor.sampling_rate)
                         batch_audios.append(wav.numpy())
 
             if self.add_text_only:
@@ -296,7 +394,6 @@ def main():
                 )
             return inputs, batch_items, batch_texts
 
-    dataset = SlurpDataset(items)
     collator = EvalCollator(processor, args.add_text_only, include_transcript=not args.no_transcript)
     dataloader = DataLoader(
         dataset, 
@@ -381,7 +478,14 @@ def main():
             else:
                 # Audio mode uses file key
                 audio_path = item.get("audio") or item.get("audio_path")
-                file_key = os.path.basename(audio_path) if audio_path else "unknown"
+                # Handle SpeechMassive dict style audio_ref
+                audio_ref = item.get("audio_ref")
+                if not audio_ref and isinstance(audio_path, str):
+                    audio_ref = audio_path
+                elif not audio_ref and isinstance(item.get("audio"), dict):
+                     audio_ref = item["audio"].get("path")
+                     
+                file_key = os.path.basename(audio_ref) if audio_ref else "unknown"
                 pred_entry = {
                     "file": file_key,
                     "scenario": parsed.get("scenario", ""),

@@ -461,6 +461,11 @@ class SpeechMassiveDataset(Dataset):
             "audio_ref": audio_ref,
             "transcript": transcript,
             "target": target,
+            # Extra fields for evaluation
+            "tokens": record.get("tokens", []),
+            "labels": record.get("labels", []),
+            "scenario": record.get("scenario_str") or record.get("scenario", ""),
+            "action": record.get("intent_str") or record.get("intent", ""),
         }
 
 
