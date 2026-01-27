@@ -729,6 +729,7 @@ def make_training_arguments(
         "push_to_hub": args.push_to_hub,
     }
 
+    params = inspect.signature(TrainingArguments.__init__).parameters
     if "evaluation_strategy" in params:
         kwargs["evaluation_strategy"] = eval_strategy
     elif "eval_strategy" in params:
