@@ -361,21 +361,9 @@ def build_items(
     for record in records:
         target = build_target(record)
         transcript = record.get("sentence", "")
-        recordings = select_recordings(record.get("recordings", []), use_all_recordings)
-        for rec in recordings:
-            audio_path = resolve_audio_path(audio_root, rec["file"])
-            if audio_path is None:
-                missing_audio += 1
-                continue
-            items.append(
-                {
-                    "slurp_id": record.get("slurp_id"),
-                    "audio_path": audio_path,
-                    "transcript": transcript,
-                    "target": target,
-                }
-            )
+        
         if add_text_only:
+            # Text-only mode: create ONE text item per record
             items.append(
                 {
                     "slurp_id": record.get("slurp_id"),
@@ -384,6 +372,22 @@ def build_items(
                     "target": target,
                 }
             )
+        else:
+            # Audio mode: create items for each recording
+            recordings = select_recordings(record.get("recordings", []), use_all_recordings)
+            for rec in recordings:
+                audio_path = resolve_audio_path(audio_root, rec["file"])
+                if audio_path is None:
+                    missing_audio += 1
+                    continue
+                items.append(
+                    {
+                        "slurp_id": record.get("slurp_id"),
+                        "audio_path": audio_path,
+                        "transcript": transcript,
+                        "target": target,
+                    }
+                )
     if missing_audio:
         print(f"Warning: {missing_audio} recordings missing from {audio_root}.")
     return items
