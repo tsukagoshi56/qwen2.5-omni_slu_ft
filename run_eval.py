@@ -357,15 +357,18 @@ def main():
                  for ent in entities_list:
                      if isinstance(ent, dict):
                          for k, v in ent.items():
-                             standard_entities.append({"type": str(k), "filler": str(v)})
+                             # SLURP evaluation requires lowercase fillers
+                             standard_entities.append({"type": str(k), "filler": str(v).lower()})
             else:
                 # Existing logic for backward compat
                 for ent in entities_list:
                     if "type" in ent and "filler" in ent:
-                        standard_entities.append(ent)
+                        ent_copy = ent.copy()
+                        ent_copy["filler"] = str(ent_copy["filler"]).lower()
+                        standard_entities.append(ent_copy)
                     else:
                         for k, v in ent.items():
-                            standard_entities.append({"type": str(k), "filler": str(v)})
+                            standard_entities.append({"type": str(k), "filler": str(v).lower()})
 
             if args.add_text_only:
                 pred_entry = {
