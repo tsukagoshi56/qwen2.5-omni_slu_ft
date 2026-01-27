@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--debug_count", type=int, default=5, help="Number of samples to show in debug mode")
     parser.add_argument("--max_new_tokens", type=int, default=256, help="Maximum new tokens to generate (increase if output is truncated)")
     
+    parser.add_argument("--repetition_penalty", type=float, default=1.0, help="Repetition penalty (1.0 = no penalty)")
+    
     args = parser.parse_args()
     
     # Load Processor and Model
@@ -198,6 +200,11 @@ def main():
                 **model_kwargs
             )
 
+    # Ensure pad_token is set (crucial for batch generation)
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        logger.info(f"Set pad_token to eos_token: {processor.tokenizer.pad_token}")
+
     # Auto-detect text_only_mode from model config
     detected_text_only = False
     if hasattr(model, "config") and getattr(model.config, "text_only_mode", False):
@@ -246,7 +253,6 @@ def main():
             batch_items = []
             
             for item in batch:
-                transcript = item.get("transcript", "")
                 transcript = item.get("transcript", "")
                 # Always include transcript in prompt to match training distribution, unless specifically not wanted?
                 # The training script (train_qwen2_audio_slurp.py) creates PROMPT + "\nTranscript: " + transcript if include_transcript is True (default).
@@ -302,7 +308,13 @@ def main():
         
         # Generate for the whole batch
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens, num_beams=args.num_beams, do_sample=False)
+            generated_ids = model.generate(
+                **inputs, 
+                max_new_tokens=args.max_new_tokens, 
+                num_beams=args.num_beams, 
+                do_sample=False,
+                repetition_penalty=args.repetition_penalty
+            )
         
         # Decode
         generated_ids = generated_ids[:, inputs.input_ids.size(1):]
