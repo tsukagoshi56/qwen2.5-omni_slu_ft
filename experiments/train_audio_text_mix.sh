@@ -1,40 +1,35 @@
 #!/bin/bash
 set -e
 
-# ============================================================
-# Audio Fine-tuning (with audio input)
-# ============================================================
-# Target: Train LLM on audio input
-# Frozen: Audio Encoder, Modality Adapter
-# Trainable: LLM (full fine-tuning)
-# ============================================================
+# Audio + Text Mixed Fine-tuning (Simple Mix)
+# Input: Audio recordings + Ground-truth transcripts (combined dataset)
+# Output: SLU JSON labels
+# Note: --no_transcript removes transcript from prompt, so model learns from audio only
 
 MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
-OUTPUT_DIR="outputs/audio_stage"
+OUTPUT_DIR="outputs/audio_text_mix"
 
 # Paper Hyperparameters
 NUM_EPOCHS=3
 LEARNING_RATE=5e-6
 WARMUP_RATIO=0.04
 
-# H200 Optimized Batch Configuration
-# Note: Audio requires more memory, reduce batch size if OOM
+# H200 Optimized Batch Configuration (reduced for audio memory)
 PER_DEVICE_BATCH=8
 GRAD_ACCUMULATION=16
 
 echo "============================================================"
-echo " Audio Fine-tuning"
+echo " Audio + Text Mixed Fine-tuning"
 echo "============================================================"
 echo " Model:          $MODEL_NAME"
 echo " Output:         $OUTPUT_DIR"
-echo " Epochs:         $NUM_EPOCHS"
-echo " Learning Rate:  $LEARNING_RATE"
 echo " Global Batch:   $((PER_DEVICE_BATCH * GRAD_ACCUMULATION))"
 echo "============================================================"
 
 uv run train_qwen2_audio_slurp.py \
   --model_name_or_path "$MODEL_NAME" \
   --output_dir "$OUTPUT_DIR" \
+  --add_text_only \
   --use_all_recordings \
   --no_transcript \
   --num_train_epochs $NUM_EPOCHS \
@@ -46,4 +41,4 @@ uv run train_qwen2_audio_slurp.py \
   --save_steps 500 \
   --bf16
 
-echo "Training complete. Checkpoint saved to: $OUTPUT_DIR"
+echo "Training complete. Model saved to: $OUTPUT_DIR"

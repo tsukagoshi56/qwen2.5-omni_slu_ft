@@ -1,12 +1,10 @@
 #!/bin/bash
 set -e
 
-# ============================================================
-# Evaluation Script for Text-only Model
-# ============================================================
+# Evaluate Audio Model
+# Uses filename as key (no --load-gold)
 
-# Default values
-MODEL_PATH="${1:-outputs/text_only_stage1}"
+MODEL_PATH="${1:-outputs/audio_text_mix}"
 TEST_FILE="${2:-slurp/dataset/slurp/test.jsonl}"
 OUTPUT_DIR="${3:-inference_outputs}"
 
@@ -19,21 +17,24 @@ if [ -d "$MODEL_PATH" ]; then
 fi
 
 echo "============================================================"
-echo " Evaluation"
+echo " Audio Evaluation (key: filename)"
 echo "============================================================"
 echo " Model:     $MODEL_PATH"
 echo " Test File: $TEST_FILE"
-echo " Output:    $OUTPUT_DIR"
 echo "============================================================"
 
-# Run evaluation
-# --add_text_only is auto-detected from model config if trained with new code
 uv run run_eval.py \
   --model_path "$MODEL_PATH" \
   --test_file "$TEST_FILE" \
   --output_dir "$OUTPUT_DIR" \
-  --batch_size 32 \
+  --batch_size 8 \
   --num_beams 3 \
-  --add_text_only
+  --no_transcript
+
+# Run evaluation without --load-gold (uses filename as key)
+PRED_FILE="$OUTPUT_DIR/$(basename "$MODEL_PATH")/predictions.jsonl"
+python scripts/evaluation/evaluate.py \
+  --gold-data "$TEST_FILE" \
+  --prediction-file "$PRED_FILE"
 
 echo "Evaluation complete."
