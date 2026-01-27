@@ -82,6 +82,7 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=256, help="Maximum new tokens to generate (increase if output is truncated)")
     
     parser.add_argument("--repetition_penalty", type=float, default=1.0, help="Repetition penalty (1.0 = no penalty)")
+    parser.add_argument("--no_transcript", action="store_true", help="Do NOT include transcript in the prompt (Audio -> JSON only)")
     
     args = parser.parse_args()
     
@@ -243,9 +244,10 @@ def main():
     from torch.utils.data import DataLoader
 
     class EvalCollator:
-        def __init__(self, processor, add_text_only):
+        def __init__(self, processor, add_text_only, include_transcript=True):
             self.processor = processor
             self.add_text_only = add_text_only
+            self.include_transcript = include_transcript
 
         def __call__(self, batch):
             batch_texts = []
@@ -254,10 +256,11 @@ def main():
             
             for item in batch:
                 transcript = item.get("transcript", "")
-                # Always include transcript in prompt to match training distribution, unless specifically not wanted?
-                # The training script (train_qwen2_audio_slurp.py) creates PROMPT + "\nTranscript: " + transcript if include_transcript is True (default).
-                # So we should mirror that here.
-                prompt_text = f"{PROMPT}\nTranscript: {transcript}"
+                
+                if self.include_transcript:
+                    prompt_text = f"{PROMPT}\nTranscript: {transcript}"
+                else:
+                    prompt_text = PROMPT
                 
                 content = []
                 if not self.add_text_only:
@@ -294,7 +297,7 @@ def main():
             return inputs, batch_items, batch_texts
 
     dataset = SlurpDataset(items)
-    collator = EvalCollator(processor, args.add_text_only)
+    collator = EvalCollator(processor, args.add_text_only, include_transcript=not args.no_transcript)
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 

@@ -454,9 +454,9 @@ class SpeechMassiveDataset(Dataset):
 
 @dataclass
 class CollatorConfig:
-    include_transcript: bool
     max_length: int
     audio_sampling_rate: Optional[int]
+    include_transcript: bool = True
 
 
 class SampleGenerationCallback(TrainerCallback):
@@ -711,6 +711,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--push_to_hub", action="store_true", help="Push the trained model to the Hugging Face Hub.")
     parser.add_argument("--debug_generation", action="store_true", help="Enable debug generation during training.")
     parser.add_argument("--debug_generation_steps", type=int, default=5, help="Steps between debug generations.")
+    parser.add_argument("--no_transcript", action="store_true", help="Do NOT include transcript in the prompt (Audio -> JSON only)")
     return parser
 
 
@@ -921,7 +922,7 @@ def main() -> None:
     collator = Qwen2AudioCollator(
         processor,
         CollatorConfig(
-            include_transcript=args.include_transcript,
+            include_transcript=not args.no_transcript,
             max_length=args.max_length,
             audio_sampling_rate=sampling_rate,
         ),
