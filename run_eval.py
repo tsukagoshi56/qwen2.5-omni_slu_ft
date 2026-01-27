@@ -362,10 +362,18 @@ def main():
             for item in batch:
                 transcript = item.get("transcript", "")
                 
-                if self.include_transcript and transcript:
-                    prompt_text = f"{transcript}\n{PROMPT}"
+                # Logic:
+                # If add_text_only=True: Input is [Transcript + Prompt] (Text-only task)
+                # If add_text_only=False: Input is [Audio + Prompt] (Audio task) -> Transcript used only for ref/debug
+                
+                if self.add_text_only:
+                     if transcript:
+                        prompt_text = f"{transcript}\n{PROMPT}"
+                     else:
+                        prompt_text = PROMPT
                 else:
-                    prompt_text = PROMPT
+                     # Audio mode: Do not include transcript in input
+                     prompt_text = PROMPT
                 
                 content = []
                 if not self.add_text_only:

@@ -495,7 +495,13 @@ class SampleGenerationCallback(TrainerCallback):
             model.eval()
             with torch.no_grad():
                 for i, item in enumerate(self.items):
-                    if item.get("transcript"):
+                    # For audio items, do not include transcript in prompt (force Audio -> Output)
+                    # For text-only items (no audio_path), use transcript
+                    has_audio = item.get("audio_path") is not None
+                    
+                    if has_audio:
+                        prompt_text = PROMPT
+                    elif item.get("transcript"):
                         prompt_text = f"{item['transcript']}\n{PROMPT}"
                     else:
                         prompt_text = PROMPT
@@ -579,7 +585,14 @@ class Qwen2AudioCollator:
             if audio_input:
                 audio = load_audio_input(audio_input, self.config.audio_sampling_rate)
 
-            prompt_text = self.build_prompt(item["transcript"])
+            # If audio is present, prompt is JUST the instruction (PROMPT).
+            # If (text-only), prompt is Transcript + Instruction.
+            if audio is not None:
+                prompt_text = PROMPT
+            elif item.get("transcript"):
+                 prompt_text = f"{item['transcript']}\n{PROMPT}"
+            else:
+                 prompt_text = PROMPT
             user_content = []
             if audio is not None:
                 audio_ref = item.get("audio_ref")
