@@ -1,60 +1,80 @@
 import json
 import os
 import glob
-import re
 
-def inspect_jsonl(path, max_lines=5, check_field=None):
-    print(f"\n--- Inspcting {path} ---")
-    if not os.path.exists(path):
-        print("File does not exist.")
-        return
-
-    with open(path, 'r', encoding='utf-8') as f:
-        for i, line in enumerate(f):
-            if i >= max_lines: break
-            try:
-                data = json.loads(line)
-                print(f"Line {i}: {str(data)[:200]}...") # Truncate for readability
-                if check_field and check_field not in data:
-                    print(f"  WARNING: Field '{check_field}' missing!")
-            except json.JSONDecodeError:
-                print(f"Line {i}: [Invalid JSON] {line[:100]}...")
-
-def find_prediction_files():
-    # Search for predictions.jsonl in likely output directories
-    candidates = glob.glob("inference_outputs/**/predictions.jsonl", recursive=True)
-    candidates += glob.glob("outputs/**/predictions.jsonl", recursive=True)
-    candidates += ["predictions.jsonl"] # Root
-    return [c for c in candidates if os.path.exists(c)]
+def check_yes_no(condition):
+    return "YES" if condition else "NO"
 
 def main():
-    # 1. Check Test File (SLURP)
+    print("--- DIAGNOSTIC REPORT ---\n")
+    
+    # 1. Test Data Check
     test_file = "slurp/dataset/slurp/test.jsonl"
-    inspect_jsonl(test_file, check_field="sentence")
-
-    # 2. Check Predictions
-    pred_files = find_prediction_files()
-    if not pred_files:
-        print("\nNo predictions.jsonl found in standard directories.")
+    print(f"[CHECK 1] Test Data ({test_file})")
+    if os.path.exists(test_file):
+        with open(test_file, 'r', encoding='utf-8') as f:
+            first_line = f.readline()
+            try:
+                data = json.loads(first_line)
+                has_sentence = "sentence" in data or "transcript" in data
+                print(f"  - File Exists: YES")
+                print(f"  - Valid JSON Format: YES")
+                print(f"  - Has Input Text (sentence/transcript): {check_yes_no(has_sentence)}")
+            except:
+                print(f"  - File Exists: YES")
+                print(f"  - Valid JSON Format: NO")
     else:
-        for p in pred_files:
-            inspect_jsonl(p)
+        print(f"  - File Exists: NO")
+
+    # 2. Predictions Check
+    print(f"\n[CHECK 2] Predictions Analysis")
+    # Search for predictions
+    pred_files = glob.glob("inference_outputs/**/predictions.jsonl", recursive=True)
+    if not pred_files:
+        pred_files = glob.glob("outputs/**/predictions.jsonl", recursive=True)
+    if not pred_files:
+        pred_files = ["predictions.jsonl"] # Root check
+    
+    found_any = False
+    for p in pred_files:
+        if os.path.exists(p):
+            found_any = True
+            print(f"  - Found Prediction File: {p}")
             
-            # Analyze nulls
-            print(f"  Analyzing content of {p}...")
             total = 0
             nulls = 0
             malformed = 0
+            
             with open(p, 'r') as f:
                 for line in f:
                     total += 1
                     try:
                         d = json.loads(line)
-                        if d.get("scenario") in ["none", None] and d.get("action") in ["none", None]:
+                        scenario = d.get("scenario")
+                        action = d.get("action")
+                        # Check strictly for "none" strings or actual None
+                        is_null = (scenario in ["none", None] and action in ["none", None])
+                        if is_null:
                             nulls += 1
                     except:
                         malformed += 1
-            print(f"  Total: {total}, Nulls: {nulls} ({100*nulls/total if total else 0:.1f}%), Malformed: {malformed}")
+            
+            if total > 0:
+                print(f"  - Total Predictions: {total}")
+                print(f"  - Null Outputs (scenario=none, action=none): {nulls} ({100*nulls/total:.1f}%)")
+                print(f"  - Malformed/Unparseable: {malformed} ({100*malformed/total:.1f}%)")
+                
+                if nulls / total > 0.9:
+                    print("\n  >> DIAGNOSIS: HIGH NULL RATE. Model is generating valid JSON but predicting 'none'.")
+                    print("     Possible causes: Input format mismatch (e.g. prompt template), Audio/Text token confusion.")
+                elif malformed / total > 0.9:
+                     print("\n  >> DIAGNOSIS: HIGH MALFORMED RATE. JSON parsing is failing.")
+                     print("     Possible causes: Model outputting raw text instead of JSON, or markdown blocks.")
+            else:
+                print("  - File is empty.")
+
+    if not found_any:
+        print("  - Prediction File Found: NO")
 
 if __name__ == "__main__":
     main()
