@@ -34,7 +34,7 @@ uv run train_qwen2_audio_slurp.py \
   --massive_eval_split "$EVAL_SPLIT" \
   --model_name_or_path "$MODEL_NAME" \
   --output_dir "$OUTPUT_DIR" \
-  --add_text_only \
+  --train_text_only \
   --num_train_epochs $NUM_EPOCHS \
   --learning_rate $LEARNING_RATE \
   --warmup_ratio $WARMUP_RATIO \

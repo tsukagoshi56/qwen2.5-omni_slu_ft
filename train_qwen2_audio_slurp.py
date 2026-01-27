@@ -354,6 +354,7 @@ def build_items(
     audio_root: str,
     use_all_recordings: bool,
     add_text_only: bool,
+    train_text_only: bool = False,
 ) -> List[Dict[str, Any]]:
     records = load_jsonl(jsonl_path)
     items: List[Dict[str, Any]] = []
@@ -362,8 +363,11 @@ def build_items(
         target = build_target(record)
         transcript = record.get("sentence", "")
         
-        if add_text_only:
-            # Text-only mode: create ONE text item per record
+        # Determine if we should add text items
+        should_add_text = add_text_only or train_text_only
+        
+        if should_add_text:
+            # Text-only mode item
             items.append(
                 {
                     "slurp_id": record.get("slurp_id"),
@@ -372,7 +376,8 @@ def build_items(
                     "target": target,
                 }
             )
-        else:
+        
+        if not train_text_only:
             # Audio mode: create items for each recording
             recordings = select_recordings(record.get("recordings", []), use_all_recordings)
             for rec in recordings:
@@ -411,19 +416,26 @@ class SpeechMassiveDataset(Dataset):
         transcript_field: str,
         outside_label: str,
         add_text_only: bool,
+        train_text_only: bool,
     ):
         self.dataset = dataset
         self.transcript_field = transcript_field
         self.outside_label = outside_label
         self.add_text_only = add_text_only
+        self.train_text_only = train_text_only
 
     def __len__(self) -> int:
+        if self.train_text_only:
+            return len(self.dataset)
         if self.add_text_only:
             return len(self.dataset) * 2
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        if self.add_text_only:
+        if self.train_text_only:
+            base_idx = idx
+            text_only = True
+        elif self.add_text_only:
             base_idx = idx // 2
             text_only = idx % 2 == 1
         else:
@@ -680,7 +692,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", default="outputs/qwen2-audio-slurp")
     parser.add_argument("--include_transcript", action="store_true", default=True)
     parser.add_argument("--no_include_transcript", action="store_false", dest="include_transcript")
-    parser.add_argument("--add_text_only", action="store_true")
+    parser.add_argument("--add_text_only", action="store_true", help="Mix text-only data with audio data")
+    parser.add_argument("--train_text_only", action="store_true", help="Train on text-only data (no audio)")
     parser.add_argument("--use_all_recordings", action="store_true")
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--max_train_samples", type=int, default=None)
@@ -796,20 +809,20 @@ def main() -> None:
         audio_dir = os.path.abspath(args.audio_dir)
         
         # Check if audio exists, if not and download is requested (or force check)
-        if not args.add_text_only:
+        if not args.add_text_only and not args.train_text_only:
             audio_dir = ensure_audio(slurp_root, audio_dir, args.download_audio)
 
         train_path = os.path.join(data_dir, args.train_file)
         eval_path = os.path.join(data_dir, args.eval_file)
         if not os.path.exists(train_path):
             raise FileNotFoundError(f"Missing training file: {train_path}")
-        if not os.path.exists(audio_dir) and not args.add_text_only:
+        if not os.path.exists(audio_dir) and not args.add_text_only and not args.train_text_only:
             raise FileNotFoundError(
                 f"Missing audio directory: {audio_dir} (run scripts/download_audio.sh)"
             )
 
         train_items = build_items(
-            train_path, audio_dir, args.use_all_recordings, args.add_text_only
+            train_path, audio_dir, args.use_all_recordings, args.add_text_only, args.train_text_only
         )
         if args.max_train_samples:
             train_items = train_items[: args.max_train_samples]
@@ -818,7 +831,7 @@ def main() -> None:
         
         if os.path.exists(eval_path):
             eval_items = build_items(
-                eval_path, audio_dir, args.use_all_recordings, args.add_text_only
+                eval_path, audio_dir, args.use_all_recordings, args.add_text_only, args.train_text_only
             )
             if args.max_eval_samples:
                 eval_items = eval_items[: args.max_eval_samples]
@@ -860,17 +873,19 @@ def main() -> None:
             if args.max_eval_samples:
                 eval_hf = eval_hf.select(range(args.max_eval_samples))
             eval_dataset = SpeechMassiveDataset(
-                eval_hf,
-                args.massive_transcript_field,
-                args.massive_outside_label,
-                args.add_text_only,
+                dataset=eval_hf,
+                transcript_field=args.massive_transcript_field,
+                outside_label=args.massive_outside_label,
+                add_text_only=args.add_text_only,
+                train_text_only=args.train_text_only,
             )
 
         train_dataset = SpeechMassiveDataset(
-            train_hf,
-            args.massive_transcript_field,
-            args.massive_outside_label,
-            args.add_text_only,
+            dataset=train_hf,
+            transcript_field=args.massive_transcript_field,
+            outside_label=args.massive_outside_label,
+            add_text_only=args.add_text_only,
+            train_text_only=args.train_text_only,
         )
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)

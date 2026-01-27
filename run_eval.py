@@ -400,20 +400,8 @@ def main():
         for p in predictions:
             f.write(json.dumps(p) + "\n")
             
-    # Run Evaluation Script
-    gold_file = args.gold_file if args.gold_file else args.test_file
-    logger.info(f"Running evaluation against {gold_file}...")
-    
-    # We use --load-gold because we are predicting against the gold jsonl (test.jsonl)
-    # matching by slurp_id is more robust than filename.
-    eval_cmd = [
-        "python", "scripts/evaluation/evaluate.py",
-        "--gold-data", gold_file,
-        "--prediction-file", output_file,
-        "--load-gold"
-    ]
-    
-    subprocess.run(eval_cmd, check=False)
+    # Evaluation is now handled by external shell scripts to properly manage keys (slurp_id vs file)
+    logger.info(f"Predictions saved. Please run evaluation script manually.")
 
 if __name__ == "__main__":
     main()
