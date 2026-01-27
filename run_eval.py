@@ -130,11 +130,29 @@ def main():
     
     args = parser.parse_args()
     
+    # --- DDP Initialization for torchrun ---
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_distributed = world_size > 1
+
+    if is_distributed:
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        # Force device to local rank
+        args.device = f"cuda:{local_rank}"
+        if local_rank == 0:
+            logger.info(f"Initialized DDP. World Size: {world_size}")
+    else:
+        # Default behavior
+        pass
+
     # Load Processor and Model
     if not os.path.exists(args.model_path):
         raise FileNotFoundError(f"Model path not found: {args.model_path}")
         
-    logger.info(f"Loading model from {args.model_path}...")
+    if local_rank <= 0:
+        logger.info(f"Loading model from {args.model_path}...")
 
     # Determine Output Path
     model_name = os.path.basename(os.path.normpath(args.model_path))
@@ -142,17 +160,29 @@ def main():
         output_file = args.output_file
     else:
         output_dir = os.path.join(args.output_dir, model_name)
-        os.makedirs(output_dir, exist_ok=True)
+        # Only rank 0 creates directory
+        if local_rank <= 0:
+            os.makedirs(output_dir, exist_ok=True)
+        # Barrier to ensure dir exists
+        if is_distributed:
+            torch.distributed.barrier()
+            
         output_file = os.path.join(output_dir, "predictions.jsonl")
-    
-    logger.info(f"Predictions will be saved to: {output_file}")
+
+    # If distributed, append rank to output file so processes don't overwrite
+    if is_distributed:
+        output_file = f"{output_file}.rank{local_rank}"
+
+    if local_rank <= 0:
+        logger.info(f"Predictions will be saved to: {output_file}")
     
     # Check if it's a PEFT adapter
     is_adapter = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
     
     model_kwargs = {
         "torch_dtype": torch.bfloat16,
-        "device_map": args.device,
+        # In DDP, strict device mapping avoids OOM on rank 0
+        "device_map": args.device if not is_distributed else {"": local_rank},
         "trust_remote_code": True,
     }
     
@@ -325,7 +355,8 @@ def main():
         dataset = SlurpDataset(items)
 
     if args.max_samples:
-        logger.info(f"Limiting to {args.max_samples} samples for dry run.")
+        if local_rank <= 0:
+            logger.info(f"Limiting to {args.max_samples} samples for dry run.")
         if isinstance(items, list):
             items = items[:args.max_samples]
             dataset = SlurpDataset(items)
@@ -333,7 +364,17 @@ def main():
             # Subset torch dataset
             dataset = torch.utils.data.Subset(dataset, range(args.max_samples))
     
-    logger.info(f"Num examples: {len(dataset)}")
+    if is_distributed:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset, num_replicas=world_size, rank=local_rank, shuffle=False
+        )
+        if local_rank <= 0:
+            logger.info(f"Num examples per rank: {len(sampler)}")
+    else:
+        sampler = None
+    
+    if local_rank <= 0:
+        logger.info(f"Num examples: {len(dataset)}")
     
     predictions = []
     
@@ -342,7 +383,8 @@ def main():
     
     # Set padding side to left for batch generation
     if processor.tokenizer.padding_side != "left":
-        logger.info("Setting tokenizer padding_side to 'left' for batch inference")
+        if local_rank <= 0:
+            logger.info("Setting tokenizer padding_side to 'left' for batch inference")
         processor.tokenizer.padding_side = "left"
     
     from train_qwen2_audio_slurp import load_audio
@@ -524,13 +566,37 @@ def main():
             predictions.append(pred_entry)
             
     # Save predictions
+    # Save predictions
     logger.info(f"Saving predictions to {output_file}...")
     with open(output_file, "w") as f:
         for p in predictions:
             f.write(json.dumps(p) + "\n")
             
+    if is_distributed:
+        torch.distributed.barrier()
+        # Rank 0 merges files
+        if local_rank == 0:
+            logger.info("Merging DDP output files...")
+            # Reconstruct base output filename (remove .rank0)
+            base_output = output_file.replace(".rank0", "")
+            
+            all_lines = []
+            for r in range(world_size):
+                rank_file = f"{base_output}.rank{r}"
+                if os.path.exists(rank_file):
+                    with open(rank_file, "r") as rf:
+                        all_lines.extend(rf.readlines())
+                    # cleanup
+                    os.remove(rank_file)
+            
+            with open(base_output, "w") as f_out:
+                for line in all_lines:
+                    f_out.write(line)
+            logger.info(f"Merged output saved to {base_output}")
+            
     # Evaluation is now handled by external shell scripts to properly manage keys (slurp_id vs file)
-    logger.info(f"Predictions saved. Please run evaluation script manually.")
+    if local_rank <= 0:
+        logger.info(f"Predictions saved. Please run evaluation script manually.")
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,7 @@ set -e
 MODEL_PATH="${1:-outputs/audio_text_mix}"
 TEST_FILE="${2:-slurp/dataset/slurp/test.jsonl}"
 OUTPUT_DIR="${3:-inference_outputs}"
+AUDIO_DIR="${4:-slurp/audio/slurp_real}"
 
 # Find latest checkpoint if directory given
 if [ -d "$MODEL_PATH" ]; then
@@ -22,12 +23,18 @@ echo "============================================================"
 echo " Model:     $MODEL_PATH"
 echo " Test File: $TEST_FILE"
 echo "============================================================"
+# GPU settings
+NUM_GPUS=2
 
-uv run run_eval.py \
+# 1. Run inference (generate predictions.jsonl)
+# Using torchrun for 2-GPU parallel inference
+torchrun --nproc_per_node=$NUM_GPUS run_eval.py \
   --model_path "$MODEL_PATH" \
+  --dataset slurp \
   --test_file "$TEST_FILE" \
+  --audio_dir "$AUDIO_DIR" \
   --output_dir "$OUTPUT_DIR" \
-  --batch_size 8 \
+  --batch_size 16 \
   --num_beams 3 \
   --no_transcript \
   --force_audio
