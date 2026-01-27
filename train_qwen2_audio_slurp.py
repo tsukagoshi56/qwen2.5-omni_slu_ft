@@ -441,24 +441,7 @@ class SlurpDataset(Dataset):
         return self.items[idx]
 
 
-class EpochControlCallback(TrainerCallback):
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        train_dataset = kwargs.get("train_dataloader").dataset if kwargs.get("train_dataloader") else None
-        # Usually train_dataset represents the dataset properly, but sometimes it is wrapped.
-        # Accessing trainer.train_dataset is safer if available in kwargs or via model... 
-        # But standard way is passed in kwargs? No, kwargs has model, tokenizer, optimizer...
-        # We need to access the trainer's dataset.
-        pass
-        
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        # We need to find the dataset object. 
-        # Since we cannot easily access 'trainer' instance here unless we bound it, 
-        # we will rely on the fact that we can pass the dataset to the callback __init__ if needed,
-        # OR we rely on the fact that 'train_dataset' is usually available in the scope where we define this.
-        # A cleaner way is to define this callback class inside main() or pass dataset to init.
-        pass
-
-
+class SpeechMassiveDataset(Dataset):
     def __init__(
         self,
         dataset: Any,
@@ -516,6 +499,8 @@ class EpochControlCallback(TrainerCallback):
             "scenario": record.get("scenario_str") or record.get("scenario", ""),
             "action": record.get("intent_str") or record.get("intent", ""),
         }
+
+
 
 
 @dataclass

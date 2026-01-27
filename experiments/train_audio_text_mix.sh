@@ -61,7 +61,6 @@ torchrun --nproc_per_node=$NUM_GPUS train_qwen2_audio_slurp.py \
   --gradient_accumulation_steps $GRAD_ACCUMULATION \
   --logging_steps 10 \
   --save_steps 500 \
-  --bf16 \
-  --ddp_find_unused_parameters False
+  --bf16
 
 echo "Training complete. Model saved to: $OUTPUT_DIR"
