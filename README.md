@@ -170,6 +170,7 @@ This codebase is aligned with the following specifications from the paper:
 To run strictly according to the paper (Text-only stage):
 
 ```bash
+# General (Simulated 8 GPUs environment)
 uv run train_qwen2_audio_slurp.py \
   --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
   --output_dir outputs/qwen2-text-slurp-paper \
@@ -178,6 +179,21 @@ uv run train_qwen2_audio_slurp.py \
   --learning_rate 5e-6 \
   --warmup_ratio 0.04 \
   --per_device_train_batch_size 2 \
+  --gradient_accumulation_steps 8 \
+  --bf16
+```
+
+### H200 Optimized (Single GPU)
+For a single H200 (141GB VRAM), you can increase the per-device batch size to match the paper's effective global batch size (128) more efficiently:
+```bash
+uv run train_qwen2_audio_slurp.py \
+  --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
+  --output_dir outputs/qwen2-text-slurp-paper-h200 \
+  --add_text_only \
+  --num_train_epochs 3 \
+  --learning_rate 5e-6 \
+  --warmup_ratio 0.04 \
+  --per_device_train_batch_size 16 \
   --gradient_accumulation_steps 8 \
   --bf16
 ```
