@@ -310,7 +310,14 @@ def main():
         # Audio mode: use all recordings (each file is a separate prediction keyed by filename)
         # Text-only mode: one item per slurp_id (prediction keyed by slurp_id)
         use_all = not args.add_text_only
-        items = build_items(args.test_file, args.audio_dir, use_all_recordings=use_all, add_text_only=args.add_text_only)
+        # For text-only evaluation, set train_text_only=True to prevent audio items from being added
+        items = build_items(
+            args.test_file, 
+            args.audio_dir, 
+            use_all_recordings=use_all, 
+            add_text_only=args.add_text_only,
+            train_text_only=args.add_text_only  # Prevents audio items when doing text-only eval
+        )
         dataset = SlurpDataset(items)
 
     if args.max_samples:
