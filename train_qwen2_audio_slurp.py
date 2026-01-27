@@ -611,10 +611,14 @@ class Qwen2AudioCollator:
             labels.append(label_ids)
 
         # Separate text and audio
-        text_features = [
             {k: v for k, v in f.items() if k in ["input_ids", "attention_mask"]}
             for f in features
         ]
+        
+        # Ensure right padding so that labels (which start at 0) align with input tokens
+        if self.processor.tokenizer.padding_side != "right":
+            self.processor.tokenizer.padding_side = "right"
+            
         batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
 
         if "input_features" in features[0]:
