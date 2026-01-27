@@ -33,6 +33,7 @@ uv run run_eval.py \
   --test_file "$TEST_FILE" \
   --output_dir "$OUTPUT_DIR" \
   --batch_size 32 \
-  --num_beams 3
+  --num_beams 3 \
+  --add_text_only
 
 echo "Evaluation complete."
