@@ -9,7 +9,7 @@ MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
 
 # Paper Hyperparameters for Direct Mixing
 NUM_EPOCHS=3
-LEARNING_RATE=3e-5
+LEARNING_RATE=4e-5
 WARMUP_RATIO=0.04
 
 # Multi-GPU Configuration
