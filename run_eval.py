@@ -375,12 +375,6 @@ def main():
                     "entities": standard_entities,
                     "raw_output": response_text
                 }
-
-            # Log the FIRST prompt for debugging (deduplicated logic if possible, but safe to repeat for simplicity)
-            if len(predictions) == 1:
-                logger.info("--- DEBUG: First Prompt Input ---")
-                logger.info(f"Prompt Text: {batch_texts[0]}")
-                logger.info("---------------------------------")
             else:
                 # Audio mode uses file key
                 audio_path = item.get("audio") or item.get("audio_path")
@@ -392,9 +386,9 @@ def main():
                     "entities": standard_entities,
                     "raw_output": response_text
                 }
-            
+
             # Log the FIRST prompt for debugging
-            if len(predictions) == 1:
+            if len(predictions) == 0:
                 logger.info("--- DEBUG: First Prompt Input ---")
                 logger.info(f"Prompt Text: {batch_texts[0]}")
                 logger.info("---------------------------------")
