@@ -462,6 +462,7 @@ def evaluate_model(model, processor, items, device, output_dir):
             "target": item["target"],
             "type": eval_type
         }
+        print(res)
         results.append(res)
 
     rank = local_rank if local_rank != -1 else 0

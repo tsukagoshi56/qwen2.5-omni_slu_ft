@@ -1,0 +1,10 @@
+{
+  "model_path": "dummy_model_path",
+  "num_samples": 2,
+  "accuracy": 1.0,
+  "classification_counts": {
+    "ambiguous_success": 2
+  },
+  "top_confusable_pairs": [],
+  "avg_entropy": 3.921500325202942
+}

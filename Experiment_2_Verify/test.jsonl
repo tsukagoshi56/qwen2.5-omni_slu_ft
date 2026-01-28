@@ -1,0 +1,2 @@
+{"slurp_id": 1, "sentence": "play music", "scenario": "play", "action": "music", "recordings": [{"file": "audio1.wav"}]}
+{"slurp_id": 2, "sentence": "stop music", "scenario": "stop", "action": "music", "recordings": [{"file": "audio2.wav"}]}

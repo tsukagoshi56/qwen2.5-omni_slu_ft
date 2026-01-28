@@ -1,0 +1,36 @@
+[
+  {
+    "index": 0,
+    "slurp_id": 1,
+    "audio_path": "dummy_audio_dir/audio1.wav",
+    "transcript": "play music",
+    "gt_scenario": "play",
+    "gt_action": "music",
+    "pred_scenario": "play",
+    "pred_action": "music",
+    "gt_label": "play_music",
+    "pred_label": "play_music",
+    "is_correct": true,
+    "entropy": 3.7928097248077393,
+    "confidence": 0.620719027519226,
+    "classification": "ambiguous_success",
+    "raw_output": "{\"scenario\": \"play\", \"action\": \"music\"}"
+  },
+  {
+    "index": 1,
+    "slurp_id": 2,
+    "audio_path": "dummy_audio_dir/audio2.wav",
+    "transcript": "stop music",
+    "gt_scenario": "stop",
+    "gt_action": "music",
+    "pred_scenario": "stop",
+    "pred_action": "music",
+    "gt_label": "stop_music",
+    "pred_label": "stop_music",
+    "is_correct": true,
+    "entropy": 4.0501909255981445,
+    "confidence": 0.5949809074401855,
+    "classification": "ambiguous_success",
+    "raw_output": "{\"scenario\": \"stop\", \"action\": \"music\"}"
+  }
+]

@@ -1,0 +1,42 @@
+{
+  "model_path": "dummy_model",
+  "num_samples": 200,
+  "accuracy": 0.79,
+  "classification_counts": {
+    "ambiguous_success": 40,
+    "success": 118,
+    "ambiguous_failure": 39,
+    "fatal_failure": 3
+  },
+  "top_confusable_pairs": [
+    {
+      "label_1": "play_music",
+      "label_2": "stop_music",
+      "error_1_to_2": 15,
+      "error_2_to_1": 24,
+      "mutual_error": 39
+    },
+    {
+      "label_1": "alarm_set",
+      "label_2": "play_music",
+      "error_1_to_2": 0,
+      "error_2_to_1": 1,
+      "mutual_error": 1
+    },
+    {
+      "label_1": "play_music",
+      "label_2": "weather_query",
+      "error_1_to_2": 1,
+      "error_2_to_1": 0,
+      "mutual_error": 1
+    },
+    {
+      "label_1": "stop_music",
+      "label_2": "weather_query",
+      "error_1_to_2": 1,
+      "error_2_to_1": 0,
+      "mutual_error": 1
+    }
+  ],
+  "avg_entropy": 0.6950552248916835
+}
