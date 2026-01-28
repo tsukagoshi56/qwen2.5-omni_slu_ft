@@ -529,9 +529,9 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
-    parser.add_argument("--num_train_epochs", type=int, default=2)
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--learning_rate", type=float, default=4e-5)
+    parser.add_argument("--num_train_epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--learning_rate", type=float, default=3e-5)
     
     # Smoke Test Flag
     parser.add_argument("--smoke", action="store_true", help="Run a quick smoke test with tiny data to verify pipeline.")
