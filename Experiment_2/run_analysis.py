@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration, AutoModelForCausalLM
@@ -181,10 +182,13 @@ class AnalysisCollator:
             batch_texts.append(text)
             
             if audio is not None:
-                if isinstance(audio, torch.Tensor) and audio.ndim > 1:
-                     audio = audio.squeeze()
+                if isinstance(audio, torch.Tensor):
+                     if audio.ndim > 1:
+                          audio = audio.squeeze()
+                     audio = audio.numpy()
                 elif hasattr(audio, "ndim") and audio.ndim > 1:
                      audio = audio.squeeze()
+                
                 batch_audios.append(audio)
         
         # Process inputs using processor directly
