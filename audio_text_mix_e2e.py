@@ -469,10 +469,10 @@ def evaluate_model(model, processor, items, device, output_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_file", type=str, default="slurp/dataset/slurp/train.jsonl")
+    parser.add_argument("--train_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiments/slurp/dataset/slurp/train.jsonl")
     parser.add_argument("--eval_file", type=str, default=None)
     parser.add_argument("--test_file", type=str, default=None)
-    parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
+    parser.add_argument("--audio_dir", type=str, default="/lustre/home/71200138/INTERSPEECH/experiments/slurp/audio/slurp_real")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
