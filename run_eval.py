@@ -460,22 +460,36 @@ def main():
         messages = [{"role": "user", "content": user_content}]
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
-        # Prepare inputs
+        # Prepare inputs (Reverted to separate calls to match training script exactly)
         if audio is not None:
             audio_np = audio.numpy() if isinstance(audio, torch.Tensor) else audio
             if audio_np.ndim > 1:
-                audio_np = audio_np.flatten() # Ensure 1D
+                audio_np = audio_np.flatten()
             
-            # Use unified processor call for better multimodal alignment
-            inputs = processor(
-                text=text,
-                audios=[audio_np],
+            # 1. Extract audio features (match training: max_length padding)
+            audio_features = processor.feature_extractor(
+                audio_np,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding="max_length",
+                return_attention_mask=True,
+            )
+            
+            # 2. Tokenize text (match training)
+            text_tokens = processor.tokenizer(
+                text,
                 return_tensors="pt",
                 padding=True,
-                sampling_rate=16000
             )
+            
+            inputs = {
+                **text_tokens,
+                "input_features": audio_features["input_features"],
+            }
+            if "attention_mask" in audio_features:
+                inputs["feature_attention_mask"] = audio_features["attention_mask"]
         else:
-            inputs = processor(text=text, return_tensors="pt", padding=True)
+            inputs = processor.tokenizer(text, return_tensors="pt", padding=True)
             
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         input_len = inputs["input_ids"].size(1)
