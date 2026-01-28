@@ -542,7 +542,11 @@ def main():
     )
 
     for inputs, batch_items, batch_texts in tqdm(dataloader):
-        inputs = inputs.to(model.device)
+        # Move inputs to device (handle both dict and BatchEncoding)
+        if hasattr(inputs, 'to'):
+            inputs = inputs.to(model.device)
+        else:
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
         # Generate for the whole batch
         with torch.no_grad():
@@ -555,7 +559,8 @@ def main():
             )
         
         # Decode
-        generated_ids = generated_ids[:, inputs.input_ids.size(1):]
+        input_len = inputs["input_ids"].size(1)
+        generated_ids = generated_ids[:, input_len:]
         responses = processor.batch_decode(generated_ids, skip_special_tokens=True)
         
         # Parse and collect predictions
