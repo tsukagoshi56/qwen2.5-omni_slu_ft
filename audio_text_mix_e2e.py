@@ -178,47 +178,47 @@ class AudioTextCollator:
         all_feature_attention_mask = []
         
         for item in batch:
-            # Load audio
-            audio = load_audio(item["audio_path"])
+            # Load audio as numpy array
+            audio_np = load_audio(item["audio_path"])
             
-            # Build conversation with chat template
+            # Build conversation with chat template - pass audio numpy array directly
             user_content = [
-                {"type": "audio", "audio": item["audio_path"]},
+                {"type": "audio", "audio": audio_np},
                 {"type": "text", "text": PROMPT}
             ]
             messages = [{"role": "user", "content": user_content}]
             
             # Apply chat template
-            text = self.processor.apply_chat_template(
+            prompt_text = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
             
             # Add target for training
             target = item.get("target", "")
-            full_text = text + target
+            full_text = prompt_text + target
             
-            # Process with processor
-            inputs = self.processor(
-                text=full_text,
-                audios=[audio],
+            # Process with processor (using correct signature: audio=, sampling_rate=)
+            target_sr = self.processor.feature_extractor.sampling_rate
+            
+            prompt_inputs = self.processor(
+                text=prompt_text,
+                audio=audio_np,
+                sampling_rate=target_sr,
                 return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
+            )
+            full_inputs = self.processor(
+                text=full_text,
+                audio=audio_np,
+                sampling_rate=target_sr,
+                return_tensors="pt",
             )
             
-            input_ids = inputs["input_ids"].squeeze(0)
-            attention_mask = inputs["attention_mask"].squeeze(0)
-            input_features = inputs.get("input_features")
-            feature_attention_mask = inputs.get("feature_attention_mask")
+            input_ids = full_inputs["input_ids"].squeeze(0)
+            attention_mask = full_inputs["attention_mask"].squeeze(0)
+            input_features = full_inputs.get("input_features")
+            feature_attention_mask = full_inputs.get("feature_attention_mask")
             
             # Create labels (mask prompt, only predict target)
-            # Find where target starts by tokenizing just the prompt
-            prompt_inputs = self.processor(
-                text=text,
-                audios=[audio],
-                return_tensors="pt",
-            )
             prompt_len = prompt_inputs["input_ids"].size(1)
             
             labels = input_ids.clone()
@@ -292,9 +292,9 @@ def evaluate_model(
         # Load audio
         audio = load_audio(item["audio_path"])
         
-        # Build conversation (same as training)
+        # Build conversation (same as training) - pass audio numpy directly
         user_content = [
-            {"type": "audio", "audio": item["audio_path"]},
+            {"type": "audio", "audio": audio},
             {"type": "text", "text": PROMPT}
         ]
         messages = [{"role": "user", "content": user_content}]
@@ -304,10 +304,12 @@ def evaluate_model(
             messages, tokenize=False, add_generation_prompt=True
         )
         
-        # Process input
+        # Process with processor (using correct signature: audio=, sampling_rate=)
+        target_sr = processor.feature_extractor.sampling_rate
         inputs = processor(
             text=text,
-            audios=[audio],
+            audio=audio,
+            sampling_rate=target_sr,
             return_tensors="pt",
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
