@@ -1186,10 +1186,32 @@ def main() -> None:
         target_dataset = eval_dataset if eval_dataset else train_dataset
         debug_items = []
         if target_dataset:
-            # Safely grab first few items for debugging
+            # Prioritize audio items for debugging
             num_debug = 5
-            for i in range(min(len(target_dataset), num_debug)):
-                debug_items.append(target_dataset[i])
+            count = 0
+            scan_limit = min(len(target_dataset), 1000)
+            
+            # First pass: try to find audio items
+            for i in range(scan_limit):
+                item = target_dataset[i]
+                if item.get("audio_path") is not None or item.get("audio") is not None:
+                    debug_items.append(item)
+                    count += 1
+                    if count >= num_debug:
+                        break
+            
+            # Fallback: if not enough audio items found, fill with any items
+            if count < num_debug:
+                for i in range(min(len(target_dataset), num_debug)):
+                     # Avoid duplicates if possible (simple check)
+                     # Note: item dict equality check might be expensive or fail, 
+                     # but here we rely on the fact that we scanned from index 0.
+                     # If we already picked item 0 as audio, we might duplicate it if we don't check index.
+                     # Simpler approach: just take from start if count == 0, else we have some audio items.
+                     if count == 0:
+                         debug_items.append(target_dataset[i])
+            
+            # If we still have fewer than num_debug (and count > 0), it's fine.
 
         if debug_items:
             trainer_callbacks.append(
