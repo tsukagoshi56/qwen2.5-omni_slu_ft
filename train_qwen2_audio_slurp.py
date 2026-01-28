@@ -713,8 +713,10 @@ class Qwen2AudioCollator:
 
         # Check which features have input_features (audio items only)
         audio_feature_list = [f for f in features if "input_features" in f]
+        has_audio_items = len(audio_feature_list) > 0
+        has_text_only_items = len(audio_feature_list) < len(features)
         
-        if audio_feature_list:
+        if has_audio_items:
             # DEBUG: Check input_features shape
             if not hasattr(self, '_debug_audio_printed'):
                 self._debug_audio_printed = True
@@ -722,19 +724,36 @@ class Qwen2AudioCollator:
                 print(f"DEBUG: input_features type = {type(f0)}", flush=True)
                 if hasattr(f0, 'shape'):
                     print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
-                elif hasattr(f0, '__len__'):
-                    print(f"DEBUG: input_features len = {len(f0)}", flush=True)
-                print(f"DEBUG: feature_extractor type = {type(self.processor.feature_extractor)}", flush=True)
-                print(f"DEBUG: num features with input_features = {len(audio_feature_list)} / {len(features)}", flush=True)
+                print(f"DEBUG: num audio items = {len(audio_feature_list)}, text-only = {len(features) - len(audio_feature_list)}", flush=True)
             
-            # Try stacking directly instead of using feature_extractor.pad
+            # Get reference shape from first audio item
+            ref_shape = audio_feature_list[0]["input_features"].shape
+            
+            # Build list with all items, adding dummy features for text-only items
+            all_input_features = []
+            all_attention_masks = []
+            
+            for f in features:
+                if "input_features" in f:
+                    all_input_features.append(f["input_features"])
+                    # Attention mask = 1 for real audio
+                    mask_len = f["input_features"].shape[-1] if f["input_features"].dim() > 1 else 1
+                    all_attention_masks.append(torch.ones(mask_len, dtype=torch.long))
+                else:
+                    # Text-only: add dummy zeros with same shape as audio features
+                    dummy = torch.zeros_like(audio_feature_list[0]["input_features"])
+                    all_input_features.append(dummy)
+                    # Attention mask = 0 for dummy audio (model will ignore these)
+                    mask_len = dummy.shape[-1] if dummy.dim() > 1 else 1
+                    all_attention_masks.append(torch.zeros(mask_len, dtype=torch.long))
+            
             try:
-                # Direct stack if shapes are compatible
-                stacked = torch.stack([f["input_features"] for f in audio_feature_list])
-                batch_out["input_features"] = stacked
+                # Stack all features
+                batch_out["input_features"] = torch.stack(all_input_features)
+                batch_out["feature_attention_mask"] = torch.stack(all_attention_masks)
             except Exception as e:
                 print(f"DEBUG: torch.stack failed: {e}", flush=True)
-                # Fallback: try padding with feature_extractor
+                # Fallback: try padding with feature_extractor (audio items only)
                 audio_features_for_pad = [{"input_features": f["input_features"]} for f in audio_feature_list]
                 if hasattr(self.processor.feature_extractor, "pad"):
                     audio_out = self.processor.feature_extractor.pad(
