@@ -6,7 +6,7 @@ import argparse
 # Configuration
 # ==========================================
 # データセットがあるフォルダのパス (必要に応じて変更してください)
-DEFAULT_DATA_DIR = "./slurp_data" 
+DEFAULT_DATA_DIR = "./slurp/dataset/slurp" 
 FILES_TO_PROCESS = ["train.jsonl", "devel.jsonl", "test.jsonl"]
 
 def extract_metadata(data_dir):
