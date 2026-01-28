@@ -564,22 +564,43 @@ class SampleGenerationCallback(TrainerCallback):
                         messages, tokenize=False, add_generation_prompt=True
                     )
                     
-                    # Prepare arguments for processor
-                    process_kwargs = {
-                        "text": [text],
-                        "return_tensors": "pt",
-                        "padding": True
-                    }
-                    
                     if audio_input is not None:
                         # Convert to numpy if tensor
                         if isinstance(audio_input, torch.Tensor):
                             audio_np = audio_input.numpy()
                         else:
                             audio_np = audio_input
-                        inputs = self.processor(audio=audio_np, sampling_rate=16000, **process_kwargs).to(model.device)
+                        
+                        # Extract audio features with proper padding
+                        audio_features = self.processor.feature_extractor(
+                            audio_np,
+                            sampling_rate=16000,
+                            return_tensors="pt",
+                            padding="max_length",
+                            return_attention_mask=True,
+                        )
+                        
+                        # Tokenize text
+                        text_tokens = self.processor.tokenizer(
+                            text,
+                            return_tensors="pt",
+                            padding=True,
+                        )
+                        
+                        inputs = {
+                            **text_tokens,
+                            "input_features": audio_features["input_features"],
+                        }
+                        if "attention_mask" in audio_features:
+                            inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                        inputs = {k: v.to(model.device) for k, v in inputs.items()}
                     else:
-                        inputs = self.processor(**process_kwargs).to(model.device)
+                        inputs = self.processor.tokenizer(
+                            text,
+                            return_tensors="pt",
+                            padding=True,
+                        )
+                        inputs = {k: v.to(model.device) for k, v in inputs.items()}
                     
                     generated_ids = model.generate(
                         **inputs,
@@ -655,34 +676,67 @@ class Qwen2AudioCollator:
                 full_messages, tokenize=False, add_generation_prompt=False
             )
 
-            call_kwargs = {
-                "return_tensors": "pt",
-                "truncation": True,
-                "max_length": self.config.max_length,
-            }
             if audio is not None:
-                # DEBUG: Check audio format before passing to processor
-                if not hasattr(self, '_debug_audio_format_printed'):
-                    self._debug_audio_format_printed = True
-                    print(f"DEBUG: audio type before processor = {type(audio)}", flush=True)
-                    if hasattr(audio, 'shape'):
-                        print(f"DEBUG: audio shape = {audio.shape}", flush=True)
-                    if hasattr(audio, 'dtype'):
-                        print(f"DEBUG: audio dtype = {audio.dtype}", flush=True)
-                    print(f"DEBUG: sampling_rate = {self.config.audio_sampling_rate}", flush=True)
-                
                 # Convert to numpy if tensor
                 if isinstance(audio, torch.Tensor):
                     audio_np = audio.numpy()
                 else:
                     audio_np = audio
                 
-                # Pass audio with sampling_rate
-                prompt_inputs = self.processor(text=prompt_text, audio=audio_np, sampling_rate=16000, **call_kwargs)
-                full_inputs = self.processor(text=full_text, audio=audio_np, sampling_rate=16000, **call_kwargs)
+                # DEBUG: Print audio info once
+                if not hasattr(self, '_debug_audio_format_printed'):
+                    self._debug_audio_format_printed = True
+                    print(f"DEBUG: raw audio length = {len(audio_np)} samples ({len(audio_np)/16000:.2f}s)", flush=True)
+                
+                # Extract audio features using feature_extractor directly with proper padding
+                audio_features = self.processor.feature_extractor(
+                    audio_np,
+                    sampling_rate=16000,
+                    return_tensors="pt",
+                    padding="max_length",  # Pad to max_length (3000 frames = 30 seconds)
+                    return_attention_mask=True,
+                )
+                
+                if not hasattr(self, '_debug_feature_printed'):
+                    self._debug_feature_printed = True
+                    print(f"DEBUG: input_features shape = {audio_features['input_features'].shape}", flush=True)
+                    if 'attention_mask' in audio_features:
+                        print(f"DEBUG: attention_mask shape = {audio_features['attention_mask'].shape}", flush=True)
+                
+                # Tokenize text
+                prompt_tokens = self.processor.tokenizer(
+                    prompt_text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.config.max_length,
+                )
+                full_tokens = self.processor.tokenizer(
+                    full_text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.config.max_length,
+                )
+                
+                # Combine text tokens with audio features
+                prompt_inputs = {**prompt_tokens, "input_features": audio_features["input_features"]}
+                full_inputs = {**full_tokens, "input_features": audio_features["input_features"]}
+                if "attention_mask" in audio_features:
+                    prompt_inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                    full_inputs["feature_attention_mask"] = audio_features["attention_mask"]
             else:
-                prompt_inputs = self.processor(text=prompt_text, **call_kwargs)
-                full_inputs = self.processor(text=full_text, **call_kwargs)
+                # Text-only: just tokenize
+                prompt_inputs = self.processor.tokenizer(
+                    prompt_text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.config.max_length,
+                )
+                full_inputs = self.processor.tokenizer(
+                    full_text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.config.max_length,
+                )
 
             prompt_len = prompt_inputs["input_ids"].shape[1]
             full_ids = full_inputs["input_ids"].squeeze(0)
