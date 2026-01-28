@@ -376,6 +376,7 @@ def main():
         processor.tokenizer.padding_side = "left"
     
     from train_qwen2_audio_slurp import load_audio
+    from torch.utils.data import DataLoader
     
     # Define Collator with robust batching logic (Ported from Qwen2AudioCollator)
     class EvalCollator:
