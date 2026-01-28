@@ -129,13 +129,15 @@ class DistributedHomogeneousBatchSampler(Sampler):
                  rank: Optional[int] = None, 
                  drop_last: bool = False,
                  seed: int = 0,
-                 shuffle: bool = True):
+                 shuffle: bool = True,
+                 total_epochs: int = 1): # 追加: 全エポック数を受け取る
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.seed = seed
         self.epoch = 0
         self.shuffle = shuffle
+        self.total_epochs = total_epochs # 追加
 
         if num_replicas is None:
             if not torch.distributed.is_available():
@@ -157,32 +159,69 @@ class DistributedHomogeneousBatchSampler(Sampler):
         self.local_text_indices = all_text[self.rank::self.num_replicas]
 
     def __iter__(self) -> Iterator[List[int]]:
-        g = torch.Generator()
-        g.manual_seed(self.seed + self.epoch)
+        # --- 1. Audio Data: Epochごとの分割ロジック ---
+        # 固定シードでシャッフルして、エポック間で重複がないように分割する
+        g_static = torch.Generator()
+        g_static.manual_seed(self.seed) # エポックに依存しない固定シード
         
-        audio_indices = torch.tensor(self.local_audio_indices)
-        text_indices = torch.tensor(self.local_text_indices)
-        
+        # ローカルの全音声データをシャッフル
+        audio_indices_tensor = torch.tensor(self.local_audio_indices)
         if self.shuffle:
-            audio_perm = torch.randperm(len(audio_indices), generator=g)
-            text_perm = torch.randperm(len(text_indices), generator=g)
-            audio_idxs = audio_indices[audio_perm].tolist()
-            text_idxs = text_indices[text_perm].tolist()
+            perm_static = torch.randperm(len(audio_indices_tensor), generator=g_static)
+            shuffled_audio = audio_indices_tensor[perm_static]
         else:
-            audio_idxs = audio_indices.tolist()
-            text_idxs = text_indices.tolist()
+            shuffled_audio = audio_indices_tensor
+
+        # 現在のエポックに対応するスライス（1/Total_Epochs）を計算
+        # 例: 3エポックの場合、Epoch 0: 0~33%, Epoch 1: 34~66%, Epoch 2: 67~100%
+        total_audio_count = len(shuffled_audio)
+        chunk_size = total_audio_count // self.total_epochs
+        
+        # エポックが total_epochs を超えた場合（追加学習など）はループさせる
+        current_chunk_idx = self.epoch % self.total_epochs
+        
+        start_idx = current_chunk_idx * chunk_size
+        # 最後のチャンクは余りを含めて最後まで取る
+        if current_chunk_idx == self.total_epochs - 1:
+            end_idx = total_audio_count
+        else:
+            end_idx = start_idx + chunk_size
+            
+        # 今のエポックで使う音声データ
+        active_audio_indices = shuffled_audio[start_idx:end_idx]
+
+        # --- 2. Text Data: 全量使用 ---
+        # テキストは毎回全量使う
+        active_text_indices = torch.tensor(self.local_text_indices)
+
+        # --- 3. Batching (Epoch依存のランダムシャッフル) ---
+        # バッチを作る順序はエポックごとにランダムに変える
+        g_dynamic = torch.Generator()
+        g_dynamic.manual_seed(self.seed + self.epoch) # エポックごとに変わるシード
+
+        if self.shuffle:
+            audio_perm = torch.randperm(len(active_audio_indices), generator=g_dynamic)
+            text_perm = torch.randperm(len(active_text_indices), generator=g_dynamic)
+            audio_idxs = active_audio_indices[audio_perm].tolist()
+            text_idxs = active_text_indices[text_perm].tolist()
+        else:
+            audio_idxs = active_audio_indices.tolist()
+            text_idxs = active_text_indices.tolist()
         
         batches = []
+        # Audio Batches
         for i in range(0, len(audio_idxs), self.batch_size):
             batch = audio_idxs[i : i + self.batch_size]
             if len(batch) == self.batch_size or not self.drop_last:
                 batches.append(batch)
-                
+        
+        # Text Batches
         for i in range(0, len(text_idxs), self.batch_size):
             batch = text_idxs[i : i + self.batch_size]
             if len(batch) == self.batch_size or not self.drop_last:
                 batches.append(batch)
         
+        # バッチ自体の順序をシャッフル (AudioバッチとTextバッチを混ぜる)
         if self.shuffle:
             random.seed(self.seed + self.epoch)
             random.shuffle(batches)
@@ -191,13 +230,24 @@ class DistributedHomogeneousBatchSampler(Sampler):
             yield batch
 
     def __len__(self):
-        audio_len = len(self.local_audio_indices)
-        text_len = len(self.local_text_indices)
-        audio_batches = (audio_len + self.batch_size - 1) // self.batch_size
-        text_batches = (text_len + self.batch_size - 1) // self.batch_size
+        # Audioは分割後のサイズで計算
+        total_audio = len(self.local_audio_indices)
+        chunk_size = total_audio // self.total_epochs
+        # 簡易計算: 最後のチャンクの余りを考慮して、平均的なサイズを返すか、
+        # あるいは現在のself.epochに基づいて厳密に計算する必要がありますが、
+        # ここではtqdmの目安のために平均的なサイズを使用します。
+        current_audio_len = chunk_size 
+        
+        # Textは全量
+        current_text_len = len(self.local_text_indices)
+        
+        audio_batches = (current_audio_len + self.batch_size - 1) // self.batch_size
+        text_batches = (current_text_len + self.batch_size - 1) // self.batch_size
+        
         if self.drop_last:
-            audio_batches = audio_len // self.batch_size
-            text_batches = text_len // self.batch_size
+            audio_batches = current_audio_len // self.batch_size
+            text_batches = current_text_len // self.batch_size
+            
         return audio_batches + text_batches
     
     def set_epoch(self, epoch: int):
@@ -298,7 +348,8 @@ class CustomTrainer(Trainer):
             num_replicas=self.args.world_size,
             rank=self.args.process_index,
             drop_last=self.args.dataloader_drop_last,
-            shuffle=True
+            shuffle=True,
+            total_epochs=int(self.args.num_train_epochs) # ここを追加
         )
         return DataLoader(
             self.train_dataset,
