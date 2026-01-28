@@ -260,11 +260,11 @@ def main():
     # This prevents OOM/Index errors if the tokenizer has added tokens (e.g. from training)
     # that the base model doesn't have.
     model_vocab = getattr(model.config, 'vocab_size', None)
-    tokenizer_vocab = processor.tokenizer.vocab_size
-    if model_vocab is not None and tokenizer_vocab > model_vocab:
-        logger.warning(f"Vocab size mismatch! Model: {model_vocab}, Tokenizer: {tokenizer_vocab}")
-        logger.info(f"Resizing model embeddings to {tokenizer_vocab} to match tokenizer...")
-        model.resize_token_embeddings(tokenizer_vocab)
+    tokenizer_len = len(processor.tokenizer)
+    if model_vocab is not None and tokenizer_len > model_vocab:
+        logger.warning(f"Vocab size mismatch! Model: {model_vocab}, Tokenizer: {tokenizer_len}")
+        logger.info(f"Resizing model embeddings to {tokenizer_len} to match tokenizer...")
+        model.resize_token_embeddings(tokenizer_len)
 
 
     
