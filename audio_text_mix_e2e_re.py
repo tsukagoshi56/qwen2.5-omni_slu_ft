@@ -556,7 +556,7 @@ def main():
         bf16=True,
         logging_steps=1 if args.smoke else 10,
         eval_strategy="steps" if len(eval_items) > 0 else "no",
-        eval_steps=2 if args.smoke else 5,
+        eval_steps=2 if args.smoke else 50,
         save_strategy="no",
         save_total_limit=None,
         remove_unused_columns=False,
