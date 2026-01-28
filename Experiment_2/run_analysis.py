@@ -16,6 +16,7 @@ Features are saved to disk for later visualization without re-running inference.
 
 import argparse
 import json
+import random
 import logging
 import os
 import sys
@@ -122,7 +123,7 @@ def classify_sample(
 class AnalysisCollator:
     """
     Collator for analysis that properly handles audio using feature_extractor and tokenizer separately.
-    This matches the approach in train_qwen2_audio_slurp.py's Qwen2AudioCollator.
+    Matches the robust logic in run_eval.py (EvalCollator) to support batching.
     """
     
     def __init__(self, processor, add_text_only=False):
@@ -130,13 +131,9 @@ class AnalysisCollator:
         self.add_text_only = add_text_only
 
     def __call__(self, batch):
-        """
-        Process batch items using feature_extractor and tokenizer separately.
-        Returns inputs dict, batch_items list, and prompt_texts list.
-        """
-        batch_inputs = []
-        batch_items = []
+        batch_items = batch
         batch_texts = []
+        features = []
         
         for item in batch:
             transcript = item.get("transcript", "")
@@ -148,21 +145,34 @@ class AnalysisCollator:
                 else:
                     prompt_text = PROMPT
             else:
-                # Audio mode: prompt is just PROMPT (no transcript)
-                prompt_text = PROMPT
+                # Audio mode logic
+                if item.get("audio_path"):
+                    prompt_text = PROMPT
+                elif transcript:
+                    prompt_text = f"{transcript}\n{PROMPT}"
+                else:
+                    prompt_text = PROMPT
             
-            # Build message content for chat template
+            # Build content
             user_content = []
             audio = None
             
             if not self.add_text_only:
                 audio_input = item.get("audio") or item.get("audio_path")
                 if audio_input:
-                    # Load audio
-                    audio = load_audio_input(audio_input, target_sr=self.processor.feature_extractor.sampling_rate)
-                    # Add audio placeholder for chat template
-                    audio_ref = item.get("audio_ref") or (audio_input if isinstance(audio_input, str) else "audio")
-                    user_content.append({"type": "audio", "audio": audio_ref})
+                    try:
+                        # Use load_audio_input which handles string paths
+                        target_sr = self.processor.feature_extractor.sampling_rate
+                        audio = load_audio_input(audio_input, target_sr=target_sr)
+                        
+                        audio_ref = item.get("audio_ref")
+                        if not audio_ref and isinstance(audio_input, str):
+                            audio_ref = audio_input
+                        if not audio_ref:
+                            audio_ref = "audio"
+                        user_content.append({"type": "audio", "audio": audio_ref})
+                    except Exception as e:
+                        logger.warning(f"Failed to load audio for {item}: {e}")
             
             user_content.append({"type": "text", "text": prompt_text})
             messages = [{"role": "user", "content": user_content}]
@@ -170,17 +180,14 @@ class AnalysisCollator:
             # Apply chat template
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             batch_texts.append(text)
-            batch_items.append(item)
             
-            # Process inputs - use feature_extractor and tokenizer separately (like train script)
+            # Process inputs
             if audio is not None:
-                # Convert to numpy
                 if isinstance(audio, torch.Tensor):
                     audio_np = audio.numpy()
                 else:
                     audio_np = audio
                 
-                # Extract audio features using feature_extractor
                 audio_features = self.processor.feature_extractor(
                     audio_np,
                     sampling_rate=16000,
@@ -189,40 +196,60 @@ class AnalysisCollator:
                     return_attention_mask=True,
                 )
                 
-                # Tokenize text
-                text_tokens = self.processor.tokenizer(
-                    text,
-                    return_tensors="pt",
-                    padding=True,
+                prompt_tokens = self.processor.tokenizer(
+                     text,
+                     return_tensors="pt",
+                     padding=False,
+                     truncation=False
                 )
                 
-                # Combine
-                inputs = {
-                    **text_tokens,
-                    "input_features": audio_features["input_features"],
-                }
+                prompt_inputs = {**prompt_tokens, "input_features": audio_features["input_features"]}
                 if "attention_mask" in audio_features:
-                    inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                    prompt_inputs["feature_attention_mask"] = audio_features["attention_mask"]
             else:
-                # Text-only: just tokenize
-                inputs = self.processor.tokenizer(
+                prompt_inputs = self.processor.tokenizer(
                     text,
                     return_tensors="pt",
-                    padding=True,
+                    padding=False,
+                    truncation=False 
                 )
             
-            batch_inputs.append(inputs)
+            # Squeeze logic
+            feature = {k: v.squeeze(0) if v.ndim > 1 and v.shape[0] == 1 else v.squeeze(0) for k, v in prompt_inputs.items()}
+            # Ensure 1D input_ids/attention_mask after squeeze
+            if feature["input_ids"].ndim == 0:
+                 feature["input_ids"] = feature["input_ids"].unsqueeze(0)
+            if "attention_mask" in feature and feature["attention_mask"].ndim == 0:
+                 feature["attention_mask"] = feature["attention_mask"].unsqueeze(0)
+
+            features.append(feature)
+
+        # Stacking logic
+        text_features = [
+            {k: v for k, v in f.items() if k in ["input_ids", "attention_mask"]}
+            for f in features
+        ]
         
-        # For batch_size=1, just return the single input
-        # For larger batches, we'd need to pad and stack - but batch_size=1 is recommended for analysis
-        if len(batch_inputs) == 1:
-            return batch_inputs[0], batch_items, batch_texts
+        if self.processor.tokenizer.padding_side != "left":
+            self.processor.tokenizer.padding_side = "left"
+            
+        batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
         
-        # For batch_size > 1: need to handle padding properly
-        # This is complex for mixed audio/text, so we recommend batch_size=1
-        # For now, just return first item and log warning
-        logger.warning("Batch size > 1 detected. Using first item only. Recommend batch_size=1 for analysis.")
-        return batch_inputs[0], [batch_items[0]], [batch_texts[0]]
+        # Stack audio
+        audio_feature_list = [(i, f) for i, f in enumerate(features) if "input_features" in f]
+        if audio_feature_list:
+            try:
+                stacked_features = torch.stack([f["input_features"] for _, f in audio_feature_list])
+                batch_out["input_features"] = stacked_features
+                
+                if "feature_attention_mask" in audio_feature_list[0][1]:
+                    stacked_mask = torch.stack([f["feature_attention_mask"] for _, f in audio_feature_list])
+                    batch_out["feature_attention_mask"] = stacked_mask
+            except Exception as e:
+                logger.error(f"Stacking audio features failed: {e}")
+                raise e
+                
+        return batch_out, batch_items, batch_texts
 
 
 def run_analysis(args):
@@ -288,7 +315,12 @@ def run_analysis(args):
         train_text_only=args.add_text_only
     )
     
-    if args.max_samples:
+    if args.num_samples:
+        random.seed(42)
+        if len(items) > args.num_samples:
+             items = random.sample(items, args.num_samples)
+        logger.info(f"Randomly selected {len(items)} samples (requested {args.num_samples})")
+    elif args.max_samples:
         items = items[:args.max_samples]
         logger.info(f"Limited to {args.max_samples} samples")
     
@@ -298,7 +330,7 @@ def run_analysis(args):
     collator = AnalysisCollator(processor, args.add_text_only)
     dataloader = DataLoader(
         dataset,
-        batch_size=1,  # Force batch_size=1 for proper handling
+        batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collator
@@ -567,7 +599,8 @@ def main():
     parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl", help="Path to test data")
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real", help="Path to audio directory")
     parser.add_argument("--output_dir", type=str, default="Experiment_2/output", help="Output directory")
-    parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples")
+    parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples (first N)")
+    parser.add_argument("--num_samples", type=int, default=None, help="Randomly select N samples")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size (must be 1 for proper handling)")
     parser.add_argument("--num_beams", type=int, default=3, help="Beam search size")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
