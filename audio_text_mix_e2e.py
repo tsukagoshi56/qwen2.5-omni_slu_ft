@@ -263,6 +263,10 @@ class SmartCollator:
     max_length: int = 512
     ignore_index: int = -100
     
+    def __post_init__(self):
+        # Ensure left padding for decoder-only models during generation
+        self.processor.tokenizer.padding_side = "left"
+    
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0: return {}
         is_audio_batch = (batch[0].get("audio_path") is not None)
@@ -549,7 +553,10 @@ def main():
     device = torch.device(f"cuda:{local_rank}") if local_rank != -1 else "cuda"
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    processor.tokenizer.padding_side = "left"  # Required for generation
+    # Configure tokenizer for decoder-only models
+    processor.tokenizer.padding_side = "left"
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
     
     model = MODEL_CLS.from_pretrained(
         args.model_name_or_path, dtype=torch.bfloat16, trust_remote_code=True
