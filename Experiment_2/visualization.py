@@ -2,30 +2,24 @@ import json
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-# 文字の縁取り効果用ライブラリ
-import matplotlib.patheffects as pe
-from sentence_transformers import SentenceTransformer
-from sklearn.decomposition import PCA
-from collections import Counter
+import networkx as nx  # ネットワーク図描画用
 import os
 import argparse
+from collections import Counter
 
 # ==========================================
 # 0. Configuration
 # ==========================================
 DEFAULT_PRED_FILE = "prediction.jsonl"
 DEFAULT_TEST_FILE = "test.jsonl"
-MODEL_NAME = "all-MiniLM-L6-v2"
-OUTPUT_DIR = "Experiment_2"  # 指定の出力フォルダ
+OUTPUT_DIR = "Experiment_2"
 
-# 可視化の設定
-plt.style.use('default')
+# デザイン設定
 plt.rcParams['font.family'] = 'DejaVu Sans'
 
 # ==========================================
 # 1. Data Loading
 # ==========================================
-# (データロード部分は変更ありません)
 def load_data(pred_path, test_path):
     print(f"Loading data from:\n  Pred: {pred_path}\n  Test: {test_path}")
     preds = {}
@@ -37,7 +31,7 @@ def load_data(pred_path, test_path):
                 if sid is not None:
                     preds[str(sid)] = d
     except FileNotFoundError:
-        print(f"Error: Prediction file not found at {pred_path}")
+        print("Error: Prediction file not found.")
         return pd.DataFrame()
 
     data = []
@@ -56,126 +50,141 @@ def load_data(pred_path, test_path):
                     }
                     data.append(entry)
     except FileNotFoundError:
-        print(f"Error: Test file not found at {test_path}")
+        print("Error: Test file not found.")
         return pd.DataFrame()
                 
     return pd.DataFrame(data)
 
 # ==========================================
-# 2. Gravity Field Visualization Logic (Enhanced)
+# 2. Network Visualization Logic
 # ==========================================
-def visualize_gravity_field(df, target_type='scenario', embedding_model_name=MODEL_NAME):
+def visualize_error_network(df, target_type='scenario'):
     gt_col = f'{target_type}_gt'
     pred_col = f'{target_type}_pred'
     
-    print(f"\nProcessing {target_type.upper()} visualization...")
+    print(f"\nProcessing {target_type.upper()} Network...")
     
+    # エラー抽出
     error_df = df[df[gt_col] != df[pred_col]].copy()
-    if len(error_df) == 0:
-        print(f"No errors found for {target_type}. Skipping.")
+    if len(error_df) == 0: return
+
+    # --- グラフデータの構築 ---
+    G = nx.DiGraph() # 有向グラフ
+    
+    # 頻出ペアの集計
+    pair_counts = Counter(zip(error_df[gt_col], error_df[pred_col]))
+    
+    # ノイズ除去: あまりに少ない間違い（1, 2回など）は描画しない方が綺麗
+    # エラー総数に応じて足切りラインを調整
+    min_edge_weight = 3 if len(error_df) > 500 else 1
+    
+    filtered_pairs = {k: v for k, v in pair_counts.items() if v >= min_edge_weight}
+    
+    if not filtered_pairs:
+        print("No significant errors to plot.")
         return
 
-    print(f"Total Errors: {len(error_df)}")
-
-    pred_counts = error_df[pred_col].value_counts().to_dict()
-    pair_counts = Counter(zip(error_df[gt_col], error_df[pred_col]))
-    all_labels = list(set(df[gt_col].unique()) | set(df[pred_col].unique()))
-    
-    print("Computing semantic embeddings (PCA)...")
-    model = SentenceTransformer(embedding_model_name)
-    embeddings = model.encode(all_labels)
-    
-    pca = PCA(n_components=2, random_state=42)
-    coords = pca.fit_transform(embeddings)
-    label_pos = {l: c for l, c in zip(all_labels, coords)}
-    
-    # --- PLOTTING ---
-    plt.figure(figsize=(14, 12), facecolor='white')
-    ax = plt.gca()
-    max_pred_count = max(pred_counts.values()) if pred_counts else 1
-    
-    # A. Arrows (吸収方向の強調)
-    top_pairs = pair_counts.most_common(150) # 表示数を少し増やす
-    for (gt, pred), count in top_pairs:
-        start = label_pos[gt]
-        end = label_pos[pred]
-        # 頻度に応じた太さと透明度
-        width = 0.6 + (count / max_pred_count) * 8.0
-        alpha = 0.2 + (count / max_pred_count) * 0.7
-        # 矢印の頭を強調 (サイズを大きく)
-        mutation_scale = 15 + (count / max_pred_count) * 35
+    # エッジ（矢印）を追加
+    for (src, dst), weight in filtered_pairs.items():
+        G.add_edge(src, dst, weight=weight)
         
-        ax.annotate("",
-                    xy=end, xycoords='data',
-                    xytext=start, textcoords='data',
-                    arrowprops=dict(arrowstyle="-|>", # 塗りつぶし矢印に変更して方向を明確化
-                                    connectionstyle="arc3,rad=0.15",
-                                    color="#c0392b",
-                                    lw=width,
-                                    alpha=alpha,
-                                    mutation_scale=mutation_scale), # 矢印サイズ
-                    zorder=4)
-
-    # B. Nodes & Labels (視認性向上)
-    # 文字の白い縁取り効果を定義
-    path_effect = [pe.withStroke(linewidth=3, foreground="white")]
-
-    for label in all_labels:
-        x, y = label_pos[label]
-        absorb_score = pred_counts.get(label, 0)
-        size = 150 + (absorb_score / max_pred_count) * 6000
+    # --- ノードの役割判定（色分け用） ---
+    # In-Degree (入次数) = 何回間違えられたか = ブラックホール度
+    in_degrees = dict(G.in_degree(weight='weight'))
+    max_in = max(in_degrees.values()) if in_degrees else 1
+    
+    # ノードリスト作成
+    node_colors = []
+    node_sizes = []
+    labels = {}
+    
+    # ブラックホール判定ライン
+    hub_threshold = max_in * 0.2
+    
+    for node in G.nodes():
+        score = in_degrees.get(node, 0)
         
-        if absorb_score > max_pred_count * 0.15:
-            color = '#e74c3c'; edgecolor = '#c0392b'; zorder = 10
-            fontweight = 'bold'
-            fontsize = 14 # サイズアップ
+        if score > hub_threshold:
+            # ブラックホール (Hub) -> 赤くて巨大
+            node_colors.append('#e74c3c') # Red
+            node_sizes.append(3000 + (score/max_in)*5000) 
         else:
-            color = '#3498db'; edgecolor = '#2980b9'; zorder = 5
-            fontweight = 'normal'
-            fontsize = 11 # サイズアップ
+            # 被害者 (Leaf) -> 青くて小さい
+            node_colors.append('#3498db') # Blue
+            node_sizes.append(300)
             
-        plt.scatter(x, y, s=size, c=color, alpha=0.7, edgecolors=edgecolor, linewidth=1.5, zorder=zorder)
-        
-        # ラベル表示（黒文字 + 白縁取り）
-        plt.text(x, y, label, fontsize=fontsize, fontweight=fontweight, 
-                 ha='center', va='center', color='black', zorder=zorder+1,
-                 path_effects=path_effect) # 縁取り適用
+        labels[node] = node
 
-    # 装飾と余白調整
-    title_str = f"Semantic Gravity Field: {target_type.upper()}\n(Large Arrows indicate absorption direction into 'Black Holes')"
-    plt.title(title_str, fontsize=18, pad=15)
-    plt.xlabel("Semantic Dimension 1"); plt.ylabel("Semantic Dimension 2")
-    plt.grid(True, linestyle='--', alpha=0.3)
-    plt.xticks([]); plt.yticks([])
+    # --- レイアウト計算 (これが「綺麗に配置」するキモ) ---
+    # k: ノード間の反発力（大きいほど広がる）
+    pos = nx.spring_layout(G, k=1.5, iterations=50, seed=42)
     
-    # 余白を狭く設定
-    plt.tight_layout(pad=1.2)
+    # --- 描画 ---
+    plt.figure(figsize=(16, 14), facecolor='white')
+    ax = plt.gca()
     
-    # 出力ディレクトリ作成と保存
+    # 1. ノード描画
+    nx.draw_networkx_nodes(G, pos, 
+                           node_color=node_colors, 
+                           node_size=node_sizes, 
+                           alpha=0.9, 
+                           edgecolors='white', 
+                           linewidths=2)
+    
+    # 2. ラベル描画
+    nx.draw_networkx_labels(G, pos, labels, 
+                            font_size=10, 
+                            font_color='white', 
+                            font_weight='bold')
+    
+    # 3. エッジ（矢印）描画
+    edges = G.edges(data=True)
+    weights = [d['weight'] for u, v, d in edges]
+    
+    # 太さの正規化
+    max_weight = max(weights) if weights else 1
+    widths = [1 + (w / max_weight) * 8 for w in weights]
+    
+    # カーブをつけて描画 (connectionstyle)
+    # これで直線が重ならず、フローが見やすくなる
+    nx.draw_networkx_edges(G, pos, 
+                           width=widths, 
+                           edge_color='#95a5a6', # グレーの矢印
+                           arrowstyle='-|>', 
+                           arrowsize=20,
+                           connectionstyle="arc3,rad=0.15",
+                           alpha=0.6)
+
+    # タイトル
+    plt.title(f"Error Concentration Network: {target_type.upper()}\n(Nodes naturally cluster around high-frequency error targets)", 
+              fontsize=18, color='#2c3e50')
+    
+    # 枠線を消す
+    plt.axis('off')
+    
+    # 保存
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_file = os.path.join(OUTPUT_DIR, f"gravity_field_{target_type}.png")
+    output_file = os.path.join(OUTPUT_DIR, f"network_graph_{target_type}.png")
     
+    plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"Saved visualization to {output_file}")
     plt.close()
 
 # ==========================================
-# 3. Main Execution
+# 3. Main
 # ==========================================
 def main():
-    parser = argparse.ArgumentParser(description="Visualize Semantic Gravity Field from prediction results.")
-    parser.add_argument("--pred_file", type=str, default=DEFAULT_PRED_FILE, help="Path to prediction.jsonl")
-    parser.add_argument("--test_file", type=str, default=DEFAULT_TEST_FILE, help="Path to test.jsonl")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pred_file", type=str, default=DEFAULT_PRED_FILE)
+    parser.add_argument("--test_file", type=str, default=DEFAULT_TEST_FILE)
     args = parser.parse_args()
 
     df = load_data(args.pred_file, args.test_file)
+    if len(df) == 0: return
     
-    if len(df) == 0:
-        print("Error: No data loaded. Please check file paths.")
-        return
-    
-    visualize_gravity_field(df, target_type='scenario')
-    visualize_gravity_field(df, target_type='action')
+    visualize_error_network(df, target_type='scenario')
+    visualize_error_network(df, target_type='action')
 
 if __name__ == "__main__":
     main()
