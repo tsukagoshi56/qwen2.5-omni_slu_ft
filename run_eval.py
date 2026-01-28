@@ -254,7 +254,7 @@ def main():
 
     logger.info(f"processor tokenizer name_or_path: {processor.tokenizer.name_or_path}")
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
-    logger.info(f"tokenizer vocab_size: {processor.tokenizer.vocab_size}")
+    logger.info(f"tokenizer len: {len(processor.tokenizer)}")
 
     # Critical: Resize embeddings if tokenizer size > model vocab size
     # This prevents OOM/Index errors if the tokenizer has added tokens (e.g. from training)
