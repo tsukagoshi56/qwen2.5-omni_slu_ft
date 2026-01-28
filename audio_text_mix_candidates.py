@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Audio-Text Mix Training & Distributed Inference
-(Hierarchical CoT + Fair Sampling + Robust DDP Infrastructure)
+(Hierarchical CoT + Fair Sampling + Batched Inference Speedup)
 """
 
 import argparse
@@ -190,15 +190,9 @@ def build_items_from_slurp(jsonl_path, audio_dir,
             found_path = None
             found_filename = None
             
-            # Deterministic: Only check first file
-            # Random: Check all until found (or random choice if available)
-            # Here we combine Robust Search with Selection Logic
-            
             if deterministic:
-                # Always look for the first one
                 rec_list = [data["recordings"][0]]
             else:
-                # Randomly shuffle check order to add variety during training
                 rec_list = data["recordings"][:]
                 random.shuffle(rec_list)
 
@@ -210,7 +204,6 @@ def build_items_from_slurp(jsonl_path, audio_dir,
                     found_filename = filename
                     break 
             
-            # Fallback for deterministic if first failed: check others just to have data
             if not found_path and deterministic and len(data["recordings"]) > 1:
                  for rec in data["recordings"][1:]:
                     filename = rec.get("file", "")
@@ -431,7 +424,7 @@ class SmartCollator:
         }
 
 # ==============================================================================
-# 4. Trainer (Pass total_epochs)
+# 4. Trainer
 # ==============================================================================
 
 class CustomTrainer(Trainer):
@@ -457,7 +450,7 @@ class CustomTrainer(Trainer):
         )
 
 # ==============================================================================
-# 5. Inference (Robust File-Based Merge + CoT Parsing)
+# 5. Inference (Batched + CoT Parsing + Robust Merge)
 # ==============================================================================
 
 def clean_json_text(text: str) -> str:
@@ -477,79 +470,145 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
         hyp = hypothesis.split()
         return 1.0 if ref != hyp else 0.0
 
-def run_distributed_inference(model, processor, items, output_path, device, rank, world_size):
+
+def run_distributed_inference(model, processor, items, output_path, device, rank, world_size, batch_size=1):
     model.eval()
     
+    # 1. Split Data (Rankごとに担当データを分割)
     my_items = items[rank::world_size]
+    
+    # 【重要】バッチ処理のために、Audio有無でタイプを揃える（混在バッチを避ける）
+    # ソート順序: type (audio/text) -> slurp_id
+    my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x["slurp_id"]))
+
     local_results = []
     
-    if rank == 0:
-        logger.info(f"Starting Inference. Total items: {len(items)}. Rank 0 items: {len(my_items)}")
+    # 【重要修正1】推論時は「左パディング」を強制する
+    processor.tokenizer.padding_side = "left"
     
-    for i, item in enumerate(my_items):
-        if rank == 0 and i % 5 == 0:
+    # 【重要修正2】pad_tokenがない場合はEOSを使う
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+
+    if rank == 0:
+        logger.info(f"Starting Inference. Items: {len(my_items)}. Batch size: {batch_size}")
+    
+    # サンプリングレート取得
+    sr = processor.feature_extractor.sampling_rate
+
+    # 2. Inference Loop (Batched)
+    # batch_size 単位でチャンク分割して処理
+    for i in range(0, len(my_items), batch_size):
+        batch_items = my_items[i : i + batch_size]
+        
+        if rank == 0 and i % 10 == 0:
             logger.info(f"Processing {i}/{len(my_items)}...")
 
-        audio_path = item.get("audio_path")
-        transcript = item.get("transcript", "")
-        
+        # バッチ内のデータをリスト化
+        texts = []
+        audios = []
+        has_audio = False
+
         try:
-            if audio_path:
-                sr = processor.feature_extractor.sampling_rate
-                audio, _ = librosa.load(audio_path, sr=sr)
-                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
-                text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+            for item in batch_items:
+                audio_path = item.get("audio_path")
+                transcript = item.get("transcript", "")
+
+                if audio_path:
+                    has_audio = True
+                    # 音声ロード
+                    audio, _ = librosa.load(audio_path, sr=sr)
+                    audios.append(audio)
+                    # プロンプト作成
+                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                    text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                    texts.append(text_input)
+                else:
+                    # テキストのみ
+                    user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
+                    text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                    texts.append(text_input)
+
+            # バッチ入力の作成（padding=True でバッチ内の長さを揃える）
+            if has_audio:
+                inputs = processor(
+                    text=texts, 
+                    audio=audios, 
+                    sampling_rate=sr, 
+                    return_tensors="pt", 
+                    padding=True
+                )
             else:
-                user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
-                text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-                inputs = processor(text=text_input, return_tensors="pt")
+                inputs = processor(
+                    text=texts, 
+                    return_tensors="pt", 
+                    padding=True
+                )
 
             inputs = {k: v.to(device) for k, v in inputs.items()}
             
+            # 【重要修正3】attention_maskを確実に利用して生成
             with torch.no_grad():
-                output_ids = model.generate(**inputs, max_new_tokens=512)
+                output_ids = model.generate(
+                    **inputs, 
+                    max_new_tokens=512,
+                    use_cache=True,
+                    pad_token_id=processor.tokenizer.pad_token_id
+                )
             
+            # デコード処理
+            # input部分を除去してデコード
             input_len = inputs["input_ids"].shape[1]
-            raw_output = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-            
-            # --- CoT Parsing ---
-            json_str = ""
-            if "Final JSON:" in raw_output:
-                json_str = raw_output.split("Final JSON:")[-1]
-            else:
-                matches = list(re.finditer(r'\{.*\}', raw_output, re.DOTALL))
-                if matches:
-                    json_str = matches[-1].group(0)
+            generated_ids = output_ids[:, input_len:]
+            raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+            # 結果を格納
+            for j, raw_output in enumerate(raw_outputs):
+                original_item = batch_items[j]
+                
+                # --- CoT Parsing Logic (Integrated from previous turn) ---
+                json_str = ""
+                if "Final JSON:" in raw_output:
+                    json_str = raw_output.split("Final JSON:")[-1]
                 else:
-                    json_str = raw_output
-            
-            json_str = clean_json_text(json_str)
-            parsed_obj = {}
-            try:
-                parsed_obj = json.loads(json_str)
-            except json.JSONDecodeError:
-                parsed_obj = {"scenario": "error", "action": "error", "entities": []}
+                    # Fallback: check for last {...} block
+                    matches = list(re.finditer(r'\{.*\}', raw_output, re.DOTALL))
+                    if matches:
+                        json_str = matches[-1].group(0)
+                    else:
+                        json_str = raw_output
+                
+                json_str = clean_json_text(json_str)
+                parsed_obj = {"scenario": "error", "action": "error", "entities": []} # 初期値
+                try:
+                    if json_str: # 空文字チェック
+                        parsed_obj = json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
 
-            wer_score = calculate_wer(transcript, raw_output)
+                wer_score = calculate_wer(original_item.get("transcript", ""), raw_output)
 
-            result_entry = {
-                "scenario": parsed_obj.get("scenario", ""),
-                "action": parsed_obj.get("action", ""),
-                "entities": parsed_obj.get("entities", []),
-                "file": item["file"],
-                "slurp_id": item["slurp_id"],
-                "wer": wer_score,
-                "transcript": transcript,
-                "raw_output": raw_output, # Contains Thought trace
-                "target": item["target"],
-                "type": "audio" if audio_path else "text"
-            }
-            local_results.append(result_entry)
+                result_entry = {
+                    "scenario": parsed_obj.get("scenario", ""),
+                    "action": parsed_obj.get("action", ""),
+                    "entities": parsed_obj.get("entities", []),
+                    "file": original_item["file"],
+                    "slurp_id": original_item["slurp_id"],
+                    "wer": wer_score,
+                    "transcript": original_item.get("transcript", ""),
+                    "raw_output": raw_output, # Contains Thought trace
+                    "target": original_item["target"],
+                    "type": "audio" if original_item.get("audio_path") else "text"
+                }
+                local_results.append(result_entry)
+
         except Exception as e:
-            logger.error(f"Rank {rank} failed on item {item.get('slurp_id')}: {e}")
+            logger.error(f"Rank {rank} failed on batch index {i}: {e}")
+            import traceback
+            traceback.print_exc()
 
-    # 3. Robust Save
+    # 3. Save Local Results
     temp_output_path = f"{output_path}.rank{rank}"
     try:
         with open(temp_output_path, "w") as f:
@@ -561,31 +620,24 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
     except Exception as e:
         logger.error(f"Rank {rank} failed to save temp file: {e}")
 
+    # 4. Wait & 5. Merge
     if world_size > 1:
         dist.barrier()
-
+    
     if rank == 0:
         logger.info(f"Merging results to {output_path}...")
         pattern = f"{output_path}.rank*"
         temp_files = glob.glob(pattern)
-        
-        if len(temp_files) == 0:
-             logger.error("No part files found! prediction.jsonl will be empty.")
-        
         with open(output_path, "w") as outfile:
             for fname in temp_files:
                 try:
                     with open(fname, "r") as infile:
                         shutil.copyfileobj(infile, outfile)
-                except Exception as e:
-                     logger.error(f"Failed to merge file {fname}: {e}")
-                
-                try:
                     os.remove(fname)
-                except:
-                    pass
-        logger.info(f"Successfully merged. Final output at {output_path}")
+                except Exception as e:
+                     logger.error(f"Merge error {fname}: {e}")
 
+                     
 # ==============================================================================
 # Main
 # ==============================================================================
@@ -598,10 +650,10 @@ def main():
     parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
-    parser.add_argument("--output_dir", type=str, default="outputs/qwen_cot_fair_robust")
-    parser.add_argument("--num_train_epochs", type=int, default=2)
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
+    parser.add_argument("--num_train_epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--learning_rate", type=float, default=3e-5)
     
     # Cluster Files
     parser.add_argument("--scenario_cluster", type=str, default="Experiment_2/scenarios_clustered_n3.txt")
@@ -609,7 +661,7 @@ def main():
     parser.add_argument("--slot_cluster", type=str, default="Experiment_2/slots_clustered_n3.txt")
     
     # Smoke Test Flag
-    parser.add_argument("--smoke", action="store_true", help="Run a quick smoke test")
+    parser.add_argument("--smoke", action="store_true", help="Run a quick smoke test with tiny data to verify pipeline.")
     
     args = parser.parse_args()
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -624,9 +676,13 @@ def main():
         world_size = 1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # --- Smoke Mode Adjustment for Training ---
+    # Training用のmax_samples設定
     if args.smoke:
-        if rank == 0: logger.info("!!! SMOKE MODE ACTIVATED !!!")
-        args.max_samples = 32
+        if rank == 0:
+            logger.info("!!! SMOKE MODE ACTIVATED !!!")
+        
+        args.max_samples = 32 # 学習は極小で
         args.num_train_epochs = 1
         args.report_to = "none"
 
@@ -635,13 +691,13 @@ def main():
     ac_manager = ClusterManager(args.action_cluster)
     sl_manager = ClusterManager(args.slot_cluster)
 
-    # --- Data Loading ---
+    # --- Data Loading (Train/Eval) ---
     if args.eval_file is None:
         args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
     if args.test_file is None:
         args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
 
-    # Train: Random selection (or deterministic if desired, but random is better for training)
+    # Train: Random selection (CoT target)
     train_items = build_items_from_slurp(
         args.train_file, args.audio_dir, sc_manager, ac_manager, sl_manager, 
         max_samples=args.max_samples, deterministic=False
@@ -655,7 +711,7 @@ def main():
     if rank == 0:
         print(f"Train: {len(train_items)} | Eval: {len(eval_items)}")
 
-    # --- Model ---
+    # --- Model & Processor ---
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     model = Qwen2AudioForConditionalGeneration.from_pretrained(
         args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
@@ -703,13 +759,19 @@ def main():
         dist.barrier()
 
     # --- Inference ---
-    test_max_samples = 10 if args.smoke else None
+    # ここで Smokeモードの時は Testデータを制限
+    test_max_samples = 1000 if args.smoke else None
+    
     if rank == 0 and args.smoke:
         logger.info(f"Loading only {test_max_samples} items for Test (Smoke Mode).")
 
     test_items = build_items_from_slurp(
-        args.test_file, args.audio_dir, sc_manager, ac_manager, sl_manager,
-        max_samples=test_max_samples, deterministic=True, add_text_only=False
+        args.test_file, 
+        args.audio_dir, 
+        sc_manager, ac_manager, sl_manager, # Pass managers for CoT
+        max_samples=test_max_samples,
+        add_text_only=False,
+        deterministic=True
     )
     
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
@@ -721,8 +783,9 @@ def main():
         output_path=output_jsonl,
         device=device,
         rank=rank,
-        world_size=world_size
-    )
+        world_size=world_size,
+        batch_size=args.batch_size  # 引数からバッチサイズを渡す
+    )   
 
     if world_size > 1:
         dist.destroy_process_group()

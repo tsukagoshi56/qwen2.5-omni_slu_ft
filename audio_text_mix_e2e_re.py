@@ -374,65 +374,64 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
 def run_distributed_inference(model, processor, items, output_path, device, rank, world_size, batch_size=1):
     model.eval()
     
-    # 1. Split Data (Rankごとに担当データを分割)
+    # 1. Split Data
     my_items = items[rank::world_size]
-    
-    # 【重要】バッチ処理のために、Audio有無でタイプを揃える（混在バッチを避ける）
-    # ソート順序: type (audio/text) -> slurp_id
+    # バッチ処理のために、Audio有無とIDでソート（同じタイプをまとめる）
     my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x["slurp_id"]))
 
     local_results = []
     
-    # 推論時は「左パディング」が鉄則（生成位置を揃えるため）
+    # 【重要修正1】推論時は「左パディング」を強制する
     processor.tokenizer.padding_side = "left"
     
+    # 【重要修正2】pad_tokenがない場合はEOSを使う（これをしないとエラーやバグの元になる）
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+
     if rank == 0:
-        logger.info(f"Starting Inference. Total items: {len(items)}. Rank 0 items: {len(my_items)}. Batch size: {batch_size}")
+        logger.info(f"Starting Inference. Items: {len(my_items)}. Batch size: {batch_size}")
     
-    # サンプリングレート取得
     sr = processor.feature_extractor.sampling_rate
 
-    # 2. Inference Loop (Batched)
-    # batch_size 単位でチャンク分割して処理
+    # 2. Inference Loop
     for i in range(0, len(my_items), batch_size):
         batch_items = my_items[i : i + batch_size]
         
         if rank == 0 and i % 10 == 0:
             logger.info(f"Processing {i}/{len(my_items)}...")
 
-        # バッチ内のデータをリスト化
         texts = []
         audios = []
         has_audio = False
 
         try:
+            # 入力データの準備
             for item in batch_items:
                 audio_path = item.get("audio_path")
                 transcript = item.get("transcript", "")
 
                 if audio_path:
                     has_audio = True
-                    # 音声ロード
                     audio, _ = librosa.load(audio_path, sr=sr)
                     audios.append(audio)
-                    # プロンプト作成
                     user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                    # チャットテンプレート適用
                     text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
                     texts.append(text_input)
                 else:
-                    # テキストのみ
                     user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
                     text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
                     texts.append(text_input)
 
-            # バッチ入力の作成（padding=True でバッチ内の長さを揃える）
+            # バッチ作成（padding=Trueにより、バッチ内で最長の長さに合わせて左パディングされる）
             if has_audio:
                 inputs = processor(
                     text=texts, 
                     audio=audios, 
                     sampling_rate=sr, 
                     return_tensors="pt", 
-                    padding=True
+                    padding=True # padding=Trueでバッチ化
                 )
             else:
                 inputs = processor(
@@ -443,26 +442,33 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
 
             inputs = {k: v.to(device) for k, v in inputs.items()}
             
+            # 【重要修正3】attention_maskを確実に利用して生成
             with torch.no_grad():
-                # generate実行
-                output_ids = model.generate(**inputs, max_new_tokens=128)
+                output_ids = model.generate(
+                    **inputs, 
+                    max_new_tokens=128,
+                    use_cache=True,
+                    pad_token_id=processor.tokenizer.pad_token_id  # 明示的に指定
+                )
             
             # デコード処理
-            # input部分を除去してデコード
             input_len = inputs["input_ids"].shape[1]
             generated_ids = output_ids[:, input_len:]
             raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-            # 結果を格納
+            # 結果の格納
             for j, raw_output in enumerate(raw_outputs):
                 original_item = batch_items[j]
                 
+                # JSONパース（エラーハンドリング強化）
                 json_str = clean_json_text(raw_output)
-                parsed_obj = {}
+                parsed_obj = {"scenario": "error", "action": "error", "entities": []} # 初期値
                 try:
-                    parsed_obj = json.loads(json_str)
+                    if json_str: # 空文字チェック
+                        parsed_obj = json.loads(json_str)
                 except json.JSONDecodeError:
-                    parsed_obj = {"scenario": "error", "action": "error", "entities": []}
+                    # JSONが壊れている場合はそのままerror扱い
+                    pass
 
                 wer_score = calculate_wer(original_item.get("transcript", ""), raw_output)
 
@@ -481,8 +487,9 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                 local_results.append(result_entry)
 
         except Exception as e:
-            logger.error(f"Rank {rank} failed on batch starting at index {i}: {e}")
-            # エラー時は念のため個別処理やスキップを行うが、ここではログ出力のみ
+            logger.error(f"Rank {rank} failed on batch index {i}: {e}")
+            import traceback
+            traceback.print_exc() # 詳細なエラーログを表示
 
     # 3. Save Local Results (以下変更なし)
     temp_output_path = f"{output_path}.rank{rank}"
@@ -492,7 +499,6 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                 f.write(json.dumps(res, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        logger.info(f"Rank {rank}: Saved {len(local_results)} results to {temp_output_path}")
     except Exception as e:
         logger.error(f"Rank {rank} failed to save temp file: {e}")
 
@@ -501,8 +507,6 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
         dist.barrier()
     
     if rank == 0:
-        # (マージ処理は元のコードと同じ)
-        # ... 省略 ...
         logger.info(f"Merging results to {output_path}...")
         pattern = f"{output_path}.rank*"
         temp_files = glob.glob(pattern)
@@ -514,7 +518,6 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                     os.remove(fname)
                 except Exception as e:
                      logger.error(f"Merge error {fname}: {e}")
-
                      
 # ==============================================================================
 # Main
