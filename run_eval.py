@@ -282,6 +282,12 @@ def main():
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
     logger.info(f"tokenizer vocab_size: {processor.tokenizer.vocab_size}")
 
+    # Critical Fix: Resize model embeddings if vocab size mismatch
+    if getattr(model.config, "vocab_size", None) != len(processor.tokenizer):
+        logger.warning(f"Vocab size mismatch! Model: {model.config.vocab_size}, Tokenizer: {len(processor.tokenizer)}")
+        logger.info(f"Resizing model embeddings to {len(processor.tokenizer)}...")
+        model.resize_token_embeddings(len(processor.tokenizer))
+    
     # Ensure pad_token is set (crucial for batch generation)
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
