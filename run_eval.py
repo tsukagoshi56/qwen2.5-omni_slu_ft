@@ -230,43 +230,16 @@ def main():
             logger.error("peft is required to load LoRA adapters. Please install it with 'pip install peft'.")
             raise
     else:
-        # Standard loading logic
-        processor = None
-        processor_load_paths = [args.model_path]
-        
-        # If path looks like a checkpoint, try parent directory first
-        if "checkpoint-" in os.path.basename(os.path.normpath(args.model_path)):
-            parent_dir = os.path.dirname(os.path.normpath(args.model_path))
-            processor_load_paths.insert(0, parent_dir)
-            logger.info(f"Detected checkpoint path. Will try parent directory first: {parent_dir}")
-        
-        for load_path in processor_load_paths:
-            try:
-                logger.info(f"Attempting to load processor from: {load_path}")
-                processor = AutoProcessor.from_pretrained(load_path, trust_remote_code=True, fix_mistral_regex=True)
-                logger.info(f"Successfully loaded processor from: {load_path}")
-                break
-            except Exception as e:
-                logger.warning(f"Failed to load processor from {load_path}: {e}")
-                continue
-        
-        # Fallback: Try reading _name_or_path from config.json to find base model
-        if processor is None:
-            try:
-                config_path = os.path.join(args.model_path, "config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, "r") as f:
-                        config_dict = json.load(f)
-                    base_model = config_dict.get("_name_or_path")
-                    if base_model and base_model != args.model_path:
-                        logger.info(f"Fallback: Loading processor from base model in config.json: {base_model}")
-                        processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True, fix_mistral_regex=True)
-            except Exception as e2:
-                logger.warning(f"Fallback (config.json) also failed: {e2}")
-        
-        if processor is None:
-            raise RuntimeError(f"Could not load processor from any path. Tried: {processor_load_paths}")
+        # Standard loading logic: Load both processor and model from the same path
+        # This assumes args.model_path points to the directory containing both model and saved processor
         try:
+            logger.info(f"Loading processor from: {args.model_path}")
+            processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load processor from {args.model_path}: {e}")
+
+        try:
+            logger.info(f"Loading model from: {args.model_path}")
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 args.model_path,
                 **model_kwargs
@@ -278,15 +251,19 @@ def main():
                 args.model_path, 
                 **model_kwargs
             )
+
     logger.info(f"processor tokenizer name_or_path: {processor.tokenizer.name_or_path}")
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
     logger.info(f"tokenizer vocab_size: {processor.tokenizer.vocab_size}")
 
-    # Critical Fix: Resize model embeddings if vocab size mismatch
-    if getattr(model.config, "vocab_size", None) != len(processor.tokenizer):
-        logger.warning(f"Vocab size mismatch! Model: {model.config.vocab_size}, Tokenizer: {len(processor.tokenizer)}")
-        logger.info(f"Resizing model embeddings to {len(processor.tokenizer)}...")
-        model.resize_token_embeddings(len(processor.tokenizer))
+    # Strict assertion for vocab size match
+    model_vocab = getattr(model.config, 'vocab_size', None)
+    tokenizer_vocab = processor.tokenizer.vocab_size
+    if model_vocab != tokenizer_vocab:
+        # Check if resize is possible or just assert
+        assert model_vocab == tokenizer_vocab, \
+            f"Vocab mismatch! model={model_vocab}, tokenizer={tokenizer_vocab}. " \
+            "Cannot proceed as this will cause generation errors."
     
     # Ensure pad_token is set (crucial for batch generation)
     if processor.tokenizer.pad_token is None:
