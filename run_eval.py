@@ -1,5 +1,6 @@
 import argparse
 import json
+import random
 import logging
 import os
 import subprocess
@@ -113,7 +114,8 @@ def main():
     parser.add_argument("--output_dir", type=str, default="inference_outputs", help="Base directory for output predictions")
     parser.add_argument("--output_file", type=str, default=None, help="Specific output filename (optional, overrides auto-naming)")
     parser.add_argument("--gold_file", type=str, default=None, help="Path to gold file for evaluation script (defaults to test_file)")
-    parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples (for dry run)")
+    parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples (for dry run - first N)")
+    parser.add_argument("--num_samples", type=int, default=None, help="Randomly select N samples for testing")
     parser.add_argument("--batch_size", type=int, default=1, help="Inference batch size")
     parser.add_argument("--num_beams", type=int, default=3, help="Beam search size (default 3 per paper)")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading")
@@ -342,7 +344,27 @@ def main():
         )
         dataset = SlurpDataset(items)
 
-    if args.max_samples:
+    if args.num_samples:
+        if local_rank <= 0:
+            logger.info(f"Randomly selecting {args.num_samples} samples.")
+        
+        # Ensure reproducibility for random selection
+        random.seed(42)
+        
+        if isinstance(items, list):
+            if len(items) > args.num_samples:
+                items = random.sample(items, args.num_samples)
+            dataset = SlurpDataset(items)
+        else:
+            # Subset torch dataset (SpeechMassive)
+            total_len = len(dataset)
+            num_to_select = min(total_len, args.num_samples)
+            indices = random.sample(range(total_len), num_to_select)
+            dataset = torch.utils.data.Subset(dataset, indices)
+            # Update items if it was just an alias to dataset
+            items = dataset
+
+    elif args.max_samples:
         if local_rank <= 0:
             logger.info(f"Limiting to {args.max_samples} samples for dry run.")
         if isinstance(items, list):
@@ -351,6 +373,7 @@ def main():
         else:
             # Subset torch dataset
             dataset = torch.utils.data.Subset(dataset, range(args.max_samples))
+            items = dataset
     
     if is_distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(
