@@ -1264,6 +1264,7 @@ def main() -> None:
         data_collator=collator,
         callbacks=trainer_callbacks,
         grouped_batch_sampler=grouped_sampler,
+        tokenizer=processor.tokenizer,  # Ensure tokenizer is saved with checkpoints
     )
     trainer.train()
     trainer.save_model(args.output_dir)
@@ -1279,6 +1280,13 @@ def main() -> None:
     except ImportError:
         base_config = model.config
     
+    # Critical: Sync vocab_size in config before saving
+    if hasattr(base_config, "vocab_size"):
+        tokenizer_len = len(processor.tokenizer)
+        if base_config.vocab_size != tokenizer_len:
+            print(f"Updating config vocab_size from {base_config.vocab_size} to {tokenizer_len}")
+            base_config.vocab_size = tokenizer_len
+
     base_config.save_pretrained(args.output_dir)
     processor.save_pretrained(args.output_dir)
 
