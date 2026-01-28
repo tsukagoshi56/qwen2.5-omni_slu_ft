@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Audio-Text Mix Training & Distributed Inference (Slurp Format)
-with Smoke Test Mode
+with Smoke Test Mode (Fixed Inference Sync)
 """
 
 import argparse
@@ -69,7 +69,7 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         lines = f.readlines()
         
     for line in lines:
-        if max_samples and len(items) >= max_samples:
+        if max_samples is not None and len(items) >= max_samples:
             break
         data = json.loads(line)
         slurp_id = data.get("slurp_id", -1)
@@ -115,7 +115,7 @@ class MixedDataset(Dataset):
         return {**self.items[idx], "original_idx": idx}
 
 # ==============================================================================
-# 2. Sampler (Epoch Slicing for Audio)
+# 2. Sampler
 # ==============================================================================
 
 class DistributedHomogeneousBatchSampler(Sampler):
@@ -164,7 +164,6 @@ class DistributedHomogeneousBatchSampler(Sampler):
             shuffled_audio = audio_indices_tensor
 
         total_audio_count = len(shuffled_audio)
-        # Avoid division by zero if dataset is smaller than epochs (Smoke test handling)
         actual_epochs = max(1, self.total_epochs)
         chunk_size = max(1, total_audio_count // actual_epochs)
         
@@ -330,7 +329,7 @@ class CustomTrainer(Trainer):
         )
 
 # ==============================================================================
-# 5. Inference (File-Based Merge to avoid NCCL Error)
+# 5. Inference (Robust File-Based Merge)
 # ==============================================================================
 
 def clean_json_text(text: str) -> str:
@@ -351,18 +350,14 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
         return 1.0 if ref != hyp else 0.0
 
 def run_distributed_inference(model, processor, items, output_path, device, rank, world_size):
-    """
-    Runs inference on all ranks, saves partial files per rank, and merges them at the end.
-    Avoids 'DistBackendError' by removing large data communication via NCCL.
-    """
     model.eval()
     
-    # 1. Split Data
+    # 1. Split Data (Rankごとに担当データを分割)
     my_items = items[rank::world_size]
     local_results = []
     
     if rank == 0:
-        logger.info(f"Starting Distributed Inference on {len(items)} items total (Rank {rank} has {len(my_items)}).")
+        logger.info(f"Starting Inference. Total items: {len(items)}. Rank 0 items: {len(my_items)}")
     
     # 2. Inference Loop
     for i, item in enumerate(my_items):
@@ -373,56 +368,64 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
         transcript = item.get("transcript", "")
         
         # Prepare inputs
-        if audio_path:
-            audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
-            user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
-            text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
-        else:
-            user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
-            text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=text_input, return_tensors="pt")
-
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        # Generate
-        with torch.no_grad():
-            output_ids = model.generate(**inputs, max_new_tokens=128)
-            
-        input_len = inputs["input_ids"].shape[1]
-        raw_output = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-        
-        # Parse
-        json_str = clean_json_text(raw_output)
-        parsed_obj = {}
         try:
-            parsed_obj = json.loads(json_str)
-        except json.JSONDecodeError:
-            parsed_obj = {"scenario": "error", "action": "error", "entities": []}
+            if audio_path:
+                audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
+                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
+            else:
+                user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
+                text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                inputs = processor(text=text_input, return_tensors="pt")
 
-        wer_score = calculate_wer(transcript, raw_output)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                output_ids = model.generate(**inputs, max_new_tokens=128)
+            
+            input_len = inputs["input_ids"].shape[1]
+            raw_output = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+            
+            json_str = clean_json_text(raw_output)
+            parsed_obj = {}
+            try:
+                parsed_obj = json.loads(json_str)
+            except json.JSONDecodeError:
+                parsed_obj = {"scenario": "error", "action": "error", "entities": []}
 
-        result_entry = {
-            "scenario": parsed_obj.get("scenario", ""),
-            "action": parsed_obj.get("action", ""),
-            "entities": parsed_obj.get("entities", []),
-            "file": item["file"],
-            "slurp_id": item["slurp_id"],
-            "wer": wer_score,
-            "transcript": transcript,
-            "raw_output": raw_output,
-            "target": item["target"],
-            "type": "audio" if audio_path else "text"
-        }
-        local_results.append(result_entry)
+            wer_score = calculate_wer(transcript, raw_output)
+
+            result_entry = {
+                "scenario": parsed_obj.get("scenario", ""),
+                "action": parsed_obj.get("action", ""),
+                "entities": parsed_obj.get("entities", []),
+                "file": item["file"],
+                "slurp_id": item["slurp_id"],
+                "wer": wer_score,
+                "transcript": transcript,
+                "raw_output": raw_output,
+                "target": item["target"],
+                "type": "audio" if audio_path else "text"
+            }
+            local_results.append(result_entry)
+        except Exception as e:
+            logger.error(f"Rank {rank} failed on item {item.get('slurp_id')}: {e}")
 
     # 3. Save Local Results directly to a temporary file
     temp_output_path = f"{output_path}.rank{rank}"
-    with open(temp_output_path, "w") as f:
-        for res in local_results:
-            f.write(json.dumps(res, ensure_ascii=False) + "\n")
     
-    logger.info(f"Rank {rank}: Saved results to {temp_output_path}")
+    # データを書き込み、確実にディスクにフラッシュする
+    try:
+        with open(temp_output_path, "w") as f:
+            for res in local_results:
+                f.write(json.dumps(res, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())  # 重要: OSのバッファを強制書き込み
+        
+        logger.info(f"Rank {rank}: Saved {len(local_results)} results to {temp_output_path}")
+    except Exception as e:
+        logger.error(f"Rank {rank} failed to save temp file: {e}")
 
     # 4. Wait for all ranks
     if world_size > 1:
@@ -431,14 +434,30 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
     # 5. Merge files (Rank 0 only)
     if rank == 0:
         logger.info(f"Merging results to {output_path}...")
+        
+        # ワイルドカードでファイルを検索
+        pattern = f"{output_path}.rank*"
+        temp_files = glob.glob(pattern)
+        logger.info(f"Found {len(temp_files)} part files: {temp_files}")
+
+        if len(temp_files) == 0:
+             logger.error("No part files found! prediction.jsonl will be empty.")
+        
         with open(output_path, "w") as outfile:
-            pattern = f"{output_path}.rank*"
-            temp_files = glob.glob(pattern)
             for fname in temp_files:
-                with open(fname, "r") as infile:
-                    shutil.copyfileobj(infile, outfile)
-                os.remove(fname) # Clean up
-        logger.info("Done.")
+                try:
+                    with open(fname, "r") as infile:
+                        shutil.copyfileobj(infile, outfile)
+                except Exception as e:
+                     logger.error(f"Failed to merge file {fname}: {e}")
+                
+                # クリーンアップ（必要ならコメントアウト）
+                try:
+                    os.remove(fname)
+                except:
+                    pass
+        
+        logger.info(f"Successfully merged. Final output at {output_path}")
 
 # ==============================================================================
 # Main
@@ -473,19 +492,17 @@ def main():
         world_size = 1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Smoke Mode Adjustment ---
+    # --- Smoke Mode Adjustment for Training ---
+    # Training用のmax_samples設定
     if args.smoke:
         if rank == 0:
             logger.info("!!! SMOKE MODE ACTIVATED !!!")
-            logger.info("Using minimal data and epochs to verify pipeline integrity.")
         
-        # GPU数 x バッチサイズ x 2回分くらいあれば十分
-        smoke_samples = max(16, args.batch_size * world_size * 4)
-        args.max_samples = smoke_samples
+        args.max_samples = 32 # 学習は極小で
         args.num_train_epochs = 1
-        args.report_to = "none" # Disable heavy logging
+        args.report_to = "none"
 
-    # --- Data Loading ---
+    # --- Data Loading (Train/Eval) ---
     if args.eval_file is None:
         args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
     if args.test_file is None:
@@ -517,7 +534,7 @@ def main():
         bf16=True,
         logging_steps=1 if args.smoke else 10,
         eval_strategy="steps" if len(eval_items) > 0 else "no",
-        eval_steps=2 if args.smoke else 50, # Smoke時は頻繁にEval
+        eval_steps=2 if args.smoke else 5,
         save_strategy="no",
         save_total_limit=None,
         remove_unused_columns=False,
@@ -543,14 +560,18 @@ def main():
     if world_size > 1:
         dist.barrier()
 
-    # --- Inference (Distributed & Robust) ---
-    if args.test_file is None:
-        args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
+    # --- Inference ---
+    # ここで Smokeモードの時は Testデータを10件に制限
+    
+    test_max_samples = 10 if args.smoke else None
+    
+    if rank == 0 and args.smoke:
+        logger.info(f"Loading only {test_max_samples} items for Test (Smoke Mode).")
 
     test_items = build_items_from_slurp(
         args.test_file, 
         args.audio_dir, 
-        max_samples=args.max_samples if args.smoke else None, 
+        max_samples=test_max_samples, # Explicitly use 10 for smoke
         add_text_only=False 
     )
     
