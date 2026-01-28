@@ -188,7 +188,7 @@ class AnalysisCollator:
         if batch_audios:
             inputs = self.processor(
                 text=batch_texts,
-                audios=batch_audios,
+                audio=batch_audios,
                 return_tensors="pt",
                 padding=True,
             )
