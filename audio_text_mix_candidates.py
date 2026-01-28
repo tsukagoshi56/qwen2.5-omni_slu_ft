@@ -457,12 +457,13 @@ class CustomTrainer(Trainer):
 # ==============================================================================
 
 class SampleGenerationCallback(TrainerCallback):
-    def __init__(self, eval_items, processor, num_samples=3):
+    def __init__(self, eval_items, processor, model, num_samples=3):
         self.eval_items = eval_items
         self.processor = processor
+        self.model = model
         self.num_samples = num_samples
 
-    def on_evaluate(self, args, state, control, model, tokenizer, **kwargs):
+    def on_evaluate(self, args, state, control, **kwargs):
         if args.process_index != 0:
             return
 
@@ -474,8 +475,8 @@ class SampleGenerationCallback(TrainerCallback):
             return
 
         samples = random.sample(audio_items, min(self.num_samples, len(audio_items)))
-        device = model.device
-        model.eval()
+        device = self.model.device
+        self.model.eval()
         sr = self.processor.feature_extractor.sampling_rate
 
         for item in samples:
@@ -493,7 +494,7 @@ class SampleGenerationCallback(TrainerCallback):
                 
                 with torch.no_grad():
                     # CoT用にトークン数を多めに
-                    output_ids = model.generate(**inputs, max_new_tokens=512)
+                    output_ids = self.model.generate(**inputs, max_new_tokens=512)
                 
                 input_len = inputs["input_ids"].shape[1]
                 generated_text = self.processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
@@ -518,7 +519,7 @@ class SampleGenerationCallback(TrainerCallback):
             except Exception as e:
                 logger.error(f"Failed to generate sample for {item.get('file')}: {e}")
         logger.info("-" * 60 + "\n")
-        model.train()
+        self.model.train()
 
 # ==============================================================================
 # 6. Inference (Batched + CoT Parsing + Robust Merge)
@@ -824,6 +825,7 @@ def main():
         trainer.add_callback(SampleGenerationCallback(
             eval_items=eval_items,
             processor=processor,
+            model=model,
             num_samples=3
         ))
 
