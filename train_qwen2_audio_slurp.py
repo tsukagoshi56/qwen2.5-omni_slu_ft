@@ -1,4 +1,5 @@
 import argparse
+import functools
 import inspect
 import json
 import os
@@ -13,6 +14,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
+
+# Performance: Enable debug output via environment variable
+_DEBUG_AUDIO = os.environ.get("DEBUG_AUDIO", "0") == "1"
 
 try:
     from transformers import Qwen2AudioForConditionalGeneration
@@ -33,7 +37,8 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
+def _load_audio_impl(path: str, target_sr: Optional[int]) -> torch.Tensor:
+    """Internal audio loading implementation."""
     try:
         import soundfile as sf
 
@@ -67,6 +72,33 @@ def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
                     "Resample required but torchaudio/librosa not available."
                 ) from exc
     return audio
+
+
+# Performance: LRU cache for audio loading (caches up to 5000 files)
+@functools.lru_cache(maxsize=5000)
+def _load_audio_cached(path: str, target_sr: Optional[int]) -> bytes:
+    """Cached audio loading - stores as bytes for hashability."""
+    audio = _load_audio_impl(path, target_sr)
+    # Convert to bytes for caching (tensors aren't hashable)
+    return audio.numpy().tobytes(), audio.shape, audio.dtype
+
+
+def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
+    """Load audio with optional caching."""
+    # Check if caching is enabled via environment variable
+    use_cache = os.environ.get("AUDIO_CACHE", "1") == "1"
+    
+    if use_cache and isinstance(path, str) and os.path.isfile(path):
+        try:
+            audio_bytes, shape, dtype = _load_audio_cached(path, target_sr)
+            import numpy as np
+            audio_np = np.frombuffer(audio_bytes, dtype=np.float32).reshape(shape)
+            return torch.tensor(audio_np, dtype=torch.float32)
+        except Exception:
+            # Fall back to direct loading if caching fails
+            pass
+    
+    return _load_audio_impl(path, target_sr)
 
 
 def load_audio_input(
@@ -758,8 +790,8 @@ class Qwen2AudioCollator:
                 else:
                     audio_np = audio
                 
-                # DEBUG: Print audio info once
-                if not hasattr(self, '_debug_audio_format_printed'):
+                # DEBUG: Print audio info once (controlled by DEBUG_AUDIO env var)
+                if _DEBUG_AUDIO and not hasattr(self, '_debug_audio_format_printed'):
                     self._debug_audio_format_printed = True
                     print(f"DEBUG: raw audio length = {len(audio_np)} samples ({len(audio_np)/16000:.2f}s)", flush=True)
                 
@@ -840,8 +872,8 @@ class Qwen2AudioCollator:
         audio_feature_list = [(i, f) for i, f in enumerate(features) if "input_features" in f]
         
         if audio_feature_list:
-            # DEBUG: Check input_features shape
-            if not hasattr(self, '_debug_audio_printed'):
+            # DEBUG: Check input_features shape (controlled by DEBUG_AUDIO env var)
+            if _DEBUG_AUDIO and not hasattr(self, '_debug_audio_printed'):
                 self._debug_audio_printed = True
                 f0 = audio_feature_list[0][1]["input_features"]
                 print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
@@ -964,7 +996,7 @@ def make_training_arguments(
         "report_to": "none",
         "remove_unused_columns": False,
         "gradient_checkpointing": args.gradient_checkpointing,
-        "dataloader_num_workers": 2,
+        "dataloader_num_workers": 4,  # Performance: increased from 2
         "push_to_hub": args.push_to_hub,
     }
 
