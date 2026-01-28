@@ -338,7 +338,7 @@ def run_analysis(args):
             for i in range(last_hidden.size(0)):
                 attn_mask = inputs.get("attention_mask")
                 if attn_mask is not None:
-                    last_pos = attn_mask[i].sum().item() - 1
+                    last_pos = int(attn_mask[i].sum().item()) - 1
                 else:
                     last_pos = last_hidden.size(1) - 1
                 hidden_vec = last_hidden[i, last_pos, :].cpu().float()

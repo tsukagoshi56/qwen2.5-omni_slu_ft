@@ -68,7 +68,7 @@ def apply_tsne(hidden_states: np.ndarray, perplexity: int = 30, n_iter: int = 10
     tsne = TSNE(
         n_components=2,
         perplexity=min(perplexity, len(hidden_states) - 1),
-        n_iter=n_iter,
+        max_iter=n_iter,
         random_state=42,
         verbose=1
     )

@@ -256,14 +256,7 @@ def main():
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
     logger.info(f"tokenizer vocab_size: {processor.tokenizer.vocab_size}")
 
-    # Resize model embeddings if vocab size mismatch
-    # (Usually this should match if training script saved config correctly, but we keep this as a safety fallback)
-    model_vocab = getattr(model.config, 'vocab_size', None)
-    tokenizer_vocab = processor.tokenizer.vocab_size
-    if model_vocab is not None and model_vocab != tokenizer_vocab:
-        logger.warning(f"Vocab size mismatch! Model: {model_vocab}, Tokenizer: {tokenizer_vocab}")
-        logger.info(f"Resizing model embeddings to {tokenizer_vocab} to match tokenizer...")
-        model.resize_token_embeddings(tokenizer_vocab)
+
     
     # Ensure pad_token is set (crucial for batch generation)
     if processor.tokenizer.pad_token is None:

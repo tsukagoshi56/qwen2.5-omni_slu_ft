@@ -18,6 +18,10 @@ dependencies = [
     "tabulate",
     "textdistance",
     "jiwer",
+    "matplotlib>=3.10.8",
+    "seaborn>=0.13.2",
+    "scikit-learn>=1.7.2",
+    "umap-learn>=0.5.11",
 ]
 
 [tool.uv]

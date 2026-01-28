@@ -1282,10 +1282,24 @@ def main() -> None:
     
     # Critical: Sync vocab_size in config before saving
     if hasattr(base_config, "vocab_size"):
-        tokenizer_len = len(processor.tokenizer)
-        if base_config.vocab_size != tokenizer_len:
-            print(f"Updating config vocab_size from {base_config.vocab_size} to {tokenizer_len}")
-            base_config.vocab_size = tokenizer_len
+    # Critical: Sync vocab_size in config before saving to match actual embedding matrix size
+    if hasattr(base_config, "vocab_size"):
+        # Attempt to get the actual embedding size from the model
+        base_model_for_emb = model
+        try:
+            from peft import PeftModel
+            if isinstance(model, PeftModel):
+                base_model_for_emb = model.get_base_model()
+        except ImportError:
+            pass
+
+        if hasattr(base_model_for_emb, "get_input_embeddings"):
+            emb_layer = base_model_for_emb.get_input_embeddings()
+            if emb_layer is not None and hasattr(emb_layer, "weight"):
+                real_vocab_size = emb_layer.weight.shape[0]
+                if base_config.vocab_size != real_vocab_size:
+                    print(f"Updating config vocab_size from {base_config.vocab_size} to {real_vocab_size} (matches embedding matrix)")
+                    base_config.vocab_size = real_vocab_size
 
     base_config.save_pretrained(args.output_dir)
     processor.save_pretrained(args.output_dir)
