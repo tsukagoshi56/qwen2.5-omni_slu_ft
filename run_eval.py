@@ -466,6 +466,10 @@ def main():
             try:
                 # Always use 16000 for Qwen2-Audio consistency
                 audio = load_audio_input(audio_input, 16000)
+                # Debug: log audio info for first few samples
+                if i < 3 and local_rank <= 0:
+                    audio_path_str = audio_input if isinstance(audio_input, str) else "HF audio dict"
+                    logger.info(f"DEBUG Sample {i}: audio_path={audio_path_str}, audio_len={len(audio) if audio is not None else 0}")
             except Exception as e:
                 logger.warning(f"Failed to load audio for sample {i}: {e}")
 
