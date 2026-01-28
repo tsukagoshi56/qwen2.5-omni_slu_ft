@@ -256,12 +256,11 @@ def main():
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
     logger.info(f"tokenizer len: {len(processor.tokenizer)}")
 
-    # Critical: Resize embeddings if tokenizer size > model vocab size
-    # This prevents OOM/Index errors if the tokenizer has added tokens (e.g. from training)
-    # that the base model doesn't have.
+    # Critical: Resize embeddings if tokenizer size differs from model vocab size
+    # This ensures alignment for any token mismatch (added or removed tokens)
     model_vocab = getattr(model.config, 'vocab_size', None)
     tokenizer_len = len(processor.tokenizer)
-    if model_vocab is not None and tokenizer_len > model_vocab:
+    if model_vocab is not None and tokenizer_len != model_vocab:
         logger.warning(f"Vocab size mismatch! Model: {model_vocab}, Tokenizer: {tokenizer_len}")
         logger.info(f"Resizing model embeddings to {tokenizer_len} to match tokenizer...")
         model.resize_token_embeddings(tokenizer_len)
