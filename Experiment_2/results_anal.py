@@ -41,30 +41,45 @@ def load_data(pred_path, test_path):
         for line in f:
             d = json.loads(line)
             
-            # --- Scenario Derivation Logic (User Request) ---
-            # intent: "qa_currency", action: "currency" -> scenario: "qa"
-            # scenario = intent - action
+            # --- Scenario Derivation Logic ---
             intent = d.get("intent", "")
             action = d.get("action", "")
             
-            # Force derivation as per user instruction "use logic intent - action = scenario"
-            # regardless of whether scenario exists, to be safe/consistent with usage.
-            if intent and action:
-                # Remove action from end of intent
-                # Be careful if action is substring but not suffix? usually suffix in SLURP.
-                if intent.endswith(action):
-                    derived = intent[:-(len(action))].strip("_")
-                    d["scenario"] = derived
-                else:
-                    # Fallback: if intent doesn't end with action, keep original or empty
-                    pass
+            # 1. Try deriving from intent - action
+            derived_scenario = None
+            if intent and action and intent.endswith(action):
+                 # intent = "alarm_set", action="set" -> "alarm"
+                 # intent = "qa_maths", action="maths" -> "qa"
+                 # handle cases where underscore might be involved
+                 prefix = intent[:-(len(action))].rstrip("_")
+                 if prefix:
+                     derived_scenario = prefix
             
+            # 2. If derivation failed, try splitting intent by underscore
+            if not derived_scenario and intent:
+                 parts = intent.split("_")
+                 if len(parts) > 1:
+                     derived_scenario = parts[0]
+            
+            # 3. Apply derived scenario if original is missing OR we want to force derivation
+            # User request: "use scenario from intent without action" -> implies override
+            if derived_scenario:
+                d["scenario"] = derived_scenario
+            elif "scenario" not in d:
+                # 4. Fallback if still no scenario
+                d["scenario"] = "unknown"
+
             sid = d.get('slurp_id')
             if sid is not None and sid in preds:
                 gts.append(d)
                 pred_list.append(preds[sid])
                 
-    return pd.DataFrame(gts), pd.DataFrame(pred_list)
+    # Ensure DataFrame has 'scenario' column even if all were empty (unlikely with above logic)
+    df_gt = pd.DataFrame(gts)
+    if 'scenario' not in df_gt.columns:
+        df_gt['scenario'] = "unknown"
+        
+    return df_gt, pd.DataFrame(pred_list)
 
 class LabelClusterer:
     def __init__(self, labels, embedding_model_name=MODEL_NAME):
