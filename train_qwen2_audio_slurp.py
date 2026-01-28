@@ -942,7 +942,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--push_to_hub", action="store_true", help="Push the trained model to the Hugging Face Hub.")
     parser.add_argument("--debug_generation", action="store_true", help="Enable debug generation during training.")
-    parser.add_argument("--debug_generation_steps", type=int, default=5, help="Steps between debug generations.")
+    parser.add_argument("--debug_generation_steps", type=int, default=50, help="Steps between debug generations.")
     parser.add_argument("--no_transcript", action="store_true", help="Do NOT include transcript in the prompt (Audio -> JSON only)")
     return parser
 
