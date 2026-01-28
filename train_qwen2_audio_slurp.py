@@ -439,6 +439,10 @@ class SlurpDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.items[idx]
+    
+    def is_audio_item(self, idx: int) -> bool:
+        """Check if item at index has audio."""
+        return self.items[idx].get("audio_path") is not None
 
 
 class SpeechMassiveDataset(Dataset):
@@ -508,6 +512,77 @@ class CollatorConfig:
     max_length: int
     audio_sampling_rate: Optional[int]
     include_transcript: bool = True
+
+
+class GroupedBatchSampler:
+    """Batch sampler that groups audio and text-only items separately.
+    
+    This ensures batches are homogeneous: either all audio or all text-only.
+    This is required for Qwen2-Audio since the number of <audio> tokens in text
+    must match the number of input_features.
+    """
+    def __init__(self, dataset, batch_size: int, shuffle: bool = True, drop_last: bool = False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        
+        # Separate indices by type
+        self.audio_indices = []
+        self.text_indices = []
+        
+        for i in range(len(dataset)):
+            if hasattr(dataset, 'is_audio_item'):
+                is_audio = dataset.is_audio_item(i)
+            else:
+                item = dataset[i]
+                is_audio = item.get("audio_path") is not None or item.get("audio") is not None
+            
+            if is_audio:
+                self.audio_indices.append(i)
+            else:
+                self.text_indices.append(i)
+        
+        print(f"GroupedBatchSampler: {len(self.audio_indices)} audio items, {len(self.text_indices)} text items", flush=True)
+    
+    def __iter__(self):
+        # Shuffle within each group
+        audio_indices = self.audio_indices.copy()
+        text_indices = self.text_indices.copy()
+        
+        if self.shuffle:
+            random.shuffle(audio_indices)
+            random.shuffle(text_indices)
+        
+        # Create batches (audio batches first, then text batches)
+        batches = []
+        
+        for i in range(0, len(audio_indices), self.batch_size):
+            batch = audio_indices[i:i + self.batch_size]
+            if len(batch) == self.batch_size or not self.drop_last:
+                batches.append(batch)
+        
+        for i in range(0, len(text_indices), self.batch_size):
+            batch = text_indices[i:i + self.batch_size]
+            if len(batch) == self.batch_size or not self.drop_last:
+                batches.append(batch)
+        
+        # Shuffle the order of batches (mix audio and text batches)
+        if self.shuffle:
+            random.shuffle(batches)
+        
+        for batch in batches:
+            yield batch
+    
+    def __len__(self):
+        audio_batches = len(self.audio_indices) // self.batch_size
+        text_batches = len(self.text_indices) // self.batch_size
+        if not self.drop_last:
+            if len(self.audio_indices) % self.batch_size > 0:
+                audio_batches += 1
+            if len(self.text_indices) % self.batch_size > 0:
+                text_batches += 1
+        return audio_batches + text_batches
 
 
 class SampleGenerationCallback(TrainerCallback):
@@ -766,49 +841,31 @@ class Qwen2AudioCollator:
         batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
 
         # Check which features have input_features (audio items only)
-        audio_feature_list = [f for f in features if "input_features" in f]
-        has_audio_items = len(audio_feature_list) > 0
-        has_text_only_items = len(audio_feature_list) < len(features)
+        # IMPORTANT: Only stack input_features from audio items. 
+        # Text-only items don't have <audio> tokens, so they should NOT have input_features.
+        audio_feature_list = [(i, f) for i, f in enumerate(features) if "input_features" in f]
         
-        if has_audio_items:
+        if audio_feature_list:
             # DEBUG: Check input_features shape
             if not hasattr(self, '_debug_audio_printed'):
                 self._debug_audio_printed = True
-                f0 = audio_feature_list[0]["input_features"]
-                print(f"DEBUG: input_features type = {type(f0)}", flush=True)
-                if hasattr(f0, 'shape'):
-                    print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
-                print(f"DEBUG: num audio items = {len(audio_feature_list)}, text-only = {len(features) - len(audio_feature_list)}", flush=True)
+                f0 = audio_feature_list[0][1]["input_features"]
+                print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
+                print(f"DEBUG: num audio items = {len(audio_feature_list)}, total = {len(features)}", flush=True)
             
-            # Get reference shape from first audio item
-            ref_shape = audio_feature_list[0]["input_features"].shape
-            
-            # Build list with all items, adding dummy features for text-only items
-            all_input_features = []
-            all_attention_masks = []
-            
-            for f in features:
-                if "input_features" in f:
-                    all_input_features.append(f["input_features"])
-                    # Attention mask = 1 for real audio
-                    mask_len = f["input_features"].shape[-1] if f["input_features"].dim() > 1 else 1
-                    all_attention_masks.append(torch.ones(mask_len, dtype=torch.long))
-                else:
-                    # Text-only: add dummy zeros with same shape as audio features
-                    dummy = torch.zeros_like(audio_feature_list[0]["input_features"])
-                    all_input_features.append(dummy)
-                    # Attention mask = 0 for dummy audio (model will ignore these)
-                    mask_len = dummy.shape[-1] if dummy.dim() > 1 else 1
-                    all_attention_masks.append(torch.zeros(mask_len, dtype=torch.long))
-            
+            # Stack only the audio features (matching the number of <audio> tokens in the batch)
             try:
-                # Stack all features
-                batch_out["input_features"] = torch.stack(all_input_features)
-                batch_out["feature_attention_mask"] = torch.stack(all_attention_masks)
+                stacked_features = torch.stack([f["input_features"] for _, f in audio_feature_list])
+                batch_out["input_features"] = stacked_features
+                
+                # Also stack feature_attention_mask if available
+                if "feature_attention_mask" in audio_feature_list[0][1]:
+                    stacked_mask = torch.stack([f["feature_attention_mask"] for _, f in audio_feature_list])
+                    batch_out["feature_attention_mask"] = stacked_mask
             except Exception as e:
                 print(f"DEBUG: torch.stack failed: {e}", flush=True)
-                # Fallback: try padding with feature_extractor (audio items only)
-                audio_features_for_pad = [{"input_features": f["input_features"]} for f in audio_feature_list]
+                # Fallback: try padding with feature_extractor
+                audio_features_for_pad = [{"input_features": f["input_features"]} for _, f in audio_feature_list]
                 if hasattr(self.processor.feature_extractor, "pad"):
                     audio_out = self.processor.feature_extractor.pad(
                         audio_features_for_pad, padding=True, return_tensors="pt"
@@ -1145,13 +1202,48 @@ def main() -> None:
             )
         )
 
-    trainer = Trainer(
+    # Custom Trainer to use GroupedBatchSampler for homogeneous batches
+    class GroupedTrainer(Trainer):
+        def __init__(self, *args, grouped_batch_sampler=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.grouped_batch_sampler = grouped_batch_sampler
+        
+        def get_train_dataloader(self):
+            if self.grouped_batch_sampler is None:
+                return super().get_train_dataloader()
+            
+            from torch.utils.data import DataLoader
+            
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=self.grouped_batch_sampler,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+    
+    # Create grouped batch sampler if we have mixed data
+    grouped_sampler = None
+    if train_dataset is not None:
+        # Check if we have both audio and text items
+        has_audio = any(hasattr(train_dataset, 'audio_items') and train_dataset.audio_items)
+        has_text = any(hasattr(train_dataset, 'text_items') and train_dataset.text_items)
+        if has_audio or has_text:
+            grouped_sampler = GroupedBatchSampler(
+                train_dataset,
+                batch_size=args.per_device_train_batch_size,
+                shuffle=True,
+                drop_last=False,
+            )
+
+    trainer = GroupedTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
         callbacks=trainer_callbacks,
+        grouped_batch_sampler=grouped_sampler,
     )
     trainer.train()
     trainer.save_model(args.output_dir)
