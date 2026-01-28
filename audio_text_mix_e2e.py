@@ -60,6 +60,25 @@ def load_audio(audio_path: str, target_sr: int = SAMPLING_RATE) -> np.ndarray:
     return audio
 
 
+def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
+    """Check multiple possible locations for audio files."""
+    parent_dir = os.path.dirname(audio_root)
+    candidates = [
+        os.path.join(audio_root, filename),
+        os.path.join(audio_root, "slurp_real", filename),
+        # Also check if slurp_real is sibling to audio_root
+        os.path.join(parent_dir, "slurp_real", filename),
+        # Explicitly check slurp/slurp_real relative to CWD
+        os.path.join("slurp", "slurp_real", filename),
+        # Also try audio subdirectory
+        os.path.join("slurp", "audio", "slurp_real", filename),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def build_items_from_slurp(
     jsonl_path: str,
     audio_dir: str,
@@ -67,8 +86,14 @@ def build_items_from_slurp(
 ) -> List[Dict]:
     """Build dataset items from SLURP jsonl file."""
     items = []
+    missing_audio = 0
+    
+    if not os.path.exists(jsonl_path):
+        print(f"ERROR: jsonl file not found: {jsonl_path}")
+        return items
+    
     with open(jsonl_path, "r") as f:
-        for line in f:
+        for line_num, line in enumerate(f):
             data = json.loads(line)
             
             # Build target JSON
@@ -93,9 +118,14 @@ def build_items_from_slurp(
             # Use first recording
             rec = recordings[0]
             audio_file = rec.get("file", "")
-            audio_path = os.path.join(audio_dir, audio_file)
             
-            if not os.path.exists(audio_path):
+            # Try multiple paths (like original script)
+            audio_path = resolve_audio_path(audio_dir, audio_file)
+            
+            if audio_path is None:
+                missing_audio += 1
+                if line_num < 5:  # Print first few missing for debugging
+                    print(f"  Missing audio: {audio_file} (searched in {audio_dir})")
                 continue
             
             items.append({
@@ -107,6 +137,9 @@ def build_items_from_slurp(
             
             if max_samples and len(items) >= max_samples:
                 break
+    
+    if missing_audio:
+        print(f"Warning: {missing_audio} recordings missing from {audio_dir}")
     
     return items
 
