@@ -851,8 +851,11 @@ class Qwen2AudioCollator:
                 print(f"DEBUG: num audio items = {len(audio_feature_list)}, total = {len(features)}", flush=True)
             
             # Pad audio features to the longest in the batch using feature_extractor.pad
-            # We need to extract just the input_features for padding
-            audio_inputs_to_pad = [{"input_features": f["input_features"]} for _, f in audio_feature_list]
+            # We need to extract just the input_features for padding AND squeeze the batch dimension (1, 128, T) -> (128, T)
+            audio_inputs_to_pad = [
+                {"input_features": f["input_features"].squeeze(0)} 
+                for _, f in audio_feature_list
+            ]
             
             padded_audio = self.processor.feature_extractor.pad(
                 audio_inputs_to_pad,
