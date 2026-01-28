@@ -1,0 +1,111 @@
+Group 1:
+  - food_type
+  - meal_type
+
+Group 2:
+  - audiobook_author
+  - audiobook_name
+
+Group 3:
+  - podcast_descriptor
+  - podcast_name
+
+Group 4:
+  - transport_name
+  - transport_type
+
+Group 5:
+  - artist_name
+  - song_name
+
+Group 6:
+  - house_place
+  - place_name
+
+Group 7:
+  - game_name
+  - game_type
+
+Group 8:
+  - business_name
+  - business_type
+
+Group 9:
+  - music_album
+  - music_genre
+
+Group 10:
+  - movie_name
+  - movie_type
+
+Group 11:
+  - email_address
+  - email_folder
+
+Group 12:
+  - coffee_type
+  - drink_type
+
+Group 13:
+  - time
+  - timeofday
+
+Group 14:
+  - list_name
+  - playlist_name
+
+Group 15:
+  - transport_agency
+  - transport_descriptor
+
+Group 16:
+  - device_type
+  - media_type
+
+Group 17:
+  - cooking_type
+  - sport_type
+
+Group 18:
+  - color_type
+  - order_type
+
+Group 19:
+  - app_name
+  - event_name
+
+Group 20:
+  - change_amount
+  - currency_name
+
+Group 21:
+  - alarm_type
+  - joke_type
+
+Group 22:
+  - music_descriptor
+  - player_setting
+
+Group 23:
+  - date
+  - time_zone
+
+Group 24:
+  - person
+  - personal_info
+
+Group 25:
+  - news_topic
+  - radio_name
+
+Group 26:
+  - ingredient
+  - relation
+
+Group 27:
+  - definition_word
+  - weather_descriptor
+
+Group 28:
+  - general_frequency
+

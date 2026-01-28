@@ -1,0 +1,36 @@
+Group 1:
+  - audio
+  - music
+
+Group 2:
+  - calendar
+  - datetime
+
+Group 3:
+  - alarm
+  - iot
+
+Group 4:
+  - takeaway
+  - transport
+
+Group 5:
+  - recommendation
+  - social
+
+Group 6:
+  - general
+  - news
+
+Group 7:
+  - cooking
+  - qa
+
+Group 8:
+  - email
+  - lists
+
+Group 9:
+  - play
+  - weather
+

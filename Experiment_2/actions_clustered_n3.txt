@@ -1,0 +1,78 @@
+Group 1:
+  - volume_down
+  - volume_up
+  - volume_other
+
+Group 2:
+  - hue_lightoff
+  - hue_lightup
+  - hue_lightchange
+
+Group 3:
+  - wemo_off
+  - wemo_on
+  - remove
+
+Group 4:
+  - hue_lightdim
+  - hue_lighton
+  - greet
+
+Group 5:
+  - addcontact
+  - querycontact
+  - query
+
+Group 6:
+  - music
+  - radio
+  - podcasts
+
+Group 7:
+  - set
+  - settings
+  - game
+
+Group 8:
+  - taxi
+  - traffic
+  - ticket
+
+Group 9:
+  - locations
+  - movies
+  - events
+
+Group 10:
+  - order
+  - stock
+  - post
+
+Group 11:
+  - convert
+  - currency
+  - maths
+
+Group 12:
+  - coffee
+  - recipe
+  - cleaning
+
+Group 13:
+  - dislikeness
+  - quirky
+  - likeness
+
+Group 14:
+  - audiobook
+  - volume_mute
+  - createoradd
+
+Group 15:
+  - definition
+  - factoid
+  - joke
+
+Group 16:
+  - sendemail
+
