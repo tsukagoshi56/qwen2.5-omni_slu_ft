@@ -231,41 +231,34 @@ def main():
             raise
     else:
         # Standard loading logic
+        # Priority: Load processor from Base Model (config.json) to ensure correct chat template
+        # Checkpoint directories might satisfy AutoProcessor but lack full special_tokens_map or chat_template
+        base_model_path_from_config = None
+        try:
+            config_path = os.path.join(args.model_path, "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config_dict = json.load(f)
+                base_model_path_from_config = config_dict.get("_name_or_path")
+        except Exception:
+            pass
+
         processor = None
-        processor_load_paths = [args.model_path]
-        
-        # If path looks like a checkpoint, try parent directory first
-        if "checkpoint-" in os.path.basename(os.path.normpath(args.model_path)):
-            parent_dir = os.path.dirname(os.path.normpath(args.model_path))
-            processor_load_paths.insert(0, parent_dir)
-            logger.info(f"Detected checkpoint path. Will try parent directory first: {parent_dir}")
-        
-        for load_path in processor_load_paths:
+        # If base model is found, try loading processor from THERE first
+        if base_model_path_from_config and base_model_path_from_config != args.model_path:
             try:
-                logger.info(f"Attempting to load processor from: {load_path}")
-                processor = AutoProcessor.from_pretrained(load_path, trust_remote_code=True, fix_mistral_regex=True)
-                logger.info(f"Successfully loaded processor from: {load_path}")
-                break
+                logger.info(f"Loading processor from Base Model: {base_model_path_from_config}")
+                processor = AutoProcessor.from_pretrained(base_model_path_from_config, trust_remote_code=True, fix_mistral_regex=True)
             except Exception as e:
-                logger.warning(f"Failed to load processor from {load_path}: {e}")
-                continue
-        
-        # Fallback: Try reading _name_or_path from config.json to find base model
+                logger.warning(f"Failed to load processor from base model: {e}")
+
+        # Fallback to checkpoint path if base model failed or wasn't found
         if processor is None:
-            try:
-                config_path = os.path.join(args.model_path, "config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, "r") as f:
-                        config_dict = json.load(f)
-                    base_model = config_dict.get("_name_or_path")
-                    if base_model and base_model != args.model_path:
-                        logger.info(f"Fallback: Loading processor from base model in config.json: {base_model}")
-                        processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True, fix_mistral_regex=True)
-            except Exception as e2:
-                logger.warning(f"Fallback (config.json) also failed: {e2}")
-        
-        if processor is None:
-            raise RuntimeError(f"Could not load processor from any path. Tried: {processor_load_paths}")
+             logger.info(f"Loading processor from Checkpoint: {args.model_path}")
+             try:
+                processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
+             except Exception as e:
+                 raise RuntimeError(f"Failed to load processor from {args.model_path}: {e}")
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 args.model_path,
