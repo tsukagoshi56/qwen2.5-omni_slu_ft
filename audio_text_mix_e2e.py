@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import torch
 import numpy as np
 from pathlib import Path
@@ -82,9 +83,15 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
 def build_items_from_slurp(
     jsonl_path: str,
     audio_dir: str,
+    add_text_only: bool = True,  # Also add text-only items
     max_samples: Optional[int] = None
 ) -> List[Dict]:
-    """Build dataset items from SLURP jsonl file."""
+    """Build dataset items from SLURP jsonl file.
+    
+    Creates both audio items (audio_path set) and text items (audio_path=None).
+    Audio items: use audio + prompt
+    Text items: use transcript + prompt
+    """
     items = []
     missing_audio = 0
     
@@ -110,30 +117,36 @@ def build_items_from_slurp(
                 "entities": entities
             }, ensure_ascii=False)
             
-            # Get audio files
+            transcript = data.get("sentence", "")
+            slurp_id = data.get("slurp_id", str(len(items)))
+            
+            # Add text-only item
+            if add_text_only:
+                items.append({
+                    "audio_path": None,  # No audio - text only
+                    "transcript": transcript,
+                    "target": target,
+                    "slurp_id": slurp_id,
+                })
+            
+            # Add audio item (first recording)
             recordings = data.get("recordings", [])
-            if not recordings:
-                continue
+            if recordings:
+                rec = recordings[0]
+                audio_file = rec.get("file", "")
+                audio_path = resolve_audio_path(audio_dir, audio_file)
                 
-            # Use first recording
-            rec = recordings[0]
-            audio_file = rec.get("file", "")
-            
-            # Try multiple paths (like original script)
-            audio_path = resolve_audio_path(audio_dir, audio_file)
-            
-            if audio_path is None:
-                missing_audio += 1
-                if line_num < 5:  # Print first few missing for debugging
-                    print(f"  Missing audio: {audio_file} (searched in {audio_dir})")
-                continue
-            
-            items.append({
-                "audio_path": audio_path,
-                "transcript": data.get("sentence", ""),
-                "target": target,
-                "slurp_id": data.get("slurp_id", str(len(items))),
-            })
+                if audio_path is not None:
+                    items.append({
+                        "audio_path": audio_path,
+                        "transcript": transcript,
+                        "target": target,
+                        "slurp_id": slurp_id,
+                    })
+                else:
+                    missing_audio += 1
+                    if line_num < 5:
+                        print(f"  Missing audio: {audio_file}")
             
             if max_samples and len(items) >= max_samples:
                 break
@@ -144,11 +157,57 @@ def build_items_from_slurp(
     return items
 
 
-class AudioTextDataset(Dataset):
-    """Simple dataset for audio-text mix training."""
+class MixedDataset(Dataset):
+    """Dataset that mixes audio and text items, with optional audio partitioning.
     
-    def __init__(self, items: List[Dict]):
-        self.items = items
+    - Text items: use transcript + prompt
+    - Audio items: use audio + prompt
+    - partition_audio: if True, only use 1/N audio items per epoch
+    """
+    
+    def __init__(
+        self, 
+        items: List[Dict], 
+        partition_audio: bool = True,
+        total_epochs: int = 3
+    ):
+        # Separate text and audio items
+        self.text_items = [x for x in items if x.get("audio_path") is None]
+        self.audio_items = [x for x in items if x.get("audio_path") is not None]
+        self.partition_audio = partition_audio
+        self.total_epochs = total_epochs
+        self.current_epoch = 0
+        
+        # Shuffle audio items stably for partitioning
+        if self.partition_audio and len(self.audio_items) > 0:
+            rng = random.Random(42)
+            rng.shuffle(self.audio_items)
+        
+        self._rebuild_items()
+        
+        print(f"MixedDataset: {len(self.text_items)} text items, {len(self.audio_items)} audio items total")
+    
+    def set_epoch(self, epoch: int):
+        """Called by Trainer to update epoch for audio partitioning."""
+        self.current_epoch = epoch
+        self._rebuild_items()
+    
+    def _rebuild_items(self):
+        """Rebuild the item list based on current epoch."""
+        if not self.partition_audio or not self.audio_items:
+            # No partitioning - use all items
+            self.items = self.text_items + self.audio_items
+        else:
+            # Partition audio: use 1/N of audio items per epoch
+            num_audio = len(self.audio_items)
+            chunk_size = (num_audio + self.total_epochs - 1) // self.total_epochs
+            start_idx = (self.current_epoch % self.total_epochs) * chunk_size
+            end_idx = min(start_idx + chunk_size, num_audio)
+            
+            current_audio_batch = self.audio_items[start_idx:end_idx]
+            self.items = self.text_items + current_audio_batch
+            
+            print(f"Epoch {self.current_epoch}: {len(self.text_items)} text + {len(current_audio_batch)} audio (idx {start_idx}-{end_idx})")
     
     def __len__(self):
         return len(self.items)
@@ -178,45 +237,71 @@ class AudioTextCollator:
         all_feature_attention_mask = []
         
         for item in batch:
-            # Load audio as numpy array
-            audio_np = load_audio(item["audio_path"])
-            
-            # Build conversation with chat template - pass audio numpy array directly
-            user_content = [
-                {"type": "audio", "audio": audio_np},
-                {"type": "text", "text": PROMPT}
-            ]
-            messages = [{"role": "user", "content": user_content}]
-            
-            # Apply chat template
-            prompt_text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            
-            # Add target for training
+            audio_path = item.get("audio_path")
+            transcript = item.get("transcript", "")
             target = item.get("target", "")
-            full_text = prompt_text + target
             
-            # Process with processor (using correct signature: audio=, sampling_rate=)
-            target_sr = self.processor.feature_extractor.sampling_rate
-            
-            prompt_inputs = self.processor(
-                text=prompt_text,
-                audio=audio_np,
-                sampling_rate=target_sr,
-                return_tensors="pt",
-            )
-            full_inputs = self.processor(
-                text=full_text,
-                audio=audio_np,
-                sampling_rate=target_sr,
-                return_tensors="pt",
-            )
-            
-            input_ids = full_inputs["input_ids"].squeeze(0)
-            attention_mask = full_inputs["attention_mask"].squeeze(0)
-            input_features = full_inputs.get("input_features")
-            feature_attention_mask = full_inputs.get("feature_attention_mask")
+            if audio_path is not None:
+                # Audio item: use audio + prompt
+                audio_np = load_audio(audio_path)
+                
+                # Build conversation with audio
+                user_content = [
+                    {"type": "audio", "audio": audio_np},
+                    {"type": "text", "text": PROMPT}
+                ]
+                messages = [{"role": "user", "content": user_content}]
+                
+                prompt_text = self.processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                full_text = prompt_text + target
+                
+                # Process with processor
+                target_sr = self.processor.feature_extractor.sampling_rate
+                prompt_inputs = self.processor(
+                    text=prompt_text,
+                    audio=audio_np,
+                    sampling_rate=target_sr,
+                    return_tensors="pt",
+                )
+                full_inputs = self.processor(
+                    text=full_text,
+                    audio=audio_np,
+                    sampling_rate=target_sr,
+                    return_tensors="pt",
+                )
+                
+                input_ids = full_inputs["input_ids"].squeeze(0)
+                attention_mask = full_inputs["attention_mask"].squeeze(0)
+                input_features = full_inputs.get("input_features")
+                feature_attention_mask = full_inputs.get("feature_attention_mask")
+                
+            else:
+                # Text-only item: use transcript + prompt
+                user_content = [
+                    {"type": "text", "text": f"{transcript}\n{PROMPT}"}
+                ]
+                messages = [{"role": "user", "content": user_content}]
+                
+                prompt_text = self.processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                full_text = prompt_text + target
+                
+                # Text-only: use tokenizer directly
+                prompt_inputs = self.processor.tokenizer(
+                    prompt_text, return_tensors="pt"
+                )
+                full_inputs = self.processor.tokenizer(
+                    full_text, return_tensors="pt",
+                    truncation=True, max_length=self.max_length
+                )
+                
+                input_ids = full_inputs["input_ids"].squeeze(0)
+                attention_mask = full_inputs["attention_mask"].squeeze(0)
+                input_features = None
+                feature_attention_mask = None
             
             # Create labels (mask prompt, only predict target)
             prompt_len = prompt_inputs["input_ids"].size(1)
@@ -394,35 +479,48 @@ def train_model(args):
             param.requires_grad = False
         print("Froze multi_modal_projector")
     
-    # Load data
-    print(f"\nLoading data from: {args.train_file}")
+    # Load training data
+    print(f"\nLoading training data from: {args.train_file}")
     train_items = build_items_from_slurp(
         args.train_file,
         args.audio_dir,
+        add_text_only=True,  # Include text-only items
         max_samples=args.max_samples
     )
-    print(f"Loaded {len(train_items)} training samples")
+    print(f"Loaded {len(train_items)} training items")
     
     if len(train_items) == 0:
         raise ValueError(f"No training samples loaded! Check paths:\n  train_file: {args.train_file}\n  audio_dir: {args.audio_dir}")
     
-    # Split train/eval - ensure at least 1 sample for training
-    if len(train_items) <= 2:
-        # Too few samples - use all for training, no eval
-        eval_items = []
-        print("Warning: Too few samples for eval split, using all for training")
-    else:
-        eval_size = max(1, min(len(train_items) // 5, 50))
-        eval_items = train_items[:eval_size]
-        train_items = train_items[eval_size:]
+    # Load validation data from devel.jsonl
+    devel_file = args.train_file.replace("train.jsonl", "devel.jsonl")
+    print(f"\nLoading validation data from: {devel_file}")
+    eval_items = build_items_from_slurp(
+        devel_file,
+        args.audio_dir,
+        add_text_only=True,
+        max_samples=args.eval_samples if args.max_samples else None
+    )
+    print(f"Loaded {len(eval_items)} validation items")
     
-    print(f"Train: {len(train_items)}, Eval: {len(eval_items)}")
+    # Load test data from test.jsonl
+    test_file = args.train_file.replace("train.jsonl", "test.jsonl")
+    print(f"\nLoading test data from: {test_file}")
+    test_items = build_items_from_slurp(
+        test_file,
+        args.audio_dir,
+        add_text_only=True,
+        max_samples=args.eval_samples if args.max_samples else None
+    )
+    print(f"Loaded {len(test_items)} test items")
     
-    if len(train_items) == 0:
-        raise ValueError("No training samples after split! Increase --max_samples")
-    
-    train_dataset = AudioTextDataset(train_items)
-    eval_dataset = AudioTextDataset(eval_items) if eval_items else None
+    # Create datasets with audio partitioning
+    train_dataset = MixedDataset(
+        train_items, 
+        partition_audio=True,
+        total_epochs=args.num_train_epochs
+    )
+    eval_dataset = MixedDataset(eval_items, partition_audio=False) if eval_items else None
     
     # Collator
     collator = AudioTextCollator(processor=processor, max_length=args.max_length)
