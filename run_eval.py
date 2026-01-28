@@ -261,14 +261,16 @@ def main():
     logger.info(f"tokenizer eos_token: {processor.tokenizer.eos_token} (id={processor.tokenizer.eos_token_id})")
     logger.info(f"tokenizer bos_token: {processor.tokenizer.bos_token} (id={getattr(processor.tokenizer, 'bos_token_id', None)})")
 
-    # Critical: Resize embeddings if tokenizer size differs from model vocab size
-    # This ensures alignment for any token mismatch (added or removed tokens)
+    # Critical: Only EXPAND embeddings if tokenizer is larger than model
+    # NEVER shrink - if model vocab > tokenizer, keep model's embeddings (they were trained)
     model_vocab = getattr(model.config, 'vocab_size', None)
     tokenizer_len = len(processor.tokenizer)
-    if model_vocab is not None and tokenizer_len != model_vocab:
+    if model_vocab is not None and tokenizer_len > model_vocab:
         logger.warning(f"Vocab size mismatch! Model: {model_vocab}, Tokenizer: {tokenizer_len}")
         logger.info(f"Resizing model embeddings to {tokenizer_len} to match tokenizer...")
         model.resize_token_embeddings(tokenizer_len)
+    elif model_vocab is not None and tokenizer_len < model_vocab:
+        logger.warning(f"Model vocab ({model_vocab}) > Tokenizer len ({tokenizer_len}). Keeping model's larger vocab size (trained embeddings preserved).")
 
 
     
