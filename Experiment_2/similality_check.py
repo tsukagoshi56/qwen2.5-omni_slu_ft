@@ -3,10 +3,8 @@ import pandas as pd
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-import jellyfish # 音響・文字列距離計算用
 import argparse
 import os
-import random
 
 # ==========================================
 # 0. Configuration
@@ -55,55 +53,54 @@ def load_data(pred_path, test_path):
     return pd.DataFrame(gts), pd.DataFrame(pred_list)
 
 # ==========================================
-# 2. Multi-Modal Similarity Analyzer
+# 2. Rank Analyzer
 # ==========================================
-class MultiModalAnalyzer:
+class RankAnalyzer:
     def __init__(self, labels, embedding_model_name=MODEL_NAME):
         self.labels = sorted(list(set(labels)))
-        print(f"Initializing Analyzer for {len(self.labels)} labels...")
+        self.n_labels = len(self.labels)
+        print(f"Embedding {self.n_labels} unique labels...")
         
-        # 1. Semantic (Meaning) - Embedding
         self.model = SentenceTransformer(embedding_model_name)
         self.embeddings = self.model.encode(self.labels)
         self.label_to_idx = {l: i for i, l in enumerate(self.labels)}
-        self.sem_matrix = cosine_similarity(self.embeddings) # Pre-compute N x N
         
-    def get_semantic_sim(self, s1, s2):
-        """意味的類似度 (Cosine Similarity: -1.0 ~ 1.0)"""
-        if s1 not in self.label_to_idx or s2 not in self.label_to_idx: return 0.0
-        return self.sem_matrix[self.label_to_idx[s1]][self.label_to_idx[s2]]
-
-    def get_lexical_sim(self, s1, s2):
-        """単語的類似度 (Jaro-Winkler: 0.0 ~ 1.0) - スペルの近さ"""
-        # Jaro-Winklerは接頭辞の一致を重視するため、単語の類似度判定に向く
-        return jellyfish.jaro_winkler_similarity(s1, s2)
-
-    def get_phonetic_sim(self, s1, s2):
-        """音響的類似度 (Metaphone Levenshtein) - 発音の近さ"""
-        # Metaphoneアルゴリズムで発音コードに変換 (例: 'phone' -> 'FN')
-        m1 = jellyfish.metaphone(s1)
-        m2 = jellyfish.metaphone(s2)
+        # 全ペアの類似度行列 (N x N)
+        self.sim_matrix = cosine_similarity(self.embeddings)
         
-        # 発音コード同士のレーベンシュタイン距離を計算し、0~1に正規化
-        dist = jellyfish.levenshtein_distance(m1, m2)
-        max_len = max(len(m1), len(m2))
-        if max_len == 0: return 1.0 if m1 == m2 else 0.0
-        
-        # 距離なので、類似度に変換 (1 - 正規化距離)
-        return 1.0 - (dist / max_len)
+    def get_rank_of_pred(self, gt, pred):
+        """
+        GTに対して、Predが類似度ランキングで何位だったかを返す。
+        (自分自身=GT は除外してランク付けする)
+        """
+        if gt not in self.label_to_idx or pred not in self.label_to_idx:
+            return None, 0.0
 
-    def analyze_pair(self, gt, pred):
-        return {
-            "Semantic": self.get_semantic_sim(gt, pred),
-            "Lexical":  self.get_lexical_sim(gt, pred),
-            "Phonetic": self.get_phonetic_sim(gt, pred)
-        }
+        gt_idx = self.label_to_idx[gt]
+        pred_idx = self.label_to_idx[pred]
+        
+        # GT行の類似度配列を取得
+        sim_scores = self.sim_matrix[gt_idx]
+        
+        # 類似度が高い順にインデックスをソート (降順)
+        # argsortは昇順なので [::-1]
+        sorted_indices = np.argsort(sim_scores)[::-1]
+        
+        # sorted_indices の中には自分自身(GT)も含まれる（通常sim=1.0で1位）
+        # なので、Predがリストの何番目にあるかを探す
+        # np.where は該当するインデックスの位置を返す
+        rank_position = np.where(sorted_indices == pred_idx)[0][0]
+        
+        # rank_position: 0なら1位(自分自身), 1なら2位(一番似てる他人)...
+        # 「自分以外の中で何位か」を知りたいので、そのままの値が順位になる
+        # (例: 0番目は自分なので無視、1番目がTop-1 Neighbor)
+        return rank_position, sim_scores[pred_idx]
 
 # ==========================================
 # 3. Analysis Logic
 # ==========================================
 
-def analyze_errors_3d(df_gt, df_pred, target_col, analyzer):
+def analyze_neighbor_ranks(df_gt, df_pred, target_col, analyzer):
     if len(df_gt) == 0: return
 
     error_mask = df_gt[target_col] != df_pred[target_col]
@@ -117,73 +114,89 @@ def analyze_errors_3d(df_gt, df_pred, target_col, analyzer):
     pred_errors = df_pred.loc[error_mask, target_col].values
 
     print(f"\n========================================================")
-    print(f" 3-AXIS ERROR ANALYSIS: {target_col.upper()} (Total Errors: {total_errors})")
+    print(f" RANK ANALYSIS: {target_col.upper()} (Total Errors: {total_errors})")
+    print(f" Candidates Pool Size: {analyzer.n_labels} labels")
     print(f"========================================================")
     
-    # --- 1. Calculate Metrics for All Errors ---
-    error_metrics = []
+    ranks = []
+    sims = []
+    
     for gt, pred in zip(gt_errors, pred_errors):
-        metrics = analyzer.analyze_pair(gt, pred)
-        metrics['GT'] = gt
-        metrics['Pred'] = pred
-        error_metrics.append(metrics)
-        
-    df_errors = pd.DataFrame(error_metrics)
+        rank, sim = analyzer.get_rank_of_pred(gt, pred)
+        if rank is not None:
+            ranks.append(rank)
+            sims.append(sim)
+            
+    ranks = np.array(ranks)
     
-    # --- 2. Calculate Random Baseline ---
-    # ランダムなペアを大量に作って平均を取る
-    random_metrics = []
-    unique_labels = analyzer.labels
-    for _ in range(1000): # 1000 trials
-        l1, l2 = random.sample(unique_labels, 2)
-        random_metrics.append(analyzer.analyze_pair(l1, l2))
+    # --- 1. Rank Distribution (Critical Proof) ---
+    print(f"\n[1] How 'close' was the mistake? (Rank Distribution)")
+    print(f"    If errors are random, this should be uniform (avg rank ~{analyzer.n_labels//2}).")
+    print(f"    If errors are semantic, most should be Rank 1 or 2.")
     
-    df_random = pd.DataFrame(random_metrics)
+    # 累積割合を計算
+    top1_count = np.sum(ranks == 1)
+    top3_count = np.sum(ranks <= 3)
+    top5_count = np.sum(ranks <= 5)
+    top10_count = np.sum(ranks <= 10)
     
-    # --- 3. Compare Averages (Hypothesis Verification) ---
-    print(f"\n[1] Average Similarity Comparison (Error vs Random)")
-    print(f"    (Which axis explains the errors best?)")
+    # Random Baseline Expectation
+    # ランダムに選んだ場合、Top-Nに入る確率は N / (Total_Labels - 1)
+    total_candidates = analyzer.n_labels - 1
     
-    comparison = []
-    for metric in ["Semantic", "Lexical", "Phonetic"]:
-        err_avg = df_errors[metric].mean()
-        rnd_avg = df_random[metric].mean()
-        lift = err_avg / rnd_avg if rnd_avg > 0 else 0
-        comparison.append({
-            "Metric": metric,
-            "Error_Avg": err_avg,
-            "Random_Avg": rnd_avg,
-            "Lift (Bias)": lift
-        })
-        
-    df_comp = pd.DataFrame(comparison)
-    print(df_comp.to_string(index=False, formatters={
-        'Error_Avg': '{:.4f}'.format,
-        'Random_Avg': '{:.4f}'.format,
-        'Lift (Bias)': '{:.2f}x'.format
+    def get_random_prob(n):
+        return min(1.0, n / total_candidates) if total_candidates > 0 else 0
+
+    stats = [
+        {"Range": "Top-1 (Closest Neighbor)", "Count": top1_count, "Rate": top1_count/total_errors, "Random_Base": get_random_prob(1)},
+        {"Range": "Top-3",                    "Count": top3_count, "Rate": top3_count/total_errors, "Random_Base": get_random_prob(3)},
+        {"Range": "Top-5",                    "Count": top5_count, "Rate": top5_count/total_errors, "Random_Base": get_random_prob(5)},
+        {"Range": "Top-10",                   "Count": top10_count,"Rate": top10_count/total_errors,"Random_Base": get_random_prob(10)},
+    ]
+    
+    df_stats = pd.DataFrame(stats)
+    
+    # Lift (Rate / Random_Base) を計算
+    df_stats["Lift"] = df_stats.apply(lambda x: x["Rate"] / x["Random_Base"] if x["Random_Base"] > 0 else 0, axis=1)
+    
+    print(df_stats.to_string(index=False, formatters={
+        'Rate': '{:.1%}'.format,
+        'Random_Base': '{:.1%}'.format,
+        'Lift': '{:.2f}x'.format
     }))
     
-    # 最もLiftが高いものが、間違いの主要因である可能性が高い
-    best_metric = df_comp.sort_values("Lift (Bias)", ascending=False).iloc[0]
-    print(f"\n>>> Main Driver: Errors are mostly biased by **{best_metric['Metric'].upper()}** similarity.")
-
-    # --- 4. Deep Dive by Category ---
-    # 各指標でトップランクの間違いを表示
+    # 結論判定
+    top3_rate = top3_count / total_errors
+    if top3_rate > 0.5:
+        print(f"\n>>> PROOF POSITIVE: {top3_rate:.1%} of errors are within the Top-3 closest meanings.")
+        print("    The model is definitively confused by semantic neighbors.")
+    else:
+        print(f"\n>>> RESULT WEAK: Only {top3_rate:.1%} of errors are Top-3 neighbors.")
     
-    def show_top_k(df, metric_name, k=5):
-        print(f"\n[Top {k} Errors by {metric_name} Similarity]")
-        # その指標が高く、かつ他の指標と差があるものを見たいが、シンプルにその指標でソート
-        top_df = df.sort_values(metric_name, ascending=False).head(k)
-        
-        print(f"{'Metric Val':<10} | {'Correct -> Pred':<30} | {'Other Scores (Sem/Lex/Phon)'}")
-        print("-" * 80)
-        for _, row in top_df.iterrows():
-            scores = f"S:{row['Semantic']:.2f} L:{row['Lexical']:.2f} P:{row['Phonetic']:.2f}"
-            print(f"{row[metric_name]:<10.4f} | {row['GT']:<12} -> {row['Pred']:<14} | {scores}")
-
-    show_top_k(df_errors, "Semantic", k=8)
-    show_top_k(df_errors, "Lexical", k=5)
-    show_top_k(df_errors, "Phonetic", k=5)
+    # --- 2. Top-1 Mistake Detail ---
+    print(f"\n[2] The 'Twin' Confusions (Most Frequent Rank #1 Errors)")
+    print("    These pairs are the absolute closest semantic neighbors.")
+    
+    top1_errors = {}
+    for gt, pred, rank, sim in zip(gt_errors, pred_errors, ranks, sims):
+        if rank == 1: # まさに一番似ているやつを選んだケース
+            key = (gt, pred)
+            top1_errors[key] = {'count': 0, 'sim': sim}
+    
+    # カウント集計
+    for gt, pred, rank in zip(gt_errors, pred_errors, ranks):
+        if rank == 1:
+            top1_errors[(gt, pred)]['count'] += 1
+            
+    # ソート
+    sorted_top1 = sorted(top1_errors.items(), key=lambda x: x[1]['count'], reverse=True)
+    
+    print("-" * 80)
+    print(f"{'Count':<6} | {'Correct -> Pred (The #1 Neighbor)':<40} | {'Similarity'}")
+    print("-" * 80)
+    
+    for (gt, pred), info in sorted_top1[:15]:
+        print(f"{info['count']:<6} | {gt:<18} -> {pred:<18} | {info['sim']:.4f}")
 
 # ==========================================
 # 4. Main
@@ -201,17 +214,17 @@ def main():
     df_gt, df_pred = load_data(args.pred_file, args.test_file)
     if len(df_gt) == 0: return
 
-    # Init Analyzer
+    # Init
     all_scenarios = list(set(df_gt['scenario'].unique().tolist() + df_pred['scenario'].unique().tolist()))
     all_actions = list(set(df_gt['action'].unique().tolist() + df_pred['action'].unique().tolist()))
 
-    print("\nInitializing 3-Axis Analyzers...")
-    sc_analyzer = MultiModalAnalyzer(all_scenarios)
-    ac_analyzer = MultiModalAnalyzer(all_actions)
+    print("\nInitializing Rank Analyzer...")
+    sc_analyzer = RankAnalyzer(all_scenarios)
+    ac_analyzer = RankAnalyzer(all_actions)
     
     # Analyze
-    analyze_errors_3d(df_gt, df_pred, 'scenario', sc_analyzer)
-    analyze_errors_3d(df_gt, df_pred, 'action', ac_analyzer)
+    analyze_neighbor_ranks(df_gt, df_pred, 'scenario', sc_analyzer)
+    analyze_neighbor_ranks(df_gt, df_pred, 'action', ac_analyzer)
 
 if __name__ == "__main__":
     main()
