@@ -278,6 +278,9 @@ def main():
                 args.model_path, 
                 **model_kwargs
             )
+    logger.info(f"processor tokenizer name_or_path: {processor.tokenizer.name_or_path}")
+    logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
+    logger.info(f"tokenizer vocab_size: {processor.tokenizer.vocab_size}")
 
     # Ensure pad_token is set (crucial for batch generation)
     if processor.tokenizer.pad_token is None:
