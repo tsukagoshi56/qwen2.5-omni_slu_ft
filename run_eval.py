@@ -469,19 +469,22 @@ def main():
             except Exception as e:
                 logger.warning(f"Failed to load audio for sample {i}: {e}")
 
-        # Build text WITHOUT chat template (matches SampleGenerationCallback in training)
-        if audio is not None:
-            text = f"<|AUDIO|>\n{prompt_text}"
-        else:
-            text = f"{transcript}\n{prompt_text}" if transcript else prompt_text
-        
-        # Prepare inputs (matches SampleGenerationCallback logic)
+        # Build message WITH chat template (matches Qwen2AudioCollator in training)
+        user_content = []
         if audio is not None:
             audio_np = audio.numpy() if isinstance(audio, torch.Tensor) else audio
             if audio_np.ndim > 1:
                 audio_np = audio_np.flatten() # Ensure 1D
-            
-            # Use processor directly like in training's SampleGenerationCallback
+            # Add audio reference for chat template
+            audio_ref = item.get("audio_ref") or (audio_input if isinstance(audio_input, str) else "audio")
+            user_content.append({"type": "audio", "audio": audio_ref})
+        user_content.append({"type": "text", "text": prompt_text})
+        
+        messages = [{"role": "user", "content": user_content}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        
+        # Prepare inputs (matches Qwen2AudioCollator logic)
+        if audio is not None:
             inputs = processor(
                 text=text,
                 audios=[audio_np],
