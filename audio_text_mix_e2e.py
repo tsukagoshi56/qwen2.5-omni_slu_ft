@@ -245,9 +245,9 @@ class AudioTextCollator:
                 # Audio item: use audio + prompt
                 audio_np = load_audio(audio_path)
                 
-                # Build conversation with audio
+                # Build conversation with audio_url placeholder
                 user_content = [
-                    {"type": "audio", "audio": audio_np},
+                    {"type": "audio", "audio_url": audio_path},
                     {"type": "text", "text": PROMPT}
                 ]
                 messages = [{"role": "user", "content": user_content}]
@@ -257,19 +257,18 @@ class AudioTextCollator:
                 )
                 full_text = prompt_text + target
                 
-                # Process with processor
-                target_sr = self.processor.feature_extractor.sampling_rate
+                # Process with processor (official pattern: audio= with list)
                 prompt_inputs = self.processor(
                     text=prompt_text,
-                    audio=audio_np,
-                    sampling_rate=target_sr,
+                    audio=[audio_np],
                     return_tensors="pt",
+                    padding=True,
                 )
                 full_inputs = self.processor(
                     text=full_text,
-                    audio=audio_np,
-                    sampling_rate=target_sr,
+                    audio=[audio_np],
                     return_tensors="pt",
+                    padding=True,
                 )
                 
                 input_ids = full_inputs["input_ids"].squeeze(0)
@@ -377,9 +376,9 @@ def evaluate_model(
         # Load audio
         audio = load_audio(item["audio_path"])
         
-        # Build conversation (same as training) - pass audio numpy directly
+        # Build conversation with audio_url placeholder
         user_content = [
-            {"type": "audio", "audio": audio},
+            {"type": "audio", "audio_url": item["audio_path"]},
             {"type": "text", "text": PROMPT}
         ]
         messages = [{"role": "user", "content": user_content}]
@@ -389,13 +388,12 @@ def evaluate_model(
             messages, tokenize=False, add_generation_prompt=True
         )
         
-        # Process with processor (using correct signature: audio=, sampling_rate=)
-        target_sr = processor.feature_extractor.sampling_rate
+        # Process with processor (official pattern: audio= with list)
         inputs = processor(
             text=text,
-            audio=audio,
-            sampling_rate=target_sr,
+            audio=[audio],
             return_tensors="pt",
+            padding=True,
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
@@ -525,12 +523,18 @@ def train_model(args):
     # Collator
     collator = AudioTextCollator(processor=processor, max_length=args.max_length)
     
+    # Force batch_size=1 for mixed audio/text to avoid audio token mismatch in batches
+    # (audio items have input_features, text items don't)
+    if args.batch_size != 1:
+        print(f"Warning: batch_size={args.batch_size} but mixed audio/text requires batch_size=1. Forcing batch_size=1.")
+        args.batch_size = 1
+    
     # Training arguments
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
+        per_device_train_batch_size=1,  # Must be 1 for mixed batches
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         weight_decay=0.01,
