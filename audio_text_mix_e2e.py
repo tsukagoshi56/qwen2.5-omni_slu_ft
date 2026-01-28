@@ -283,8 +283,8 @@ class SmartCollator:
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             full_text = text_input + item["target"]
             
-            inputs = self.processor(text=full_text, audio=[audio], return_tensors="pt")
-            prompt_inputs = self.processor(text=text_input, audio=[audio], return_tensors="pt")
+            inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
+            prompt_inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
             prompt_len = prompt_inputs["input_ids"].shape[1]
             
             ids = inputs["input_ids"][0]
@@ -415,10 +415,11 @@ def evaluate_model(model, processor, items, device, output_dir):
         slurp_id = item.get("slurp_id", "")
         
         if audio_path:
-            audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
+            sr = processor.feature_extractor.sampling_rate
+            audio, _ = librosa.load(audio_path, sr=sr)
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
             text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
+            inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
             file_key = os.path.basename(audio_path)
             eval_type = "audio"
         else:
