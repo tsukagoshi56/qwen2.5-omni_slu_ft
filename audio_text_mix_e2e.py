@@ -80,6 +80,11 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
     
     with open(jsonl_path, "r") as f:
         lines = f.readlines()
+    
+    total_lines = len(lines)
+    text_added = 0
+    audio_added = 0
+    audio_not_found = 0
         
     for line in lines:
         if max_samples and len(items) >= max_samples:
@@ -101,6 +106,7 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
                 "target": target,
                 "slurp_id": slurp_id
             })
+            text_added += 1
         
         # Audio Item
         if data.get("recordings"):
@@ -112,6 +118,11 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
                     "target": target,
                     "slurp_id": slurp_id
                 })
+                audio_added += 1
+            else:
+                audio_not_found += 1
+    
+    logger.info(f"Loaded {jsonl_path}: {total_lines} lines, {text_added} text items, {audio_added} audio items, {audio_not_found} audio files not found")
     return items
 
 def calculate_wer(reference, hypothesis):
@@ -552,8 +563,11 @@ def main():
     test_items = build_items_from_slurp(args.test_file, args.audio_dir, add_text_only=False, max_samples=None)
     if test_items:
         evaluate_model(model, processor, test_items, device, args.output_dir)
-    elif local_rank == 0:
-        print(f"Test file {args.test_file} not found.")
+    else:
+        if local_rank == 0:
+            logger.warning(f"No valid test items loaded from {args.test_file}")
+            logger.warning(f"File exists but may have no audio recordings found in {args.audio_dir}")
+            logger.warning("Check the logged statistics above for details.")
 
     if dist.is_initialized():
         dist.barrier()
