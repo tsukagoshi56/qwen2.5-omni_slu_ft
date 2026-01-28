@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Audio-Text Mix Training with "Cluster-then-Select" Strategy
+Audio-Text Mix Training with "Cluster-then-Select" Strategy (Synced)
 =========================================================
 Features:
 - Loads Intent Clusters definition.
 - CoT Training: Predict Group -> List Candidates -> Final Prediction.
-- Distributed Homogeneous Batching (Inherited).
+- Infrastructure synced with audio_text_mix_e2e.py (DDP, Smart Batching, etc.)
 """
 
 import argparse
@@ -25,7 +25,6 @@ from transformers import (
     TrainingArguments,
     Trainer,
 )
-
 from torch.utils.data import Dataset, Sampler, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.distributed as dist
@@ -49,7 +48,7 @@ else:
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# 0. CoT / Clustering Logic
+# 0. CoT / Clustering Logic (Preserved from candidates.py)
 # ==============================================================================
 
 # 新しいプロンプト: 思考プロセス（候補出し）を要求する
@@ -137,42 +136,63 @@ class IntentClusterManager:
         return group_name, candidates
 
 # ==============================================================================
-# 1. Utilities & Data Loading
+# 1. Utilities & Data Loading (Infrastructure from e2e.py)
 # ==============================================================================
 
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
+    """
+    Resolve audio file path from various possible locations.
+    """
     candidates = [
-        os.path.join(audio_root, filename),
-        os.path.join(audio_root, "slurp_real", filename),
-        os.path.join("slurp", "audio", "slurp_real", filename),
+        os.path.join(audio_root, filename),  # Direct
+        os.path.join(os.path.dirname(audio_root), filename),  # Parent
+        os.path.join(audio_root, "slurp_real", filename), # candidates legacy
+        os.path.join("slurp", "audio", "slurp_real", filename), # candidates legacy
     ]
+    
     for path in candidates:
         if os.path.exists(path):
             return path
+    
+    # Log first missing file for debugging
+    if not hasattr(resolve_audio_path, '_logged_missing'):
+        resolve_audio_path._logged_missing = True
+        logger.warning(f"Could not find audio file: {filename}")
+        logger.warning(f"Searched in: {candidates}")
+    
     return None
 
-def build_items_from_slurp(jsonl_path, audio_dir, cluster_manager: IntentClusterManager, add_text_only=True, max_samples=None):
+def build_items_from_slurp(jsonl_path, audio_dir, cluster_manager: IntentClusterManager, add_text_only=True, max_samples=None, deterministic=False):
     items = []
     if not os.path.exists(jsonl_path):
+        abs_path = os.path.abspath(jsonl_path)
+        logger.warning(f"JSONL file not found: {jsonl_path}")
+        logger.warning(f"Absolute path searched: {abs_path}")
+        logger.warning(f"Current working directory: {os.getcwd()}")
         return items
     
     with open(jsonl_path, "r") as f:
         lines = f.readlines()
+    
+    total_lines = len(lines)
+    text_added = 0
+    audio_added = 0
+    audio_not_found = 0
         
     for line in lines:
         if max_samples and len(items) >= max_samples:
             break
         data = json.loads(line)
         
+        # --- Logic from candidates.py ---
         scenario = data.get("scenario", "")
         action = data.get("action", "")
         
-        # --- 提案手法の核心部分: Target生成ロジック ---
-        # 1. 正解データから候補群を取得
+        # 1. Get Cluster Context
         group_name, candidates = cluster_manager.get_context(scenario, action)
         candidate_str = ", ".join(candidates)
         
-        # 2. 最終的なJSON
+        # 2. Final JSON
         final_json_obj = {
             "scenario": scenario,
             "action": action,
@@ -180,15 +200,14 @@ def build_items_from_slurp(jsonl_path, audio_dir, cluster_manager: IntentCluster
         }
         final_json_str = json.dumps(final_json_obj, ensure_ascii=False)
 
-        # 3. 学習させるテキスト (Thought -> Candidates -> Final)
-        # モデルに「このグループだから、候補はこれ。だから正解はこれ」という思考過程を教える
+        # 3. Target Text (Thought -> Candidates -> Final)
         target_text = (
             f"Thought: The user intent aligns with {group_name}.\n"
             f"Candidates: [{candidate_str}]\n"
             f"Final JSON: {final_json_str}"
         )
-        # -----------------------------------------------
-
+        # --------------------------------
+        
         transcript = data.get("sentence", "")
         slurp_id = data.get("slurp_id")
         
@@ -199,20 +218,37 @@ def build_items_from_slurp(jsonl_path, audio_dir, cluster_manager: IntentCluster
                 "transcript": transcript, 
                 "target": target_text,
                 "slurp_id": slurp_id,
-                "ground_truth_json": final_json_obj # 評価用
+                "ground_truth_json": final_json_obj
             })
+            text_added += 1
         
         # Audio Item
         if data.get("recordings"):
-            path = resolve_audio_path(audio_dir, data["recordings"][0].get("file", ""))
+            # Try to resolve audio
+            if deterministic:
+                selected_recording = data["recordings"][0]
+            else:
+                selected_recording = random.choice(data["recordings"])
+            
+            path = resolve_audio_path(audio_dir, selected_recording.get("file", ""))
+            
+            # If not found, try the first one (fallback)
+            if not path and len(data["recordings"]) > 0:
+                 path = resolve_audio_path(audio_dir, data["recordings"][0].get("file", ""))
+
             if path:
                 items.append({
                     "audio_path": path, 
                     "transcript": transcript, 
                     "target": target_text,
                     "slurp_id": slurp_id,
-                    "ground_truth_json": final_json_obj # 評価用
+                    "ground_truth_json": final_json_obj
                 })
+                audio_added += 1
+            else:
+                audio_not_found += 1
+    
+    logger.info(f"Loaded {jsonl_path}: {total_lines} lines, {text_added} text items, {audio_added} audio items, {audio_not_found} audio files not found")
     return items
 
 def calculate_wer(reference, hypothesis):
@@ -239,7 +275,7 @@ def calculate_wer(reference, hypothesis):
         return d[len(r)][len(h)] / float(len(r)) if len(r) > 0 else 0.0
 
 # ==============================================================================
-# 2. Dataset & Sampler (Same as before)
+# 2. Dataset & Sampler (Infrastructure from e2e.py)
 # ==============================================================================
 
 class MixedDataset(Dataset):
@@ -251,43 +287,64 @@ class MixedDataset(Dataset):
         return {**self.items[idx], "original_idx": idx}
 
 class DistributedHomogeneousBatchSampler(Sampler):
-    # (既存のコードと同じため省略。元のクラス定義をそのまま使用)
-    def __init__(self, dataset: MixedDataset, batch_size: int, num_replicas=None, rank=None, drop_last=False, seed=0, shuffle=True):
+    def __init__(self, dataset: MixedDataset, batch_size: int, 
+                 num_replicas: Optional[int] = None, 
+                 rank: Optional[int] = None, 
+                 drop_last: bool = False,
+                 seed: int = 0,
+                 shuffle: bool = True):
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.seed = seed
         self.epoch = 0
         self.shuffle = shuffle
+
         if num_replicas is None:
-            num_replicas = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+            if not torch.distributed.is_available():
+                raise RuntimeError("Requires distributed package")
+            num_replicas = torch.distributed.get_world_size()
         if rank is None:
-            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            if not torch.distributed.is_available():
+                raise RuntimeError("Requires distributed package")
+            rank = torch.distributed.get_rank()
+            
         self.num_replicas = num_replicas
         self.rank = rank
-        
+
         all_audio = [i for i, item in enumerate(dataset.items) if item["audio_path"] is not None]
         all_text = [i for i, item in enumerate(dataset.items) if item["audio_path"] is None]
+
         self.local_audio_indices = all_audio[self.rank::self.num_replicas]
         self.local_text_indices = all_text[self.rank::self.num_replicas]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[List[int]]:
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
         
-        # Audio
-        audio_idxs = torch.tensor(self.local_audio_indices)[torch.randperm(len(self.local_audio_indices), generator=g)].tolist() if self.shuffle else self.local_audio_indices
-        # Text
-        text_idxs = torch.tensor(self.local_text_indices)[torch.randperm(len(self.local_text_indices), generator=g)].tolist() if self.shuffle else self.local_text_indices
+        audio_indices = torch.tensor(self.local_audio_indices)
+        text_indices = torch.tensor(self.local_text_indices)
+        
+        if self.shuffle:
+            audio_perm = torch.randperm(len(audio_indices), generator=g)
+            text_perm = torch.randperm(len(text_indices), generator=g)
+            audio_idxs = audio_indices[audio_perm].tolist()
+            text_idxs = text_indices[text_perm].tolist()
+        else:
+            audio_idxs = audio_indices.tolist()
+            text_idxs = text_indices.tolist()
         
         batches = []
         for i in range(0, len(audio_idxs), self.batch_size):
-            b = audio_idxs[i:i+self.batch_size]
-            if len(b) == self.batch_size or not self.drop_last: batches.append(b)
+            batch = audio_idxs[i : i + self.batch_size]
+            if len(batch) == self.batch_size or not self.drop_last:
+                batches.append(batch)
+                
         for i in range(0, len(text_idxs), self.batch_size):
-            b = text_idxs[i:i+self.batch_size]
-            if len(b) == self.batch_size or not self.drop_last: batches.append(b)
-            
+            batch = text_idxs[i : i + self.batch_size]
+            if len(batch) == self.batch_size or not self.drop_last:
+                batches.append(batch)
+        
         if self.shuffle:
             random.seed(self.seed + self.epoch)
             random.shuffle(batches)
@@ -296,26 +353,36 @@ class DistributedHomogeneousBatchSampler(Sampler):
             yield batch
 
     def __len__(self):
-        return (len(self.local_audio_indices) + self.batch_size - 1) // self.batch_size + \
-               (len(self.local_text_indices) + self.batch_size - 1) // self.batch_size
-    def set_epoch(self, epoch):
+        audio_len = len(self.local_audio_indices)
+        text_len = len(self.local_text_indices)
+        audio_batches = (audio_len + self.batch_size - 1) // self.batch_size
+        text_batches = (text_len + self.batch_size - 1) // self.batch_size
+        if self.drop_last:
+            audio_batches = audio_len // self.batch_size
+            text_batches = text_len // self.batch_size
+        return audio_batches + text_batches
+    
+    def set_epoch(self, epoch: int):
         self.epoch = epoch
 
 # ==============================================================================
-# 3. Smart Collator & Trainer (Same as before)
+# 3. Smart Collator & Trainer
 # ==============================================================================
 
 @dataclass
 class SmartCollator:
     processor: Any
-    max_length: int = 768  # 長いChain of Thoughtを含むため、長さを拡張
+    max_length: int = 768  # Kept extended length for CoT
     ignore_index: int = -100
     
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0: return {}
         is_audio_batch = (batch[0].get("audio_path") is not None)
-        if is_audio_batch: return self._collate_audio(batch)
-        else: return self._collate_text(batch)
+        
+        if is_audio_batch:
+            return self._collate_audio(batch)
+        else:
+            return self._collate_text(batch)
 
     def _collate_audio(self, batch):
         input_ids_list, labels_list, input_features_list, feature_mask_list = [], [], [], []
@@ -326,10 +393,10 @@ class SmartCollator:
             audio, _ = librosa.load(item["audio_path"], sr=sr)
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            full_text = text_input + item["target"] + self.processor.tokenizer.eos_token
+            full_text = text_input + item["target"] # + self.processor.tokenizer.eos_token (Optional, handled by generation sometimes)
             
-            inputs = self.processor(text=full_text, audio=[audio], return_tensors="pt")
-            prompt_inputs = self.processor(text=text_input, audio=[audio], return_tensors="pt")
+            inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
+            prompt_inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
             prompt_len = prompt_inputs["input_ids"].shape[1]
             
             ids = inputs["input_ids"][0]
@@ -360,7 +427,7 @@ class SmartCollator:
             if item["audio_path"] is not None: continue
             user_content = [{"type": "text", "text": f"{item['transcript']}\n{PROMPT}"}]
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            full_text = text_input + item["target"] + self.processor.tokenizer.eos_token
+            full_text = text_input + item["target"]
             
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
             prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
@@ -379,35 +446,63 @@ class SmartCollator:
         }
 
 class CustomTrainer(Trainer):
-    # (既存のコードと同じため省略)
     def get_train_dataloader(self) -> DataLoader:
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+        
         batch_sampler = DistributedHomogeneousBatchSampler(
-            self.train_dataset, batch_size=self.args.train_batch_size,
-            num_replicas=self.args.world_size, rank=self.args.process_index,
-            drop_last=self.args.dataloader_drop_last, shuffle=True
+            self.train_dataset,
+            batch_size=self.args.train_batch_size,
+            num_replicas=self.args.world_size,
+            rank=self.args.process_index,
+            drop_last=self.args.dataloader_drop_last,
+            shuffle=True
         )
-        return DataLoader(self.train_dataset, batch_sampler=batch_sampler, collate_fn=self.data_collator, num_workers=self.args.dataloader_num_workers, pin_memory=self.args.dataloader_pin_memory)
+        return DataLoader(
+            self.train_dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
     
-    def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
+    def get_eval_dataloader(self, eval_dataset: Optional[Dataset] = None) -> DataLoader:
+        if eval_dataset is None and self.eval_dataset is None:
+            raise ValueError("Trainer: evaluation requires an eval_dataset.")
         eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
+        
         batch_sampler = DistributedHomogeneousBatchSampler(
-            eval_dataset, batch_size=self.args.per_device_eval_batch_size,
-            num_replicas=self.args.world_size, rank=self.args.process_index,
-            drop_last=False, shuffle=False
+            eval_dataset,
+            batch_size=self.args.per_device_eval_batch_size,
+            num_replicas=self.args.world_size,
+            rank=self.args.process_index,
+            drop_last=False, 
+            shuffle=False 
         )
-        return DataLoader(eval_dataset, batch_sampler=batch_sampler, collate_fn=self.data_collator, num_workers=self.args.dataloader_num_workers, pin_memory=self.args.dataloader_pin_memory)
+
+        return DataLoader(
+            eval_dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
 
 # ==============================================================================
-# 4. Evaluation Logic (Modified for CoT)
+# 4. Final Evaluation Logic (Multi-GPU DDP + CoT Parsing)
 # ==============================================================================
 
 def evaluate_model(model, processor, items, device, output_dir):
+    """
+    Runs inference on ALL items using DDP slicing.
+    Updated to parse CoT output.
+    """
     from tqdm import tqdm
     
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     
-    # DDP Slicing
+    # 1. Slice items for this GPU
     total = len(items)
     chunk_size = (total + world_size - 1) // world_size
     if local_rank != -1:
@@ -415,25 +510,28 @@ def evaluate_model(model, processor, items, device, output_dir):
         end_idx = min(start_idx + chunk_size, total)
         my_items = items[start_idx:end_idx]
     else:
-        my_items = items
+        my_items = items # Single GPU mode
 
     model.eval()
     results = []
     
-    # Only show tqdm on rank 0 to avoid duplicate progress bars
+    if local_rank in [-1, 0]:
+        print(f"Starting evaluation on {total} items ({len(my_items)} per GPU)...")
+    
+    # Only show tqdm on rank 0
     iterator = tqdm(my_items, desc="Evaluating", disable=(local_rank not in [-1, 0]))
     
     for i, item in enumerate(iterator):
-        # ... (入力構築部分は同じ) ...
         audio_path = item.get("audio_path")
         transcript = item.get("transcript", "")
         slurp_id = item.get("slurp_id", "")
         
         if audio_path:
-            audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
+            sr = processor.feature_extractor.sampling_rate
+            audio, _ = librosa.load(audio_path, sr=sr)
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
             text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
+            inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
             file_key = os.path.basename(audio_path)
             eval_type = "audio"
         else:
@@ -446,58 +544,57 @@ def evaluate_model(model, processor, items, device, output_dir):
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
         with torch.no_grad():
-            # 生成トークン数を増やす (CoTのため)
-            output_ids = model.generate(**inputs, max_new_tokens=256)
+            output_ids = model.generate(**inputs, max_new_tokens=256) # INCREASED for CoT
             
         input_len = inputs["input_ids"].shape[1]
         decoded = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
         
-        # --- 解析ロジックの修正 ---
-        # 出力は "Thought: ... Candidates: [...] Final JSON: {...}" となるはず
-        # "Final JSON:" 以降のJSON、または文字列中の最後のJSONオブジェクトを探す
-        
+        # --- Parsing Logic (candidates.py) ---
         parsed_json = {}
         try:
-            # 1. "Final JSON:" タグがある場合
+            # 1. Found "Final JSON:"?
             if "Final JSON:" in decoded:
                 json_part = decoded.split("Final JSON:")[-1]
             else:
                 json_part = decoded
 
-            # 2. JSONっぽい部分を抽出 ({ ... })
-            # 貪欲マッチではなく、一番外側の括弧を探すなどの工夫もできるが、簡易的にregexで抽出
+            # 2. Extract JSON block
             matches = list(re.finditer(r'\{.*\}', json_part, re.DOTALL))
             if matches:
-                # 最後に見つかったJSONブロックを採用する（候補リストがJSON形式で書かれていた場合の誤検知防止）
                 candidate_json = matches[-1].group(0)
                 parsed_json = json.loads(candidate_json)
             else:
-                # 失敗時
                 parsed_json = {}
-        except Exception as e:
-            # logger.error(f"JSON Parse Error: {e} | Output: {decoded}")
+        except Exception:
             parsed_json = {}
 
+        wer_score = calculate_wer(transcript, decoded) # Calculate WER on full CoT might not be fair, but kept for consistency
+        
         res = {
-            "file": file_key,
-            "slurp_id": slurp_id,
-            "raw_output": decoded,
-            # 解析結果
             "scenario": parsed_json.get("scenario", ""),
             "action": parsed_json.get("action", ""),
             "entities": parsed_json.get("entities", []),
-            "target_json": item.get("ground_truth_json")
+            "file": file_key,
+            "slurp_id": slurp_id,
+            "wer": wer_score,
+            "transcript": transcript,
+            "raw_output": decoded,
+            "target": item.get("target"), # Note: target now contains Thought...
+            "ground_truth_json": item.get("ground_truth_json"),
+            "type": eval_type
         }
         results.append(res)
 
-    # ... (保存・マージロジックは同じ) ...
     rank = local_rank if local_rank != -1 else 0
     rank_file = os.path.join(output_dir, f"predictions_rank_{rank}.jsonl")
+    
     with open(rank_file, "w") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
+        
     if rank == 0:
         final_file = os.path.join(output_dir, "predictions.jsonl")
         print(f"Merging results to {final_file}...")
@@ -508,6 +605,8 @@ def evaluate_model(model, processor, items, device, output_dir):
                     with open(rf, "r") as f_in:
                         f_out.write(f_in.read())
                     os.remove(rf)
+        print("Done.")
+    
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
 
@@ -517,34 +616,30 @@ def evaluate_model(model, processor, items, device, output_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-    # 既存の引数
-    parser.add_argument("--train_file", type=str, default="slurp/dataset/slurp/train.jsonl")
-    parser.add_argument("--eval_file", type=str, default=None)
-    parser.add_argument("--test_file", type=str, default=None)
-    parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
+    parser.add_argument("--train_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiment1/slurp/dataset/slurp/train.jsonl")
+    parser.add_argument("--eval_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiment1/slurp/dataset/slurp/devel.jsonl")
+    parser.add_argument("--test_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiment1/slurp/dataset/slurp/test.jsonl")
+    parser.add_argument("--audio_dir", type=str, default="/lustre/home/71200138/INTERSPEECH/experiment1/slurp/slurp_real")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_cot_batch")
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--only-eval", action="store_true")
+    parser.add_argument("--only-eval", action="store_true", help="Skip training and run evaluation only")
     
-    # 新規引数
-    parser.add_argument("--cluster_file", type=str, default="clusters.json", help="Path to intent cluster definition")
+    # New argument for Candidates
+    parser.add_argument("--cluster_file", type=str, default="Experiment_2/actions_clustered_n2.txt", help="Path to intent cluster definition")
 
     args = parser.parse_args()
-    
-    # (初期化処理は同じ)
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    
     if local_rank != -1 and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
+        
     device = torch.device(f"cuda:{local_rank}") if local_rank != -1 else "cuda"
 
-    if args.eval_file is None: args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
-    if args.test_file is None: args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
-
-    # Cluster Managerの初期化
+    # Initialize Cluster Manager
     cluster_manager = IntentClusterManager(args.cluster_file)
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
@@ -556,11 +651,13 @@ def main():
     model.multi_modal_projector.requires_grad_(False)
 
     if not args.only_eval:
-        # build_items_from_slurp に cluster_manager を渡す
+        # Pass cluster_manager
         train_items = build_items_from_slurp(args.train_file, args.audio_dir, cluster_manager, max_samples=args.max_samples)
-        eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, cluster_manager, max_samples=args.max_samples // 10 if args.max_samples else None)
+        eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, cluster_manager, max_samples=args.max_samples // 10 if args.max_samples else None, deterministic=True)
         
-        # (Trainer設定は同じ)
+        if local_rank in [-1, 0]:
+            print(f"Train: {len(train_items)} | Eval: {len(eval_items)}")
+
         training_args = TrainingArguments(
             output_dir=args.output_dir,
             num_train_epochs=args.num_train_epochs,
@@ -570,8 +667,15 @@ def main():
             learning_rate=args.learning_rate,
             bf16=True,
             logging_steps=10,
-            save_strategy="epoch",
-            eval_strategy="no", 
+            eval_strategy="steps" if len(eval_items) > 0 else "no",
+            eval_steps=50,
+            save_strategy="steps",
+            save_steps=100,
+            save_total_limit=2,
+            load_best_model_at_end=True,
+            metric_for_best_model="loss",
+            remove_unused_columns=False,
+            ddp_find_unused_parameters=False,
             report_to="none"
         )
 
@@ -580,21 +684,35 @@ def main():
             args=training_args,
             train_dataset=MixedDataset(train_items),
             eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-            data_collator=SmartCollator(processor), # max_lengthを増やしたCollator
+            data_collator=SmartCollator(processor),
+            tokenizer=processor.tokenizer,
         )
         trainer.train()
-        
+
         if local_rank in [-1, 0]:
             trainer.save_model(args.output_dir)
             processor.save_pretrained(args.output_dir)
+            print("\n=== Training Complete. Model Saved. ===")
 
-    # Test
+        if dist.is_initialized():
+            dist.barrier()
+    else:
+        if local_rank in [-1, 0]:
+            print("Skipping training (--only-eval set). Loading model/processor directly.")
+
     if local_rank in [-1, 0]:
-        print("Starting Testing...")
-    test_items = build_items_from_slurp(args.test_file, args.audio_dir, cluster_manager, add_text_only=False, max_samples=None)
-    evaluate_model(model, processor, test_items, device, args.output_dir)
+        print("\n=== Running Final Test on ALL Data (Multi-GPU) ===")
+        
+    test_items = build_items_from_slurp(args.test_file, args.audio_dir, cluster_manager, add_text_only=False, max_samples=None, deterministic=True)
+    if test_items:
+        evaluate_model(model, processor, test_items, device, args.output_dir)
+    else:
+        if local_rank == 0:
+            logger.warning(f"No valid test items loaded from {args.test_file}")
+            logger.warning(f"File exists but may have no audio recordings found in {args.audio_dir}")
 
-    if dist.is_initialized(): dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
 
 if __name__ == "__main__":
     main()
