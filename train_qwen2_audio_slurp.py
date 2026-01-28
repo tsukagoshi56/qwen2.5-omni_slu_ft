@@ -690,16 +690,36 @@ class Qwen2AudioCollator:
         batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
 
         if "input_features" in features[0]:
-            audio_features = [{"input_features": f["input_features"]} for f in features]
-            if hasattr(self.processor.feature_extractor, "pad"):
-                audio_out = self.processor.feature_extractor.pad(
-                    audio_features, padding=True, return_tensors="pt"
-                )
-                batch_out["input_features"] = audio_out["input_features"]
-                if "feature_attention_mask" in audio_out:
-                    batch_out["feature_attention_mask"] = audio_out["feature_attention_mask"]
-            else:
-                batch_out["input_features"] = torch.stack([f["input_features"] for f in features])
+            # DEBUG: Check input_features shape
+            if not hasattr(self, '_debug_audio_printed'):
+                self._debug_audio_printed = True
+                f0 = features[0]["input_features"]
+                print(f"DEBUG: input_features type = {type(f0)}", flush=True)
+                if hasattr(f0, 'shape'):
+                    print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
+                elif hasattr(f0, '__len__'):
+                    print(f"DEBUG: input_features len = {len(f0)}", flush=True)
+                print(f"DEBUG: feature_extractor type = {type(self.processor.feature_extractor)}", flush=True)
+                print(f"DEBUG: has pad method = {hasattr(self.processor.feature_extractor, 'pad')}", flush=True)
+            
+            # Try stacking directly instead of using feature_extractor.pad
+            try:
+                # Direct stack if shapes are compatible
+                stacked = torch.stack([f["input_features"] for f in features])
+                batch_out["input_features"] = stacked
+            except Exception as e:
+                print(f"DEBUG: torch.stack failed: {e}", flush=True)
+                # Fallback: try padding with feature_extractor
+                audio_features = [{"input_features": f["input_features"]} for f in features]
+                if hasattr(self.processor.feature_extractor, "pad"):
+                    audio_out = self.processor.feature_extractor.pad(
+                        audio_features, padding=True, return_tensors="pt"
+                    )
+                    batch_out["input_features"] = audio_out["input_features"]
+                    if "feature_attention_mask" in audio_out:
+                        batch_out["feature_attention_mask"] = audio_out["feature_attention_mask"]
+                else:
+                    raise e
 
         max_len = batch_out["input_ids"].shape[1]
         label_batch = torch.full((len(labels), max_len), -100, dtype=torch.long)
