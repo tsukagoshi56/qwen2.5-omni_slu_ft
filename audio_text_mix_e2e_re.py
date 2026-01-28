@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Audio-Text Mix Training & Distributed Inference (Slurp Format)
+with Smoke Test Mode
 """
 
 import argparse
@@ -11,6 +12,8 @@ import re
 import torch
 import numpy as np
 import logging
+import glob
+import shutil
 from dataclasses import dataclass
 from typing import Dict, List, Any, Optional, Iterator
 import librosa
@@ -42,7 +45,10 @@ PROMPT = """You are a voice assistant. Analyze the user's spoken request and out
 
 Output only valid JSON, no extra text."""
 
-# ... [Step 1: Data Loading functions are unchanged] ...
+# ==============================================================================
+# 1. Data Loading
+# ==============================================================================
+
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     candidates = [
         os.path.join(audio_root, filename),
@@ -76,6 +82,7 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         target_str = json.dumps(target_obj, ensure_ascii=False)
         transcript = data.get("sentence", "")
         
+        # Text Item
         if add_text_only:
             items.append({
                 "slurp_id": slurp_id,
@@ -85,6 +92,7 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
                 "target": target_str
             })
         
+        # Audio Item
         if data.get("recordings"):
             filename = data["recordings"][0].get("file", "")
             path = resolve_audio_path(audio_dir, filename)
@@ -106,7 +114,10 @@ class MixedDataset(Dataset):
     def __getitem__(self, idx):
         return {**self.items[idx], "original_idx": idx}
 
-# ... [Step 2: Sampler is unchanged (using the previous fix)] ...
+# ==============================================================================
+# 2. Sampler (Epoch Slicing for Audio)
+# ==============================================================================
+
 class DistributedHomogeneousBatchSampler(Sampler):
     def __init__(self, dataset: MixedDataset, batch_size: int, 
                  num_replicas: Optional[int] = None, 
@@ -153,11 +164,14 @@ class DistributedHomogeneousBatchSampler(Sampler):
             shuffled_audio = audio_indices_tensor
 
         total_audio_count = len(shuffled_audio)
-        chunk_size = total_audio_count // self.total_epochs
-        current_chunk_idx = self.epoch % self.total_epochs
+        # Avoid division by zero if dataset is smaller than epochs (Smoke test handling)
+        actual_epochs = max(1, self.total_epochs)
+        chunk_size = max(1, total_audio_count // actual_epochs)
+        
+        current_chunk_idx = self.epoch % actual_epochs
         
         start_idx = current_chunk_idx * chunk_size
-        if current_chunk_idx == self.total_epochs - 1:
+        if current_chunk_idx == actual_epochs - 1:
             end_idx = total_audio_count
         else:
             end_idx = start_idx + chunk_size
@@ -196,7 +210,8 @@ class DistributedHomogeneousBatchSampler(Sampler):
 
     def __len__(self):
         total_audio = len(self.local_audio_indices)
-        chunk_size = total_audio // self.total_epochs
+        actual_epochs = max(1, self.total_epochs)
+        chunk_size = total_audio // actual_epochs
         current_audio_len = chunk_size 
         current_text_len = len(self.local_text_indices)
         audio_batches = (current_audio_len + self.batch_size - 1) // self.batch_size
@@ -209,7 +224,10 @@ class DistributedHomogeneousBatchSampler(Sampler):
     def set_epoch(self, epoch: int):
         self.epoch = epoch
 
-# ... [Step 3: Collator is unchanged] ...
+# ==============================================================================
+# 3. Collator
+# ==============================================================================
+
 @dataclass
 class SmartCollator:
     processor: Any
@@ -285,7 +303,10 @@ class SmartCollator:
             "attention_mask": pad_sequence([torch.ones_like(ids) for ids in input_ids_list], batch_first=True, padding_value=0),
         }
 
-# ... [Step 4: Trainer is unchanged] ...
+# ==============================================================================
+# 4. Trainer
+# ==============================================================================
+
 class CustomTrainer(Trainer):
     def get_train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
@@ -309,7 +330,7 @@ class CustomTrainer(Trainer):
         )
 
 # ==============================================================================
-# 5. Inference, Parsing (Modified to remove Evaluation print)
+# 5. Inference (File-Based Merge to avoid NCCL Error)
 # ==============================================================================
 
 def clean_json_text(text: str) -> str:
@@ -331,24 +352,27 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
 
 def run_distributed_inference(model, processor, items, output_path, device, rank, world_size):
     """
-    Runs inference on all ranks, gathers results, parses JSON, and saves to jsonl.
-    Evaluation metrics printing has been removed.
+    Runs inference on all ranks, saves partial files per rank, and merges them at the end.
+    Avoids 'DistBackendError' by removing large data communication via NCCL.
     """
     model.eval()
     
+    # 1. Split Data
     my_items = items[rank::world_size]
     local_results = []
     
     if rank == 0:
-        logger.info(f"Starting Distributed Inference on {len(items)} items total.")
+        logger.info(f"Starting Distributed Inference on {len(items)} items total (Rank {rank} has {len(my_items)}).")
     
+    # 2. Inference Loop
     for i, item in enumerate(my_items):
-        if rank == 0 and i % 10 == 0:
+        if rank == 0 and i % 5 == 0:
             logger.info(f"Processing {i}/{len(my_items)}...")
 
         audio_path = item.get("audio_path")
         transcript = item.get("transcript", "")
         
+        # Prepare inputs
         if audio_path:
             audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
@@ -361,12 +385,14 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
 
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
+        # Generate
         with torch.no_grad():
             output_ids = model.generate(**inputs, max_new_tokens=128)
             
         input_len = inputs["input_ids"].shape[1]
         raw_output = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
         
+        # Parse
         json_str = clean_json_text(raw_output)
         parsed_obj = {}
         try:
@@ -390,23 +416,32 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
         }
         local_results.append(result_entry)
 
-    if world_size > 1:
-        all_results_lists = [None for _ in range(world_size)]
-        dist.all_gather_object(all_results_lists, local_results)
-        final_results = [item for sublist in all_results_lists for item in sublist]
-    else:
-        final_results = local_results
+    # 3. Save Local Results directly to a temporary file
+    temp_output_path = f"{output_path}.rank{rank}"
+    with open(temp_output_path, "w") as f:
+        for res in local_results:
+            f.write(json.dumps(res, ensure_ascii=False) + "\n")
+    
+    logger.info(f"Rank {rank}: Saved results to {temp_output_path}")
 
-    # 評価結果のprint(Accuracy計算)を削除し、保存のみ行う
+    # 4. Wait for all ranks
+    if world_size > 1:
+        dist.barrier()
+
+    # 5. Merge files (Rank 0 only)
     if rank == 0:
-        logger.info(f"Saving {len(final_results)} predictions to {output_path}")
-        with open(output_path, "w") as f:
-            for res in final_results:
-                f.write(json.dumps(res, ensure_ascii=False) + "\n")
+        logger.info(f"Merging results to {output_path}...")
+        with open(output_path, "w") as outfile:
+            pattern = f"{output_path}.rank*"
+            temp_files = glob.glob(pattern)
+            for fname in temp_files:
+                with open(fname, "r") as infile:
+                    shutil.copyfileobj(infile, outfile)
+                os.remove(fname) # Clean up
         logger.info("Done.")
 
 # ==============================================================================
-# Main (Modified for --eval_only)
+# Main
 # ==============================================================================
 
 def main():
@@ -422,8 +457,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
     
-    # 新規追加: 推論のみ行うフラグ
-    parser.add_argument("--eval_only", action="store_true", help="Run only inference on test_file using model_name_or_path")
+    # Smoke Test Flag
+    parser.add_argument("--smoke", action="store_true", help="Run a quick smoke test with tiny data to verify pipeline.")
     
     args = parser.parse_args()
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -438,8 +473,31 @@ def main():
         world_size = 1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Common: Load Processor & Model ---
-    # eval_onlyの場合は、model_name_or_path に checkpoint のパス (例: "outputs/checkpoint-100") を指定する想定
+    # --- Smoke Mode Adjustment ---
+    if args.smoke:
+        if rank == 0:
+            logger.info("!!! SMOKE MODE ACTIVATED !!!")
+            logger.info("Using minimal data and epochs to verify pipeline integrity.")
+        
+        # GPU数 x バッチサイズ x 2回分くらいあれば十分
+        smoke_samples = max(16, args.batch_size * world_size * 4)
+        args.max_samples = smoke_samples
+        args.num_train_epochs = 1
+        args.report_to = "none" # Disable heavy logging
+
+    # --- Data Loading ---
+    if args.eval_file is None:
+        args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
+    if args.test_file is None:
+        args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
+
+    train_items = build_items_from_slurp(args.train_file, args.audio_dir, max_samples=args.max_samples)
+    eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, max_samples=args.max_samples // 2 if args.max_samples else None)
+    
+    if rank == 0:
+        print(f"Train: {len(train_items)} | Eval: {len(eval_items)}")
+
+    # --- Model & Processor ---
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     model = Qwen2AudioForConditionalGeneration.from_pretrained(
         args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
@@ -448,78 +506,55 @@ def main():
     model.audio_tower.requires_grad_(False)
     model.multi_modal_projector.requires_grad_(False)
 
-    # --- Branch: Training or Inference Only ---
-    
-    if not args.eval_only:
-        # ================= Training Mode =================
-        if args.eval_file is None:
-            args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
-        
-        train_items = build_items_from_slurp(args.train_file, args.audio_dir, max_samples=args.max_samples)
-        eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, max_samples=args.max_samples // 10 if args.max_samples else None)
-        
-        if rank == 0:
-            print(f"Train: {len(train_items)} | Eval: {len(eval_items)}")
+    # --- Training ---
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        num_train_epochs=args.num_train_epochs,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=4,
+        learning_rate=args.learning_rate,
+        bf16=True,
+        logging_steps=1 if args.smoke else 10,
+        eval_strategy="steps" if len(eval_items) > 0 else "no",
+        eval_steps=2 if args.smoke else 50, # Smoke時は頻繁にEval
+        save_strategy="no",
+        save_total_limit=None,
+        remove_unused_columns=False,
+        ddp_find_unused_parameters=False,
+        report_to="none"
+    )
 
-        training_args = TrainingArguments(
-            output_dir=args.output_dir,
-            num_train_epochs=args.num_train_epochs,
-            per_device_train_batch_size=args.batch_size,
-            per_device_eval_batch_size=args.batch_size,
-            gradient_accumulation_steps=4,
-            learning_rate=args.learning_rate,
-            bf16=True,
-            logging_steps=10,
-            eval_strategy="steps" if len(eval_items) > 0 else "no",
-            eval_steps=50,
-            save_strategy="no",
-            save_total_limit=None,
-            remove_unused_columns=False,
-            ddp_find_unused_parameters=False,
-            report_to="none"
-        )
+    trainer = CustomTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=MixedDataset(train_items),
+        eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
+        data_collator=SmartCollator(processor),
+        tokenizer=processor.tokenizer,
+    )
 
-        trainer = CustomTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=MixedDataset(train_items),
-            eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-            data_collator=SmartCollator(processor),
-            tokenizer=processor.tokenizer,
-        )
+    trainer.train()
 
-        trainer.train()
+    if rank == 0:
+        trainer.save_model(args.output_dir)
+        processor.save_pretrained(args.output_dir)
 
-        if rank == 0:
-            trainer.save_model(args.output_dir)
-            processor.save_pretrained(args.output_dir)
+    if world_size > 1:
+        dist.barrier()
 
-        # Barrier to ensure training is done before any potential testing in this same run
-        if world_size > 1:
-            dist.barrier()
-    
-    else:
-        # ================= Eval Only Mode =================
-        if rank == 0:
-            logger.info(f"Running in EVAL ONLY mode. Loading model from {args.model_name_or_path}")
-
-    # --- Common: Inference ---
-    # Trainingモードの場合は学習後のモデルを使用、EvalOnlyの場合はロードしたモデルを使用
+    # --- Inference (Distributed & Robust) ---
     if args.test_file is None:
         args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
 
     test_items = build_items_from_slurp(
         args.test_file, 
         args.audio_dir, 
-        max_samples=None, 
+        max_samples=args.max_samples if args.smoke else None, 
         add_text_only=False 
     )
     
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
-    if args.eval_only:
-        # eval_onlyの時は出力先ディレクトリがないかもしれないので作成
-        if rank == 0:
-            os.makedirs(args.output_dir, exist_ok=True)
     
     run_distributed_inference(
         model=model,
