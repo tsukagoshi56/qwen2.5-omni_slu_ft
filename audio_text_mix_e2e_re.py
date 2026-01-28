@@ -442,11 +442,6 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
     # 【重要修正1】推論時は「左パディング」を強制する
     processor.tokenizer.padding_side = "left"
     
-    # 【重要修正2】pad_tokenがない場合はEOSを使う（これをしないとエラーやバグの元になる）
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
-
     if rank == 0:
         logger.info(f"Starting Inference. Items: {len(my_items)}. Batch size: {batch_size}")
     
@@ -634,6 +629,12 @@ def main():
 
     # --- Model & Processor ---
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+
+    # 学習(Collator)でpad_token_idを使うため、ここで設定しておく必要があります
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+
     model = Qwen2AudioForConditionalGeneration.from_pretrained(
         args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
     ).to(device)
