@@ -420,7 +420,8 @@ def evaluate_model(model, processor, items, device, output_dir):
     model.eval()
     results = []
     
-    iterator = tqdm(my_items, desc="Evaluating") if local_rank in [-1, 0] else my_items
+    # Only show tqdm on rank 0 to avoid duplicate progress bars
+    iterator = tqdm(my_items, desc="Evaluating", disable=(local_rank not in [-1, 0]))
     
     for i, item in enumerate(iterator):
         # ... (入力構築部分は同じ) ...
@@ -548,7 +549,7 @@ def main():
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     model = MODEL_CLS.from_pretrained(
-        args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
+        args.model_name_or_path, dtype=torch.bfloat16, trust_remote_code=True
     ).to(device)
     
     model.audio_tower.requires_grad_(False)
