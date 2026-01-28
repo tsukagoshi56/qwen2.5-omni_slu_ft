@@ -16,6 +16,7 @@ try:
         PROMPT,
         build_items,
         SlurpDataset,
+        load_audio,
         load_audio_input,
         load_speech_massive_split,
         SpeechMassiveDataset,
