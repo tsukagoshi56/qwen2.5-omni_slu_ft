@@ -1182,14 +1182,22 @@ def main() -> None:
 
     if args.debug_generation:
         # Use eval items if available, else train items
-        debug_items = eval_items if eval_items else train_items
-        trainer_callbacks.append(
-            SampleGenerationCallback(
-                processor, 
-                debug_items, 
-                debug_steps=args.debug_generation_steps
+        target_dataset = eval_dataset if eval_dataset else train_dataset
+        debug_items = []
+        if target_dataset:
+            # Safely grab first few items for debugging
+            num_debug = 5
+            for i in range(min(len(target_dataset), num_debug)):
+                debug_items.append(target_dataset[i])
+
+        if debug_items:
+            trainer_callbacks.append(
+                SampleGenerationCallback(
+                    processor, 
+                    debug_items, 
+                    debug_steps=args.debug_generation_steps
+                )
             )
-        )
 
     # Custom Trainer to use GroupedBatchSampler for homogeneous batches
     class GroupedTrainer(Trainer):
