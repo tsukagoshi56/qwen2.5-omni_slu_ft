@@ -36,7 +36,15 @@ except Exception:
     from transformers import AutoModelForCausalLM
     MODEL_CLS = AutoModelForCausalLM
 
-logging.basicConfig(level=logging.INFO)
+# Set verbosity for transformers
+import transformers
+transformers.utils.logging.set_verbosity_info()
+
+local_rank = int(os.environ.get("LOCAL_RANK", -1))
+if local_rank not in [-1, 0]:
+    logging.basicConfig(level=logging.ERROR)
+else:
+    logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 PROMPT = """You are a voice assistant. Analyze the user's spoken request and output a JSON object with:
@@ -536,7 +544,8 @@ def main():
         if dist.is_initialized():
             dist.barrier()
     else:
-        print("Skipping training (--only-eval set). Loading model/processor directly.")
+        if local_rank in [-1, 0]:
+            print("Skipping training (--only-eval set). Loading model/processor directly.")
 
     if local_rank in [-1, 0]:
         print("\n=== Running Final Test on ALL Data (Multi-GPU) ===")

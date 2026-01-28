@@ -37,7 +37,15 @@ except Exception:
     from transformers import AutoModelForCausalLM
     MODEL_CLS = AutoModelForCausalLM
 
-logging.basicConfig(level=logging.INFO)
+# Set verbosity for transformers
+import transformers
+transformers.utils.logging.set_verbosity_info()
+
+local_rank = int(os.environ.get("LOCAL_RANK", -1))
+if local_rank not in [-1, 0]:
+    logging.basicConfig(level=logging.ERROR)
+else:
+    logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
@@ -580,7 +588,8 @@ def main():
             processor.save_pretrained(args.output_dir)
 
     # Test
-    if local_rank in [-1, 0]: print("Starting Testing...")
+    if local_rank in [-1, 0]:
+        print("Starting Testing...")
     test_items = build_items_from_slurp(args.test_file, args.audio_dir, cluster_manager, add_text_only=False, max_samples=None)
     evaluate_model(model, processor, test_items, device, args.output_dir)
 
