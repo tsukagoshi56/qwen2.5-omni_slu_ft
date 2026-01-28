@@ -63,6 +63,6 @@ torchrun --nproc_per_node=$NUM_GPUS train_qwen2_audio_slurp.py \
   --save_steps 500 \
   --bf16 \
   --debug_generation \
-  --debug_generation_steps 10
+  --debug_generation_steps 50
 
 echo "Training complete. Model saved to: $OUTPUT_DIR"
