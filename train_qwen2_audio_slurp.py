@@ -609,6 +609,7 @@ class SampleGenerationCallback(TrainerCallback):
                 for i, item in enumerate(self.items):
                     # For audio items, do not include transcript in prompt (force Audio -> Output)
                     # For text-only items (no audio_path), use transcript
+                    transcript = item.get("transcript", "")
                     has_audio = item.get("audio_path") is not None
                     
                     if has_audio:
