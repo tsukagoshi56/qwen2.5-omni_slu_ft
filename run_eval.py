@@ -255,6 +255,11 @@ def main():
     logger.info(f"processor tokenizer name_or_path: {processor.tokenizer.name_or_path}")
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
     logger.info(f"tokenizer len: {len(processor.tokenizer)}")
+    logger.info(f"tokenizer vocab_size (base): {processor.tokenizer.vocab_size}")
+    logger.info(f"tokenizer added_tokens_encoder: {processor.tokenizer.added_tokens_encoder}")
+    logger.info(f"tokenizer pad_token: {processor.tokenizer.pad_token} (id={processor.tokenizer.pad_token_id})")
+    logger.info(f"tokenizer eos_token: {processor.tokenizer.eos_token} (id={processor.tokenizer.eos_token_id})")
+    logger.info(f"tokenizer bos_token: {processor.tokenizer.bos_token} (id={getattr(processor.tokenizer, 'bos_token_id', None)})")
 
     # Critical: Resize embeddings if tokenizer size differs from model vocab size
     # This ensures alignment for any token mismatch (added or removed tokens)
