@@ -442,14 +442,14 @@ def main():
                         except Exception as e:
                             logger.warning(f"Failed to load audio for {item}: {e}")
                 
-                # Build content for chat template
-                # USER WARNING: Do NOT create audio placeholder in chat template. 
-                # Pass text and audio simultaneously to processor.
-                user_content = [{"type": "text", "text": prompt_text}]
-                messages = [{"role": "user", "content": user_content}]
+                # Build text manually without chat template
+                # User requested to put '<AUDIO>' in text manually
+                if audio is not None:
+                    # Prepend audio token
+                    text = f"<|AUDIO|>\n{prompt_text}"
+                else:
+                    text = prompt_text
                 
-                # Apply chat template (Text only)
-                text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
                 batch_texts.append(text)
                 
                 if audio is not None:
