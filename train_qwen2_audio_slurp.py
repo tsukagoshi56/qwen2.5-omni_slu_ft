@@ -1118,7 +1118,7 @@ def main() -> None:
             train_text_only=args.train_text_only,
         )
 
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True, fix_mistral_regex=True)
     sampling_rate = None
     if hasattr(processor, "feature_extractor") and hasattr(
         processor.feature_extractor, "sampling_rate"

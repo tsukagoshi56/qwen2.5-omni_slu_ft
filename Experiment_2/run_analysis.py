@@ -287,16 +287,16 @@ def run_analysis(args):
         logger.info(f"Detected LoRA adapter. Base model: {base_model_path}")
         
         try:
-            processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
         except Exception:
-            processor = AutoProcessor.from_pretrained(base_model_path, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(base_model_path, trust_remote_code=True, fix_mistral_regex=True)
         
         model = Qwen2AudioForConditionalGeneration.from_pretrained(
             base_model_path, **model_kwargs
         )
         model = PeftModel.from_pretrained(model, args.model_path)
     else:
-        processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
         model = Qwen2AudioForConditionalGeneration.from_pretrained(
             args.model_path, **model_kwargs
         )

@@ -201,10 +201,10 @@ def main():
             
             # Load processor (prefer adapter path, fallback to base)
             try:
-                processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+                processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
             except Exception:
                 logger.info(f"Failed to load processor from {args.model_path}, trying base model {base_model_path}")
-                processor = AutoProcessor.from_pretrained(base_model_path, trust_remote_code=True)
+                processor = AutoProcessor.from_pretrained(base_model_path, trust_remote_code=True, fix_mistral_regex=True)
             
             # Load base model
             try:
@@ -241,7 +241,7 @@ def main():
         for load_path in processor_load_paths:
             try:
                 logger.info(f"Attempting to load processor from: {load_path}")
-                processor = AutoProcessor.from_pretrained(load_path, trust_remote_code=True)
+                processor = AutoProcessor.from_pretrained(load_path, trust_remote_code=True, fix_mistral_regex=True)
                 logger.info(f"Successfully loaded processor from: {load_path}")
                 break
             except Exception as e:
@@ -258,7 +258,7 @@ def main():
                     base_model = config_dict.get("_name_or_path")
                     if base_model and base_model != args.model_path:
                         logger.info(f"Fallback: Loading processor from base model in config.json: {base_model}")
-                        processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
+                        processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True, fix_mistral_regex=True)
             except Exception as e2:
                 logger.warning(f"Fallback (config.json) also failed: {e2}")
         
