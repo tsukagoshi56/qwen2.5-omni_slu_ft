@@ -651,7 +651,7 @@ class SampleGenerationCallback(TrainerCallback):
                             audio_np,
                             sampling_rate=16000,
                             return_tensors="pt",
-                            padding="max_length",
+                            padding=True,
                             return_attention_mask=True,
                         )
                         
@@ -768,7 +768,7 @@ class Qwen2AudioCollator:
                     audio_np,
                     sampling_rate=16000,
                     return_tensors="pt",
-                    padding="max_length",  # Pad to max_length (3000 frames = 30 seconds)
+                    padding=True,  # Pad to longest in batch (or just process single item here)
                     return_attention_mask=True,
                 )
                 
@@ -928,8 +928,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_eval_samples", type=int, default=None)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=2)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=2)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--num_train_epochs", type=int, default=3)
@@ -940,6 +940,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup_ratio", type=float, default=0.04)
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--gradient_checkpointing", action="store_true", default=True, help="Enable gradient checkpointing to save memory")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_lora", action="store_true", default=False)
     # parser.add_argument("--no_lora", action="store_false", dest="use_lora") # Deprecated since False is default
@@ -978,6 +979,7 @@ def make_training_arguments(
         "bf16": args.bf16,
         "report_to": "none",
         "remove_unused_columns": False,
+        "gradient_checkpointing": args.gradient_checkpointing,
         "dataloader_num_workers": 2,
         "push_to_hub": args.push_to_hub,
     }
