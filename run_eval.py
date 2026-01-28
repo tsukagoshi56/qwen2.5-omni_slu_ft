@@ -426,12 +426,19 @@ def main():
                 # Load audio if needed
                 audio = None
                 if not self.add_text_only:
-                    audio_input = item.get("audio") or item.get("audio_path")
-                    if audio_input:
+                    audio_path = item.get("audio_path")
+                    if audio_path:
                         try:
-                            audio = load_audio_input(audio_input, self.audio_sampling_rate)
+                            # Use load_audio exactly like training's SampleGenerationCallback
+                            audio = load_audio(audio_path, target_sr=self.audio_sampling_rate)
                         except Exception as e:
                             logger.warning(f"Failed to load audio for {item}: {e}")
+                    elif item.get("audio"):
+                        # Handle HuggingFace dataset audio dict
+                        try:
+                            audio = load_audio_input(item.get("audio"), self.audio_sampling_rate)
+                        except Exception as e:
+                            logger.warning(f"Failed to load audio dict for {item}: {e}")
                 
                 # Build prompt based on whether we have audio
                 # Matches training: if audio, prompt is just PROMPT; if text-only, use transcript + PROMPT
@@ -459,15 +466,11 @@ def main():
                 
                 # Process inputs matching training script approach
                 if audio is not None:
-                    # Convert to numpy if tensor
+                    # Convert to numpy if tensor (exactly like SampleGenerationCallback)
                     if isinstance(audio, torch.Tensor):
                         audio_np = audio.numpy()
                     else:
-                        audio_np = np.array(audio) if not isinstance(audio, np.ndarray) else audio
-                    
-                    # Ensure 1D
-                    if audio_np.ndim > 1:
-                        audio_np = audio_np.squeeze()
+                        audio_np = audio
                     
                     # Extract audio features using feature_extractor with fixed padding (matches training)
                     audio_features = self.processor.feature_extractor(
