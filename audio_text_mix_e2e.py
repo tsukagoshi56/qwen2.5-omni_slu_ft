@@ -368,12 +368,23 @@ def train_model(args):
     )
     print(f"Loaded {len(train_items)} training samples")
     
-    # Split train/eval
-    eval_size = min(len(train_items) // 5, 50)
-    eval_items = train_items[:eval_size]
-    train_items = train_items[eval_size:]
+    if len(train_items) == 0:
+        raise ValueError(f"No training samples loaded! Check paths:\n  train_file: {args.train_file}\n  audio_dir: {args.audio_dir}")
+    
+    # Split train/eval - ensure at least 1 sample for training
+    if len(train_items) <= 2:
+        # Too few samples - use all for training, no eval
+        eval_items = []
+        print("Warning: Too few samples for eval split, using all for training")
+    else:
+        eval_size = max(1, min(len(train_items) // 5, 50))
+        eval_items = train_items[:eval_size]
+        train_items = train_items[eval_size:]
     
     print(f"Train: {len(train_items)}, Eval: {len(eval_items)}")
+    
+    if len(train_items) == 0:
+        raise ValueError("No training samples after split! Increase --max_samples")
     
     train_dataset = AudioTextDataset(train_items)
     eval_dataset = AudioTextDataset(eval_items) if eval_items else None
