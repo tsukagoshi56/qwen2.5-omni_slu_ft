@@ -572,7 +572,12 @@ class SampleGenerationCallback(TrainerCallback):
                     }
                     
                     if audio_input is not None:
-                        inputs = self.processor(audio=[audio_input], **process_kwargs).to(model.device)
+                        # Convert to numpy if tensor
+                        if isinstance(audio_input, torch.Tensor):
+                            audio_np = audio_input.numpy()
+                        else:
+                            audio_np = audio_input
+                        inputs = self.processor(audio=audio_np, **process_kwargs).to(model.device)
                     else:
                         inputs = self.processor(**process_kwargs).to(model.device)
                     
@@ -656,8 +661,25 @@ class Qwen2AudioCollator:
                 "max_length": self.config.max_length,
             }
             if audio is not None:
-                prompt_inputs = self.processor(text=prompt_text, audio=[audio], **call_kwargs)
-                full_inputs = self.processor(text=full_text, audio=[audio], **call_kwargs)
+                # DEBUG: Check audio format before passing to processor
+                if not hasattr(self, '_debug_audio_format_printed'):
+                    self._debug_audio_format_printed = True
+                    print(f"DEBUG: audio type before processor = {type(audio)}", flush=True)
+                    if hasattr(audio, 'shape'):
+                        print(f"DEBUG: audio shape = {audio.shape}", flush=True)
+                    if hasattr(audio, 'dtype'):
+                        print(f"DEBUG: audio dtype = {audio.dtype}", flush=True)
+                    print(f"DEBUG: sampling_rate = {self.config.audio_sampling_rate}", flush=True)
+                
+                # Convert to numpy if tensor
+                if isinstance(audio, torch.Tensor):
+                    audio_np = audio.numpy()
+                else:
+                    audio_np = audio
+                
+                # Try passing as tuple (audio, sr) or just numpy array
+                prompt_inputs = self.processor(text=prompt_text, audio=audio_np, **call_kwargs)
+                full_inputs = self.processor(text=full_text, audio=audio_np, **call_kwargs)
             else:
                 prompt_inputs = self.processor(text=prompt_text, **call_kwargs)
                 full_inputs = self.processor(text=full_text, **call_kwargs)
