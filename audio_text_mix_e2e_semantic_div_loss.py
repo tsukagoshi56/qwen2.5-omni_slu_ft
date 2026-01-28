@@ -433,7 +433,7 @@ class ContrastiveSLUTrainer(Trainer):
             pin_memory=self.args.dataloader_pin_memory,
         )
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
         通常のCross Entropyロスに加えて、対照学習的なペナルティを計算する。
         
@@ -441,6 +441,9 @@ class ContrastiveSLUTrainer(Trainer):
         1. Selection: の直後の位置（ラベルが始まる位置）を特定
         2. その位置でのロジットを取り出し、正解ラベルと不正解ラベルのロジットを比較
         3. Max-Margin Loss: 正解と最も高い不正解の差がマージン以下ならペナルティ
+        
+        Args:
+            **kwargs: transformers v4.46.0以降で追加された引数（num_items_in_batch等）を受け取る
         """
         # 通常のロス（Cross Entropy）を計算
         outputs = model(**inputs)
