@@ -72,6 +72,10 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
 def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_samples=None):
     items = []
     if not os.path.exists(jsonl_path):
+        abs_path = os.path.abspath(jsonl_path)
+        logger.warning(f"JSONL file not found: {jsonl_path}")
+        logger.warning(f"Absolute path searched: {abs_path}")
+        logger.warning(f"Current working directory: {os.getcwd()}")
         return items
     
     with open(jsonl_path, "r") as f:
