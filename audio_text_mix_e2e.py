@@ -260,10 +260,15 @@ def main():
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--only_eval", action="store_true", help="Skip training and run evaluation only")
+    parser.add_argument("--only-eval", action="store_true", help="Skip training and run evaluation only")
     
     args = parser.parse_args()
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    
+    # Initialize Process Group for DDP if needed (Crucial for only-eval mode)
+    if local_rank != -1 and not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+        
     device = torch.device(f"cuda:{local_rank}") if local_rank != -1 else "cuda"
 
     # --- Data Paths ---
