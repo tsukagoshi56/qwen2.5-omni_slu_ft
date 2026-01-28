@@ -377,104 +377,149 @@ def main():
     
     from train_qwen2_audio_slurp import load_audio
     
-    # Process one item at a time, matching SampleGenerationCallback pattern EXACTLY
-    # This avoids "attention_mask length mismatch" errors by using feature_extractor independently
-    logger.info("Starting sequential inference on items...")
-    
-    # Ensure items is iterable
-    if isinstance(items, SlurpDataset) or isinstance(items, SpeechMassiveDataset):
-        # We need the raw items list if possible, or iterate dataset
-        if hasattr(items, "items"):
-            eval_items = items.items
-        else:
-            # Fallback for dataset wrapper
-            eval_items = [items[i] for i in range(len(items))]
-    else:
-        eval_items = items
+    # Define Collator with robust batching logic (Ported from Qwen2AudioCollator)
+    class EvalCollator:
+        def __init__(self, processor, add_text_only):
+            self.processor = processor
+            self.add_text_only = add_text_only
 
-    for item in tqdm(eval_items):
-        # Determine prompt
-        has_audio = item.get("audio_path") is not None
-        transcript = item.get("transcript", "")
-        
-        if args.add_text_only:
-            # Text-only mode: use transcript
-            if transcript:
-                prompt_text = f"{transcript}\n{PROMPT}"
-            else:
-                prompt_text = PROMPT
-        else:
-            # Audio mode: do NOT include transcript in prompt for audio tasks
-            if has_audio:
-                prompt_text = PROMPT
-            elif transcript:
-                prompt_text = f"{transcript}\n{PROMPT}"
-            else:
-                # Fallback
-                prompt_text = PROMPT
-        
-        # Prepare input content
-        user_content = []
-        audio_input = None
-        
-        if not args.add_text_only and item.get("audio_path"):
-            audio_path = item["audio_path"]
-            try:
-                target_sr = processor.feature_extractor.sampling_rate
-                audio_input = load_audio(audio_path, target_sr=target_sr)
-                user_content.append({"type": "audio", "audio": audio_path})
-            except Exception as e:
-                logger.warning(f"Failed to load audio: {e}")
-        
-        user_content.append({"type": "text", "text": prompt_text})
-        messages = [{"role": "user", "content": user_content}]
-        
-        # Apply template
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        
-        # Process inputs - EXACTLY like SampleGenerationCallback
-        if audio_input is not None:
-            # Convert to numpy if tensor
-            if isinstance(audio_input, torch.Tensor):
-                audio_np = audio_input.numpy()
-            else:
-                audio_np = audio_input
+        def __call__(self, batch):
+            batch_items = batch
+            batch_texts = []
             
-            # Extract audio features with proper padding
-            audio_features = processor.feature_extractor(
-                audio_np,
-                sampling_rate=16000,
-                return_tensors="pt",
-                padding="max_length", # Crucial for avoiding mismatch
-                return_attention_mask=True,
-            )
+            features = []
             
-            # Tokenize text
-            text_tokens = processor.tokenizer(
-                text,
-                return_tensors="pt",
-                padding=True,
-            )
+            for item in batch:
+                transcript = item.get("transcript", "")
+                
+                # Determine prompt
+                if self.add_text_only:
+                     if transcript:
+                         prompt_text = f"{transcript}\n{PROMPT}"
+                     else:
+                         prompt_text = PROMPT
+                else:
+                    # Audio mode logic
+                    if item.get("audio_path"):
+                        prompt_text = PROMPT
+                    elif transcript:
+                        prompt_text = f"{transcript}\n{PROMPT}"
+                    else:
+                        prompt_text = PROMPT
+                
+                # Build content for chat template
+                user_content = []
+                audio = None
+                
+                if not self.add_text_only:
+                    audio_input = item.get("audio") or item.get("audio_path")
+                    if audio_input:
+                        try:
+                            # Use global load_audio or imported
+                            target_sr = self.processor.feature_extractor.sampling_rate
+                            audio = load_audio(audio_input, target_sr=target_sr)
+                            
+                            audio_ref = item.get("audio_ref")
+                            if not audio_ref and isinstance(audio_input, str):
+                                audio_ref = audio_input
+                            if not audio_ref:
+                                audio_ref = "audio"
+                            user_content.append({"type": "audio", "audio": audio_ref})
+                        except Exception as e:
+                            logger.warning(f"Failed to load audio for {item}: {e}")
+                
+                user_content.append({"type": "text", "text": prompt_text})
+                messages = [{"role": "user", "content": user_content}]
+                
+                # Apply chat template
+                text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                batch_texts.append(text)
+                
+                # Process inputs
+                if audio is not None:
+                    if isinstance(audio, torch.Tensor):
+                        audio_np = audio.numpy()
+                    else:
+                        audio_np = audio
+                    
+                    audio_features = self.processor.feature_extractor(
+                        audio_np,
+                        sampling_rate=16000,
+                        return_tensors="pt",
+                        padding="max_length", # Crucial
+                        return_attention_mask=True,
+                    )
+                    
+                    prompt_tokens = self.processor.tokenizer(
+                         text,
+                         return_tensors="pt",
+                         padding=False, # We pad manually later
+                         truncation=False
+                    )
+                    
+                    prompt_inputs = {**prompt_tokens, "input_features": audio_features["input_features"]}
+                    if "attention_mask" in audio_features:
+                        prompt_inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                else:
+                    prompt_inputs = self.processor.tokenizer(
+                        text,
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=False 
+                    )
+                
+                # Squeeze0 for list collection
+                feature = {k: v.squeeze(0) if v.ndim > 1 and v.shape[0] == 1 else v.squeeze(0) for k, v in prompt_inputs.items()}
+                # Ensure 1D input_ids/attention_mask after squeeze
+                if feature["input_ids"].ndim == 0:
+                     feature["input_ids"] = feature["input_ids"].unsqueeze(0)
+                if "attention_mask" in feature and feature["attention_mask"].ndim == 0:
+                     feature["attention_mask"] = feature["attention_mask"].unsqueeze(0)
+
+                features.append(feature)
+
+            # Separate text for padding
+            text_features = [
+                {k: v for k, v in f.items() if k in ["input_ids", "attention_mask"]}
+                for f in features
+            ]
             
-            inputs = {
-                **text_tokens,
-                "input_features": audio_features["input_features"],
-            }
-            if "attention_mask" in audio_features:
-                inputs["feature_attention_mask"] = audio_features["attention_mask"]
+            # Pad text features
+            if self.processor.tokenizer.padding_side != "left":
+                self.processor.tokenizer.padding_side = "left" # Inference usually left pad?
+                
+            batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
             
-            # Move to device
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        else:
-            # Text-only input
-            inputs = processor.tokenizer(
-                text,
-                return_tensors="pt",
-                padding=True,
-            )
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            # Stack audio features
+            audio_feature_list = [(i, f) for i, f in enumerate(features) if "input_features" in f]
+            if audio_feature_list:
+                try:
+                    stacked_features = torch.stack([f["input_features"] for _, f in audio_feature_list])
+                    batch_out["input_features"] = stacked_features
+                    
+                    if "feature_attention_mask" in audio_feature_list[0][1]:
+                        stacked_mask = torch.stack([f["feature_attention_mask"] for _, f in audio_feature_list])
+                        batch_out["feature_attention_mask"] = stacked_mask
+                except Exception as e:
+                    logger.error(f"Stacking audio features failed: {e}")
+                    raise e
+                    
+            return batch_out, batch_items, batch_texts
+
+    collator = EvalCollator(processor, args.add_text_only)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=args.num_workers,
+        collate_fn=collator
+    )
+    
+    logger.info(f"Starting inference with batch size {args.batch_size}...")
+
+    for inputs, batch_items, batch_texts in tqdm(dataloader):
+        # Move to device
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
         # Generate
         with torch.no_grad():
@@ -486,82 +531,76 @@ def main():
                 repetition_penalty=args.repetition_penalty
             )
         
-        # Decode only the new tokens
+        # Decode
         input_len = inputs["input_ids"].size(1)
         generated_ids = generated_ids[:, input_len:]
-        response_text = processor.batch_decode(
-            generated_ids, skip_special_tokens=True
-        )[0]
-
-        # --- Parsing Logic ---
+        responses = processor.batch_decode(generated_ids, skip_special_tokens=True)
         
-        # Debug mode: print raw output for first N samples
-        if args.debug and len(predictions) < args.debug_count:
-            logger.info(f"=== DEBUG Sample {len(predictions)+1} ===")
-            logger.info(f"Transcript: {item.get('transcript', 'N/A')[:100]}...")
-            logger.info(f"Input length: {input_len}, Generated length: {generated_ids.size(1)}")
-            logger.info(f"Raw Model Output: {response_text}")
-            logger.info("=" * 40)
-        
-        parsed = extract_json(response_text)
-        
-        # Format Logic: paper_v2 vs standard
-        use_paper_format = False
-        if hasattr(model, "config") and getattr(model.config, "slurp_fmt", None) == "paper_v2":
-            use_paper_format = True
-        elif hasattr(model, "peft_config") and "base_model_name_or_path" in model.peft_config:
-                if hasattr(model, "base_model") and hasattr(model.base_model, "config"):
-                    if getattr(model.base_model.config, "slurp_fmt", None) == "paper_v2":
-                        use_paper_format = True
+        # Processing predictions
+        for item, response_text in zip(batch_items, responses):
+            # Debug mode: print raw output for first N samples
+            if args.debug and len(predictions) < args.debug_count:
+                logger.info(f"=== DEBUG Sample {len(predictions)+1} ===")
+                logger.info(f"Transcript: {item.get('transcript', 'N/A')[:100]}...")
+                logger.info(f"Input length: {input_len}, Generated length: {generated_ids.size(1)}")
+                logger.info(f"Raw Model Output: {response_text}")
+                logger.info("=" * 40)
+            
+            parsed = extract_json(response_text)
+            
+            # Format Logic
+            use_paper_format = False
+            if hasattr(model, "config") and getattr(model.config, "slurp_fmt", None) == "paper_v2":
+                use_paper_format = True
+            elif hasattr(model, "peft_config") and "base_model_name_or_path" in model.peft_config:
+                    if hasattr(model, "base_model") and hasattr(model.base_model, "config"):
+                        if getattr(model.base_model.config, "slurp_fmt", None) == "paper_v2":
+                            use_paper_format = True
 
-        entities_list = parsed.get("entities", [])
-        standard_entities = []
-        
-        if use_paper_format:
-            # Convert [{"date": "thursday"}] -> [{"type": "date", "filler": "thursday"}]
-            for ent in entities_list:
-                if isinstance(ent, dict):
-                    for k, v in ent.items():
-                        standard_entities.append({"type": str(k), "filler": str(v).lower()})
-        else:
-            # Existing logic for backward compat
-            for ent in entities_list:
-                if "type" in ent and "filler" in ent:
-                    ent_copy = ent.copy()
-                    ent_copy["filler"] = str(ent_copy["filler"]).lower()
-                    standard_entities.append(ent_copy)
-                else:
-                    for k, v in ent.items():
-                        standard_entities.append({"type": str(k), "filler": str(v).lower()})
+            entities_list = parsed.get("entities", [])
+            standard_entities = []
+            
+            if use_paper_format:
+                for ent in entities_list:
+                    if isinstance(ent, dict):
+                        for k, v in ent.items():
+                            standard_entities.append({"type": str(k), "filler": str(v).lower()})
+            else:
+                for ent in entities_list:
+                    if "type" in ent and "filler" in ent:
+                        ent_copy = ent.copy()
+                        ent_copy["filler"] = str(ent_copy["filler"]).lower()
+                        standard_entities.append(ent_copy)
+                    else:
+                        for k, v in ent.items():
+                            standard_entities.append({"type": str(k), "filler": str(v).lower()})
 
-        if args.add_text_only:
-            pred_entry = {
-                "slurp_id": str(item["slurp_id"]),
-                "scenario": parsed.get("scenario", ""),
-                "action": parsed.get("action", ""),
-                "entities": standard_entities,
-                "raw_output": response_text
-            }
-        else:
-            # Audio mode uses file key
-            audio_path = item.get("audio") or item.get("audio_path")
-            # Handle SpeechMassive dict style audio_ref
-            audio_ref = item.get("audio_ref")
-            if not audio_ref and isinstance(audio_path, str):
-                audio_ref = audio_path
-            elif not audio_ref and isinstance(item.get("audio"), dict):
-                    audio_ref = item["audio"].get("path")
-                    
-            file_key = os.path.basename(audio_ref) if audio_ref else "unknown"
-            pred_entry = {
-                "file": file_key,
-                "scenario": parsed.get("scenario", ""),
-                "action": parsed.get("action", ""),
-                "entities": standard_entities,
-                "raw_output": response_text
-            }
+            if args.add_text_only:
+                pred_entry = {
+                    "slurp_id": str(item["slurp_id"]),
+                    "scenario": parsed.get("scenario", ""),
+                    "action": parsed.get("action", ""),
+                    "entities": standard_entities,
+                    "raw_output": response_text
+                }
+            else:
+                audio_path = item.get("audio") or item.get("audio_path")
+                audio_ref = item.get("audio_ref")
+                if not audio_ref and isinstance(audio_path, str):
+                    audio_ref = audio_path
+                elif not audio_ref and isinstance(item.get("audio"), dict):
+                        audio_ref = item["audio"].get("path")
+                        
+                file_key = os.path.basename(audio_ref) if audio_ref else "unknown"
+                pred_entry = {
+                    "file": file_key,
+                    "scenario": parsed.get("scenario", ""),
+                    "action": parsed.get("action", ""),
+                    "entities": standard_entities,
+                    "raw_output": response_text
+                }
 
-        predictions.append(pred_entry)
+            predictions.append(pred_entry)
             
     # Save predictions
     # Save predictions
