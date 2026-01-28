@@ -88,14 +88,16 @@ def collect_all_labels(jsonl_paths: List[str]) -> List[str]:
                     a = data.get("action")
                     if s and a: unique_labels.add(f"{s}_{a}")
                 except: pass
-    return list(unique_labels)
+    # 修正：必ずソートしてリストを返す（全プロセスで順序を一致させる）
+    return sorted(list(unique_labels))
 
-def build_hierarchical_groups(all_labels: List[str], n_clusters: int = 20) -> Dict[str, List[str]]:
+def build_hierarchical_groups(all_labels: List[str], n_clusters: int = 20, rank: int = 0) -> Dict[str, List[str]]:
     """
     SBERTでラベルをベクトル化し、K-Meansでクラスタリングしてグループを作成する。
     Returns: label_to_group dict mapping each label to its cluster members
     """
-    logger.info(f"Clustering {len(all_labels)} labels into {n_clusters} groups...")
+    if rank == 0:
+        logger.info(f"Clustering {len(all_labels)} labels into {n_clusters} groups...")
     
     if not HAS_SBERT:
         raise ImportError("Clustering requires sentence-transformers. Please install it.")
@@ -106,6 +108,7 @@ def build_hierarchical_groups(all_labels: List[str], n_clusters: int = 20) -> Di
 
     # クラスタリングの実行
     # n_clustersはラベル総数に応じて調整（例: ラベル数の1/4〜1/5程度）
+    # random_state固定により計算結果を全GPUで一致させる
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     cluster_labels = kmeans.fit_predict(embeddings)
 
@@ -117,12 +120,14 @@ def build_hierarchical_groups(all_labels: List[str], n_clusters: int = 20) -> Di
             groups[cid] = []
         groups[cid].append(label)
     
-    # 各ラベルがどのグループに属するかの逆引き辞書を作成
-    label_to_group = {label: groups[str(cid)] for label, cid in zip(all_labels, cluster_labels)}
+    # 修正：グループ内のラベルもソートして、プロンプト内の並び順の決定論性を高める
+    label_to_group = {label: sorted(groups[str(cid)]) for label, cid in zip(all_labels, cluster_labels)}
     
-    # デバッグ情報を出力
-    logger.info(f"Created {len(groups)} clusters")
-    logger.info(f"Sample cluster sizes: {[len(g) for g in list(groups.values())[:5]]}")
+    # 修正：ログ出力を Rank 0 のみに制限し、全クラスタサイズを表示
+    if rank == 0:
+        all_sizes = [len(g) for g in groups.values()]
+        logger.info(f"Successfully created {len(groups)} clusters.")
+        logger.info(f"Cluster sizes: {all_sizes}")
     
     return label_to_group
 
@@ -582,7 +587,8 @@ def main():
     # 1. Collect & Hierarchical Clustering
     all_jsonl = [args.train_file, args.eval_file, args.test_file]
     all_labels = collect_all_labels(all_jsonl)
-    label_to_group = build_hierarchical_groups(all_labels, n_clusters=20)
+    # 修正：rank を引数に追加してログ制御
+    label_to_group = build_hierarchical_groups(all_labels, n_clusters=20, rank=rank)
 
     # 2. Build Dataset
     train_items = build_items_from_slurp(args.train_file, args.audio_dir, label_to_group, max_samples=args.max_samples)
