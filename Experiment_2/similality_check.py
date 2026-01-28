@@ -10,7 +10,7 @@ import os
 # 0. Configuration
 # ==========================================
 PRED_FILE = "prediction.jsonl"
-TEST_FILE = "test.jsonl"
+TEST_FILE = "slurp/dataset/slurp/test.jsonl"
 MODEL_NAME = "all-MiniLM-L6-v2"
 
 pd.set_option('display.max_rows', None)
@@ -207,8 +207,13 @@ def main():
     parser.add_argument("--test_file", type=str, default=TEST_FILE)
     args = parser.parse_args()
 
-    if not os.path.exists(args.pred_file) or not os.path.exists(args.test_file):
-        print("Error: Files not found.")
+    if not os.path.exists(args.pred_file):
+        print(f"Error: Prediction file not found at: {os.path.abspath(args.pred_file)}")
+        print("Please specify the correct path using --pred_file <path>")
+        return
+    if not os.path.exists(args.test_file):
+        print(f"Error: Test (GT) file not found at: {os.path.abspath(args.test_file)}")
+        print("Please specify the correct path using --test_file <path>")
         return
 
     df_gt, df_pred = load_data(args.pred_file, args.test_file)
