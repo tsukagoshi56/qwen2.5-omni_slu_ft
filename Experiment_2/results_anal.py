@@ -41,15 +41,25 @@ def load_data(pred_path, test_path):
         for line in f:
             d = json.loads(line)
             
+            # --- Action Derivation Logic ---
+            if "action" not in d:
+                if intent:
+                    parts = intent.split("_")
+                    if len(parts) > 1:
+                        # intent="qa_currency" -> action="currency"
+                        d["action"] = parts[-1]
+                    else:
+                        d["action"] = intent # fallback? or "unknown"?
+                else:
+                    d["action"] = "unknown"
+            
             # --- Scenario Derivation Logic ---
-            intent = d.get("intent", "")
-            action = d.get("action", "")
+            action = d.get("action", "") # Refresh action variable
             
             # 1. Try deriving from intent - action
             derived_scenario = None
             if intent and action and intent.endswith(action):
                  # intent = "alarm_set", action="set" -> "alarm"
-                 # intent = "qa_maths", action="maths" -> "qa"
                  # handle cases where underscore might be involved
                  prefix = intent[:-(len(action))].rstrip("_")
                  if prefix:
@@ -61,12 +71,10 @@ def load_data(pred_path, test_path):
                  if len(parts) > 1:
                      derived_scenario = parts[0]
             
-            # 3. Apply derived scenario if original is missing OR we want to force derivation
-            # User request: "use scenario from intent without action" -> implies override
+            # 3. Apply derived scenario
             if derived_scenario:
                 d["scenario"] = derived_scenario
             elif "scenario" not in d:
-                # 4. Fallback if still no scenario
                 d["scenario"] = "unknown"
 
             sid = d.get('slurp_id')
@@ -74,12 +82,21 @@ def load_data(pred_path, test_path):
                 gts.append(d)
                 pred_list.append(preds[sid])
                 
-    # Ensure DataFrame has 'scenario' column even if all were empty (unlikely with above logic)
+    # Ensure DataFrame has columns even if all were empty
     df_gt = pd.DataFrame(gts)
     if 'scenario' not in df_gt.columns:
         df_gt['scenario'] = "unknown"
+    if 'action' not in df_gt.columns:
+        df_gt['action'] = "unknown"
         
-    return df_gt, pd.DataFrame(pred_list)
+    df_pred = pd.DataFrame(pred_list)
+    # Also ensure pred has keys just in case
+    if 'scenario' not in df_pred.columns:
+        df_pred['scenario'] = "unknown"
+    if 'action' not in df_pred.columns:
+        df_pred['action'] = "unknown"
+        
+    return df_gt, df_pred
 
 class LabelClusterer:
     def __init__(self, labels, embedding_model_name=MODEL_NAME):
