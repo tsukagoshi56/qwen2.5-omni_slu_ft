@@ -58,11 +58,21 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     for path in candidates:
         if os.path.exists(path):
             return path
+    
+    # Debug: Print failure for the first few misses to avoid spam
+    if not hasattr(resolve_audio_path, "_debug_count"):
+        resolve_audio_path._debug_count = 0
+    
+    if resolve_audio_path._debug_count < 10:
+        print(f"[DEBUG] Could not find {filename}. Checked: {candidates}")
+        resolve_audio_path._debug_count += 1
+        
     return None
 
 def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_samples=None):
     items = []
     if not os.path.exists(jsonl_path):
+        print(f"[WARNING] JSONL file not found: {jsonl_path}")
         return items
     
     with open(jsonl_path, "r") as f:
