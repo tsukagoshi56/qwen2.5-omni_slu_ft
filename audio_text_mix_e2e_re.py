@@ -292,15 +292,13 @@ class CustomTrainer(Trainer):
             raise ValueError("Trainer: evaluation requires an eval_dataset.")
         eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
         
-        # Use drop_last=False for eval so we don't lose data
-        # shuffle=False is usually better for eval determinism, but 
-        # mixing audio/text batches order is fine as long as batches are pure.
+        # Use drop_last=True for eval to ensure synchronized batches across GPUs
         batch_sampler = DistributedHomogeneousBatchSampler(
             eval_dataset,
             batch_size=self.args.per_device_eval_batch_size,
             num_replicas=self.args.world_size,
             rank=self.args.process_index,
-            drop_last=False, 
+            drop_last=True, 
             shuffle=False 
         )
 
