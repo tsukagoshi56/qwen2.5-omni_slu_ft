@@ -146,15 +146,12 @@ def build_items_from_slurp(jsonl_path, audio_dir, label_to_group, add_text_only=
         current_label = f"{data.get('scenario')}_{data.get('action')}"
         
         # --- Hierarchical Clustering Logic ---
-        rng = random.Random(slurp_id)
-        
-        # 1. 所属グループの取得（同じクラスタ内の全ラベル）
+        # label_to_group は build_hierarchical_groups 内で既に sorted 済みです
         group_members = label_to_group.get(current_label, [current_label])
         
-        # モデルが位置で覚えないよう、提示順をシャッフル
-        display_group = list(group_members)
-        rng.shuffle(display_group)
-        group_str = ", ".join([f"'{m}'" for m in display_group])
+        # 修正：シャッフルを廃止し、常に同じ順序（アルファベット順）で提示する
+        # これにより、同じグループに属するデータはすべて同じ Group 文字列を持つことになります
+        group_str = ", ".join([f"'{m}'" for m in group_members])
 
         # Entity Processing
         raw_entities = data.get("entities", [])
