@@ -304,6 +304,73 @@ class CustomTrainer(Trainer):
         )
 
 # ==============================================================================
+# 5. Evaluation Logic
+# ==============================================================================
+
+def evaluate_model(model, processor, items, device, max_samples=None):
+    """
+    Evaluation for testing phase.
+    Specifically: Audio items input = [Audio, Prompt] (No transcript).
+    """
+    model.eval()
+    results = []
+    
+    if max_samples:
+        items = items[:max_samples]
+    
+    print(f"Evaluating on {len(items)} items...")
+    
+    for i, item in enumerate(items):
+        audio_path = item.get("audio_path")
+        transcript = item.get("transcript", "")
+        
+        if audio_path:
+            # Audio-only input (with prompt)
+            audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
+            user_content = [
+                {"type": "audio", "audio_url": "placeholder"},
+                {"type": "text", "text": PROMPT}
+            ]
+            text_input = processor.apply_chat_template(
+                [{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True
+            )
+            inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
+        else:
+            # Text-only input
+            user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
+            text_input = processor.apply_chat_template(
+                [{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True
+            )
+            inputs = processor(text=text_input, return_tensors="pt")
+
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            from tqdm import tqdm
+            # We don't use tqdm here since it's a small loop or we want clean output
+            output_ids = model.generate(**inputs, max_new_tokens=256)
+            
+        # Get only the generated part
+        input_len = inputs["input_ids"].shape[1]
+        decoded = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+        
+        results.append({
+            "target": item["target"],
+            "prediction": decoded,
+            "type": "audio" if audio_path else "text"
+        })
+        
+        if i < 5:
+            print(f"\n[{results[-1]['type'].upper()}] Sample {i}")
+            print(f"Target: {item['target']}")
+            print(f"Pred  : {decoded}")
+
+    # Simple exact match accuracy
+    acc = sum(1 for r in results if r["target"].strip() == r["prediction"].strip()) / len(results)
+    print(f"\nFinal Test Accuracy: {acc:.2%}")
+    return acc
+
+# ==============================================================================
 # Main
 # ==============================================================================
 
@@ -319,6 +386,7 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--bf16", action="store_true", default=True)
+    parser.add_argument("--eval_steps", type=int, default=50)
     
     args = parser.parse_args()
     
@@ -355,8 +423,14 @@ def main():
     train_items = build_items_from_slurp(args.train_file, args.audio_dir, max_samples=args.max_samples)
     train_dataset = MixedDataset(train_items)
     
+    # Load validation data (devel.jsonl)
+    devel_file = args.train_file.replace("train.jsonl", "devel.jsonl")
+    devel_items = build_items_from_slurp(devel_file, args.audio_dir, max_samples=args.max_samples // 10 if args.max_samples else None)
+    eval_dataset = MixedDataset(devel_items) if devel_items else None
+
     if local_rank in [-1, 0]:
-        print(f"Loaded {len(train_items)} items total.")
+        print(f"Loaded {len(train_items)} train items.")
+        print(f"Loaded {len(devel_items)} eval items.")
     
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -367,9 +441,11 @@ def main():
         bf16=args.bf16,
         logging_steps=5,
         save_steps=100,
+        eval_strategy="steps" if eval_dataset else "no",
+        eval_steps=args.eval_steps,
         remove_unused_columns=False,
         report_to="none",
-        ddp_find_unused_parameters=False, # Often needed for custom models/freezing
+        ddp_find_unused_parameters=False, 
         dataloader_num_workers=0,
     )
     
@@ -377,6 +453,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset, # Add eval_dataset
         data_collator=SmartCollator(processor),
         tokenizer=processor.tokenizer,
     )
@@ -389,6 +466,16 @@ def main():
     if local_rank in [-1, 0]:
         trainer.save_model(args.output_dir)
         processor.save_pretrained(args.output_dir)
+        
+        # 4. Final Evaluation on test.jsonl
+        print("\nStarting final evaluation on test.jsonl...")
+        test_file = args.train_file.replace("train.jsonl", "test.jsonl")
+        test_items = build_items_from_slurp(test_file, args.audio_dir, max_samples=args.max_samples // 10 if args.max_samples else 100)
+        
+        if test_items:
+            evaluate_model(model, processor, test_items, device=device)
+        else:
+            print("No test items found for evaluation.")
 
 if __name__ == "__main__":
     main()
