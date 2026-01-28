@@ -23,6 +23,7 @@ from transformers import (
     Qwen2AudioForConditionalGeneration,
     TrainingArguments,
     Trainer,
+    TrainerCallback,
 )
 from torch.utils.data import Dataset, Sampler, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -350,7 +351,63 @@ class CustomTrainer(Trainer):
         )
 
 # ==============================================================================
-# 5. Inference (Robust File-Based Merge)
+# 5. Callbacks
+# ==============================================================================
+
+class SampleGenerationCallback(TrainerCallback):
+    def __init__(self, eval_items, processor, num_samples=3):
+        self.eval_items = eval_items
+        self.processor = processor
+        self.num_samples = num_samples
+
+    def on_evaluate(self, args, state, control, model, tokenizer, **kwargs):
+        if args.process_index != 0:
+            return
+
+        logger.info("\n\n*** Validation Sample Generation (Audio) ***")
+        audio_items = [item for item in self.eval_items if item.get("audio_path") is not None]
+        
+        if not audio_items:
+            logger.info("No audio items found in validation set.")
+            return
+
+        samples = random.sample(audio_items, min(self.num_samples, len(audio_items)))
+        device = model.device
+        model.eval()
+        sr = self.processor.feature_extractor.sampling_rate
+
+        for item in samples:
+            try:
+                audio_path = item["audio_path"]
+                transcript = item.get("transcript", "")
+                target = item.get("target", "")
+                audio, _ = librosa.load(audio_path, sr=sr)
+                
+                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                
+                inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    output_ids = model.generate(**inputs, max_new_tokens=128)
+                
+                input_len = inputs["input_ids"].shape[1]
+                generated_text = self.processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                clean_pred = clean_json_text(generated_text)
+                
+                logger.info(f"-" * 60)
+                logger.info(f"File:       {item['file']}")
+                logger.info(f"Transcript: {transcript}")
+                logger.info(f"Target:     {target}")
+                logger.info(f"Prediction: {clean_pred}")
+            except Exception as e:
+                logger.error(f"Failed to generate sample for {item.get('file')}: {e}")
+        logger.info("-" * 60 + "\n")
+        model.train()
+
+# ==============================================================================
+# 6. Inference (Robust File-Based Merge)
 # ==============================================================================
 
 def clean_json_text(text: str) -> str:
@@ -559,7 +616,7 @@ def main():
             logger.info("!!! SMOKE MODE ACTIVATED !!!")
         
         args.max_samples = 32 # 学習は極小で
-        args.num_train_epochs = 1
+        args.num_train_epochs = 3
         args.report_to = "none"
 
     # --- Data Loading (Train/Eval) ---
@@ -610,6 +667,13 @@ def main():
         data_collator=SmartCollator(processor),
         tokenizer=processor.tokenizer,
     )
+    
+    if len(eval_items) > 0:
+        trainer.add_callback(SampleGenerationCallback(
+            eval_items=eval_items,
+            processor=processor,
+            num_samples=3
+        ))
 
     trainer.train()
 

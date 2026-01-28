@@ -23,6 +23,7 @@ from transformers import (
     Qwen2AudioForConditionalGeneration,
     TrainingArguments,
     Trainer,
+    TrainerCallback,
 )
 from torch.utils.data import Dataset, Sampler, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -449,8 +450,78 @@ class CustomTrainer(Trainer):
             pin_memory=self.args.dataloader_pin_memory,
         )
 
+        )
+
 # ==============================================================================
-# 5. Inference (Batched + CoT Parsing + Robust Merge)
+# 5. Callbacks
+# ==============================================================================
+
+class SampleGenerationCallback(TrainerCallback):
+    def __init__(self, eval_items, processor, num_samples=3):
+        self.eval_items = eval_items
+        self.processor = processor
+        self.num_samples = num_samples
+
+    def on_evaluate(self, args, state, control, model, tokenizer, **kwargs):
+        if args.process_index != 0:
+            return
+
+        logger.info("\n\n*** Validation Sample Generation (Audio + CoT) ***")
+        audio_items = [item for item in self.eval_items if item.get("audio_path") is not None]
+        
+        if not audio_items:
+            logger.info("No audio items found in validation set.")
+            return
+
+        samples = random.sample(audio_items, min(self.num_samples, len(audio_items)))
+        device = model.device
+        model.eval()
+        sr = self.processor.feature_extractor.sampling_rate
+
+        for item in samples:
+            try:
+                audio_path = item["audio_path"]
+                transcript = item.get("transcript", "")
+                target = item.get("target", "")
+                audio, _ = librosa.load(audio_path, sr=sr)
+                
+                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                
+                inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    # CoT用にトークン数を多めに
+                    output_ids = model.generate(**inputs, max_new_tokens=512)
+                
+                input_len = inputs["input_ids"].shape[1]
+                generated_text = self.processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                
+                # CoTパースロジック
+                if "Final JSON:" in generated_text:
+                    thought = generated_text.split("Final JSON:")[0].strip()
+                    prediction = generated_text.split("Final JSON:")[-1].strip()
+                else:
+                    thought = "N/A"
+                    prediction = generated_text
+                
+                logger.info(f"-" * 60)
+                logger.info(f"File:       {item['file']}")
+                logger.info(f"Transcript: {transcript}")
+                logger.info(f"Thought:    {thought}")
+                logger.info(f"Prediction: {prediction}")
+                # TargetもCoT形式だが、JSON部分だけ比較したい場合は調整が必要
+                # ここではそのまま表示
+                logger.info(f"Target:     {target}")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate sample for {item.get('file')}: {e}")
+        logger.info("-" * 60 + "\n")
+        model.train()
+
+# ==============================================================================
+# 6. Inference (Batched + CoT Parsing + Robust Merge)
 # ==============================================================================
 
 def clean_json_text(text: str) -> str:
@@ -748,6 +819,13 @@ def main():
         data_collator=SmartCollator(processor),
         tokenizer=processor.tokenizer,
     )
+    
+    if len(eval_items) > 0:
+        trainer.add_callback(SampleGenerationCallback(
+            eval_items=eval_items,
+            processor=processor,
+            num_samples=3
+        ))
 
     trainer.train()
 
