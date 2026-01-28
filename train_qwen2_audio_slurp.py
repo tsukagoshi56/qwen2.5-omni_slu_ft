@@ -570,10 +570,18 @@ class SampleGenerationCallback(TrainerCallback):
                         "return_tensors": "pt",
                         "padding": True
                     }
+                    
                     if audio_input is not None:
-                        process_kwargs["audios"] = [audio_input]
-
-                    inputs = self.processor(**process_kwargs).to(model.device)
+                        try:
+                            inputs = self.processor(audios=[audio_input], **process_kwargs).to(model.device)
+                        except TypeError as e:
+                            if "audios" in str(e):
+                                print(f"DEBUG: 'audios' arg failed in callback, trying 'audio'. Error: {e}")
+                                inputs = self.processor(audio=[audio_input], **process_kwargs).to(model.device)
+                            else:
+                                raise e
+                    else:
+                        inputs = self.processor(**process_kwargs).to(model.device)
                     
                     generated_ids = model.generate(
                         **inputs,
@@ -655,8 +663,16 @@ class Qwen2AudioCollator:
                 "max_length": self.config.max_length,
             }
             if audio is not None:
-                prompt_inputs = self.processor(text=prompt_text, audios=[audio], **call_kwargs)
-                full_inputs = self.processor(text=full_text, audios=[audio], **call_kwargs)
+                try:
+                    prompt_inputs = self.processor(text=prompt_text, audios=[audio], **call_kwargs)
+                    full_inputs = self.processor(text=full_text, audios=[audio], **call_kwargs)
+                except TypeError as e:
+                    if "audios" in str(e):
+                        # print(f"DEBUG: 'audios' arg failed in collator, trying 'audio'. Error: {e}")
+                        prompt_inputs = self.processor(text=prompt_text, audio=[audio], **call_kwargs)
+                        full_inputs = self.processor(text=full_text, audio=[audio], **call_kwargs)
+                    else:
+                        raise e
             else:
                 prompt_inputs = self.processor(text=prompt_text, **call_kwargs)
                 full_inputs = self.processor(text=full_text, **call_kwargs)
