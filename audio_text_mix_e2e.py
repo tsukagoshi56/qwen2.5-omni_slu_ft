@@ -28,6 +28,7 @@ from pathlib import Path
 from tqdm import tqdm
 from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
+import librosa
 
 from transformers import (
     AutoProcessor,
@@ -36,7 +37,6 @@ from transformers import (
     Trainer,
 )
 from torch.utils.data import Dataset
-import librosa
 
 # ==============================================================================
 # Constants
@@ -49,17 +49,9 @@ PROMPT = """You are a voice assistant. Analyze the user's spoken request and out
 
 Output only valid JSON, no extra text."""
 
-SAMPLING_RATE = 16000
-
 # ==============================================================================
 # Data Loading
 # ==============================================================================
-
-def load_audio(audio_path: str, target_sr: int = SAMPLING_RATE) -> np.ndarray:
-    """Load audio file and resample to target sampling rate."""
-    audio, sr = librosa.load(audio_path, sr=target_sr)
-    return audio
-
 
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     """Check multiple possible locations for audio files."""
@@ -86,12 +78,7 @@ def build_items_from_slurp(
     add_text_only: bool = True,  # Also add text-only items
     max_samples: Optional[int] = None
 ) -> List[Dict]:
-    """Build dataset items from SLURP jsonl file.
-    
-    Creates both audio items (audio_path set) and text items (audio_path=None).
-    Audio items: use audio + prompt
-    Text items: use transcript + prompt
-    """
+    """Build dataset items from SLURP jsonl file."""
     items = []
     missing_audio = 0
     
@@ -158,12 +145,7 @@ def build_items_from_slurp(
 
 
 class MixedDataset(Dataset):
-    """Dataset that mixes audio and text items, with optional audio partitioning.
-    
-    - Text items: use transcript + prompt
-    - Audio items: use audio + prompt
-    - partition_audio: if True, only use 1/N audio items per epoch
-    """
+    """Dataset that mixes audio and text items, with optional audio partitioning."""
     
     def __init__(
         self, 
@@ -195,10 +177,8 @@ class MixedDataset(Dataset):
     def _rebuild_items(self):
         """Rebuild the item list based on current epoch."""
         if not self.partition_audio or not self.audio_items:
-            # No partitioning - use all items
             self.items = self.text_items + self.audio_items
         else:
-            # Partition audio: use 1/N of audio items per epoch
             num_audio = len(self.audio_items)
             chunk_size = (num_audio + self.total_epochs - 1) // self.total_epochs
             start_idx = (self.current_epoch % self.total_epochs) * chunk_size
@@ -242,8 +222,8 @@ class AudioTextCollator:
             target = item.get("target", "")
             
             if audio_path is not None:
-                # Audio item: use audio + prompt
-                audio_np = load_audio(audio_path)
+                # Audio item: load using librosa with processor's sampling rate
+                audio_np = librosa.load(audio_path, sr=self.processor.feature_extractor.sampling_rate)[0]
                 
                 # Build conversation with audio_url placeholder
                 user_content = [
@@ -373,8 +353,8 @@ def evaluate_model(
     print(f"{'='*60}\n")
     
     for i, item in enumerate(tqdm(eval_items, desc="Evaluating")):
-        # Load audio
-        audio = load_audio(item["audio_path"])
+        # Load audio using librosa with processor's sampling rate
+        audio = librosa.load(item["audio_path"], sr=processor.feature_extractor.sampling_rate)[0]
         
         # Build conversation with audio_url placeholder
         user_content = [
