@@ -521,7 +521,11 @@ def main():
         if i == 0 and local_rank <= 0:
             logger.info(f"DEBUG: generated_ids shape: {generated_ids.shape}")
             logger.info(f"DEBUG: generated_ids_list[0] length: {len(generated_ids_list[0])}")
-            logger.info(f"DEBUG: raw response: {repr(response_text)}")
+            logger.info(f"DEBUG: raw token ids (first 20): {generated_ids_list[0][:20].tolist()}")
+            # Try decoding without skip_special_tokens to see what tokens are being generated
+            raw_decode = processor.batch_decode(generated_ids_list, skip_special_tokens=False)[0]
+            logger.info(f"DEBUG: decode with special tokens: {repr(raw_decode)}")
+            logger.info(f"DEBUG: decode without special tokens: {repr(response_text)}")
         
         # --- Display similar to SampleGenerationCallback ---
         if local_rank <= 0:
