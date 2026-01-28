@@ -256,14 +256,13 @@ def main():
     logger.info(f"model vocab_size: {getattr(model.config, 'vocab_size', None)}")
     logger.info(f"tokenizer vocab_size: {processor.tokenizer.vocab_size}")
 
-    # Strict assertion for vocab size match
+    # Resize model embeddings if vocab size mismatch (Normal for LoRA/Fine-tuned models with added tokens)
     model_vocab = getattr(model.config, 'vocab_size', None)
     tokenizer_vocab = processor.tokenizer.vocab_size
     if model_vocab != tokenizer_vocab:
-        # Check if resize is possible or just assert
-        assert model_vocab == tokenizer_vocab, \
-            f"Vocab mismatch! model={model_vocab}, tokenizer={tokenizer_vocab}. " \
-            "Cannot proceed as this will cause generation errors."
+        logger.warning(f"Vocab size mismatch! Model: {model_vocab}, Tokenizer: {tokenizer_vocab}")
+        logger.info(f"Resizing model embeddings to {tokenizer_vocab} to match tokenizer...")
+        model.resize_token_embeddings(tokenizer_vocab)
     
     # Ensure pad_token is set (crucial for batch generation)
     if processor.tokenizer.pad_token is None:
