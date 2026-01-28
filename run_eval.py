@@ -453,6 +453,10 @@ def main():
                 batch_texts.append(text)
                 
                 if audio is not None:
+                    if isinstance(audio, torch.Tensor) and audio.ndim > 1:
+                         audio = audio.squeeze()
+                    elif hasattr(audio, "ndim") and audio.ndim > 1:
+                         audio = audio.squeeze()
                     batch_audios.append(audio)
             
             # Process inputs using processor directly
