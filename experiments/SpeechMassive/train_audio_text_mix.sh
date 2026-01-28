@@ -45,6 +45,6 @@ uv run train_qwen2_audio_slurp.py \
   --save_steps 500 \
   --bf16 \
   --debug_generation \
-  --debug_generation_steps 50
+  --debug_generation_steps 10
 
 echo "Training complete. Model saved to: $OUTPUT_DIR"

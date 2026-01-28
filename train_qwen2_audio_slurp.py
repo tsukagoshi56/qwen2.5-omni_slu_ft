@@ -689,7 +689,7 @@ class SampleGenerationCallback(TrainerCallback):
                     # Decode only the new tokens
                     generated_ids = [
                         output_ids[len(input_ids):] 
-                        for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
+                        for input_ids, output_ids in zip(inputs['input_ids'], generated_ids)
                     ]
                     response = self.processor.batch_decode(
                         generated_ids, skip_special_tokens=True
