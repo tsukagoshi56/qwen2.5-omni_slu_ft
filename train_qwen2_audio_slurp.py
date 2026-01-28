@@ -763,20 +763,15 @@ class Qwen2AudioCollator:
                     self._debug_audio_format_printed = True
                     print(f"DEBUG: raw audio length = {len(audio_np)} samples ({len(audio_np)/16000:.2f}s)", flush=True)
                 
-                # Extract audio features using feature_extractor directly with proper padding
+                # Extract audio features using feature_extractor directly without padding first
+                # We will pad later at the batch level
                 audio_features = self.processor.feature_extractor(
                     audio_np,
                     sampling_rate=16000,
                     return_tensors="pt",
-                    padding=True,  # Pad to longest in batch (or just process single item here)
+                    padding=False,
                     return_attention_mask=True,
                 )
-                
-                if not hasattr(self, '_debug_feature_printed'):
-                    self._debug_feature_printed = True
-                    print(f"DEBUG: input_features shape = {audio_features['input_features'].shape}", flush=True)
-                    if 'attention_mask' in audio_features:
-                        print(f"DEBUG: attention_mask shape = {audio_features['attention_mask'].shape}", flush=True)
                 
                 # Tokenize text
                 prompt_tokens = self.processor.tokenizer(
@@ -795,9 +790,11 @@ class Qwen2AudioCollator:
                 # Combine text tokens with audio features
                 prompt_inputs = {**prompt_tokens, "input_features": audio_features["input_features"]}
                 full_inputs = {**full_tokens, "input_features": audio_features["input_features"]}
+                # Note: feature_attention_mask might not be returned when padding=False for single item
+                # depending on implementation, but we'll handle it in collation
                 if "attention_mask" in audio_features:
-                    prompt_inputs["feature_attention_mask"] = audio_features["attention_mask"]
-                    full_inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                     prompt_inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                     full_inputs["feature_attention_mask"] = audio_features["attention_mask"]
             else:
                 # Text-only: just tokenize
                 prompt_inputs = self.processor.tokenizer(
@@ -850,31 +847,22 @@ class Qwen2AudioCollator:
             if not hasattr(self, '_debug_audio_printed'):
                 self._debug_audio_printed = True
                 f0 = audio_feature_list[0][1]["input_features"]
-                print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
+                print(f"DEBUG: input_features shape (unpadded) = {f0.shape}", flush=True)
                 print(f"DEBUG: num audio items = {len(audio_feature_list)}, total = {len(features)}", flush=True)
             
-            # Stack only the audio features (matching the number of <audio> tokens in the batch)
-            try:
-                stacked_features = torch.stack([f["input_features"] for _, f in audio_feature_list])
-                batch_out["input_features"] = stacked_features
-                
-                # Also stack feature_attention_mask if available
-                if "feature_attention_mask" in audio_feature_list[0][1]:
-                    stacked_mask = torch.stack([f["feature_attention_mask"] for _, f in audio_feature_list])
-                    batch_out["feature_attention_mask"] = stacked_mask
-            except Exception as e:
-                print(f"DEBUG: torch.stack failed: {e}", flush=True)
-                # Fallback: try padding with feature_extractor
-                audio_features_for_pad = [{"input_features": f["input_features"]} for _, f in audio_feature_list]
-                if hasattr(self.processor.feature_extractor, "pad"):
-                    audio_out = self.processor.feature_extractor.pad(
-                        audio_features_for_pad, padding=True, return_tensors="pt"
-                    )
-                    batch_out["input_features"] = audio_out["input_features"]
-                    if "feature_attention_mask" in audio_out:
-                        batch_out["feature_attention_mask"] = audio_out["feature_attention_mask"]
-                else:
-                    raise e
+            # Pad audio features to the longest in the batch using feature_extractor.pad
+            # We need to extract just the input_features for padding
+            audio_inputs_to_pad = [{"input_features": f["input_features"]} for _, f in audio_feature_list]
+            
+            padded_audio = self.processor.feature_extractor.pad(
+                audio_inputs_to_pad,
+                padding=True,
+                return_tensors="pt"
+            )
+            
+            batch_out["input_features"] = padded_audio["input_features"]
+            if "attention_mask" in padded_audio:
+                batch_out["feature_attention_mask"] = padded_audio["attention_mask"]
 
         max_len = batch_out["input_ids"].shape[1]
         label_batch = torch.full((len(labels), max_len), -100, dtype=torch.long)
