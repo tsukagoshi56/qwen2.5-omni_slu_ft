@@ -850,22 +850,33 @@ class Qwen2AudioCollator:
                 print(f"DEBUG: input_features shape (unpadded) = {f0.shape}", flush=True)
                 print(f"DEBUG: num audio items = {len(audio_feature_list)}, total = {len(features)}", flush=True)
             
-            # Pad audio features to the longest in the batch using feature_extractor.pad
-            # We need to extract just the input_features for padding AND squeeze the batch dimension (1, 128, T) -> (128, T)
-            audio_inputs_to_pad = [
-                {"input_features": f["input_features"].squeeze(0)} 
-                for _, f in audio_feature_list
-            ]
+            # Pad audio features manually to avoid inhomogeneous shape errors
+            # Input features are (128, T). We want to stack them to (B, 128, MaxT)
             
-            padded_audio = self.processor.feature_extractor.pad(
-                audio_inputs_to_pad,
-                padding=True,
-                return_tensors="pt"
-            )
+            # 1. Find max length
+            # Note: f["input_features"] was squeezed in the loop, so likely (128, T)
+            # But let's be safe and check dimensions
+            input_list = [f["input_features"] for _, f in audio_feature_list]
+            max_len = max([f.shape[-1] for f in input_list])
+            batch_size = len(input_list)
+            feature_dim = input_list[0].shape[0] # Should be 128
             
-            batch_out["input_features"] = padded_audio["input_features"]
-            if "attention_mask" in padded_audio:
-                batch_out["feature_attention_mask"] = padded_audio["attention_mask"]
+            # 2. Create padded tensor
+            input_features_padded = torch.zeros(batch_size, feature_dim, max_len, dtype=input_list[0].dtype)
+            attention_mask_padded = torch.zeros(batch_size, max_len, dtype=torch.long)
+            
+            # 3. Copy data
+            for i, feat in enumerate(input_list):
+                # feat shape is (128, T) or (1, 128, T)
+                if feat.dim() == 3:
+                    feat = feat.squeeze(0)
+                
+                cur_len = feat.shape[-1]
+                input_features_padded[i, :, :cur_len] = feat
+                attention_mask_padded[i, :cur_len] = 1
+                
+            batch_out["input_features"] = input_features_padded
+            batch_out["feature_attention_mask"] = attention_mask_padded
 
         max_len = batch_out["input_ids"].shape[1]
         label_batch = torch.full((len(labels), max_len), -100, dtype=torch.long)
