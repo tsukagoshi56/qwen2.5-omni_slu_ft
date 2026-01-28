@@ -394,11 +394,11 @@ def main():
     # Inference Loop
     model.eval()
     
-    # Set padding side to left for batch generation
-    if processor.tokenizer.padding_side != "left":
+    # Ensure padding side matches training (right padding)
+    if processor.tokenizer.padding_side != "right":
         if local_rank <= 0:
-            logger.info("Setting tokenizer padding_side to 'left' for batch inference")
-        processor.tokenizer.padding_side = "left"
+            logger.info("Setting tokenizer padding_side to 'right' to match training")
+        processor.tokenizer.padding_side = "right"
     
     # Remove EvalCollator and DataLoader
     # We will process items one by one to ensure exact match with training logic and avoid batching issues
@@ -494,14 +494,12 @@ def main():
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         input_len = inputs["input_ids"].size(1)
         
-        # Generate
+        # Generate (Match training script: Greedy Search, 128 tokens)
         with torch.no_grad():
             generated_ids = model.generate(
                 **inputs,
-                max_new_tokens=args.max_new_tokens,
-                num_beams=args.num_beams,
-                do_sample=False,
-                repetition_penalty=args.repetition_penalty
+                max_new_tokens=128,
+                do_sample=False
             )
             
         generated_ids_new = generated_ids[:, input_len:]
