@@ -312,19 +312,42 @@ class CustomTrainer(Trainer):
             pin_memory=self.args.dataloader_pin_memory,
         )
 
+
 # ==============================================================================
-# 5. Final Evaluation Logic
+# 5. Final Evaluation Logic (Multi-GPU DDP)
 # ==============================================================================
 
-def evaluate_model(model, processor, items, device):
+def evaluate_model(model, processor, items, device, output_dir):
     """
-    Runs simple inference on Rank 0 only.
+    Runs inference on ALL items using DDP slicing to speed up processing.
+    Saves predictions in 'prediction.jsonl' format.
     """
+    from tqdm import tqdm
+    import torch.distributed as dist
+    
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    
+    # 1. Slice items for this GPU
+    total = len(items)
+    chunk_size = (total + world_size - 1) // world_size
+    if local_rank != -1:
+        start_idx = local_rank * chunk_size
+        end_idx = min(start_idx + chunk_size, total)
+        my_items = items[start_idx:end_idx]
+    else:
+        my_items = items # Single GPU mode
+
     model.eval()
     results = []
-    print(f"Evaluating on {len(items)} items (Rank 0)...")
     
-    for i, item in enumerate(items):
+    if local_rank in [-1, 0]:
+        print(f"Starting evaluation on {total} items ({len(my_items)} per GPU)...")
+        iterator = tqdm(my_items, desc="Evaluating")
+    else:
+        iterator = my_items
+    
+    for i, item in enumerate(iterator):
         audio_path = item.get("audio_path")
         transcript = item.get("transcript", "")
         
@@ -334,10 +357,14 @@ def evaluate_model(model, processor, items, device):
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
             text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
+            
+            # Key for output
+            file_key = os.path.basename(audio_path)
         else:
             user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
             text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             inputs = processor(text=text_input, return_tensors="pt")
+            file_key = item.get("slurp_id", f"text_{i}")
 
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
@@ -347,13 +374,42 @@ def evaluate_model(model, processor, items, device):
         input_len = inputs["input_ids"].shape[1]
         decoded = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
         
-        results.append({"target": item["target"], "prediction": decoded, "type": "audio" if audio_path else "text"})
-        
-        if i < 3:
-            print(f"[{results[-1]['type'].upper()}] Pred: {decoded} | Target: {item['target']}")
+        # Format matching run_eval.py / prediction.jsonl
+        res = {
+            "file": file_key,
+            "prediction": decoded,
+            "target": item["target"],
+            "type": "audio" if audio_path else "text"
+        }
+        results.append(res)
 
-    acc = sum(1 for r in results if r["target"].strip() == r["prediction"].strip()) / len(results)
-    print(f"\nFinal Accuracy: {acc:.2%}")
+    # 2. Save Rank Output
+    rank = local_rank if local_rank != -1 else 0
+    rank_file = os.path.join(output_dir, f"predictions_rank_{rank}.jsonl")
+    
+    with open(rank_file, "w") as f:
+        for r in results:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            
+    # 3. Barrier & Merge
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        
+    if rank == 0:
+        final_file = os.path.join(output_dir, "predictions.jsonl")
+        print(f"Merging results to {final_file}...")
+        
+        with open(final_file, "w") as f_out:
+            for r in range(world_size):
+                rf = os.path.join(output_dir, f"predictions_rank_{r}.jsonl")
+                if os.path.exists(rf):
+                    with open(rf, "r") as f_in:
+                        f_out.write(f_in.read())
+                    os.remove(rf)
+        print("Done.")
+    
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
 # ==============================================================================
 # Main
@@ -413,6 +469,9 @@ def main():
         eval_steps=50,
         save_strategy="steps",
         save_steps=100,
+        save_total_limit=2, # Keep last 2 checkpoints
+        load_best_model_at_end=True, # Load best model at end
+        metric_for_best_model="loss", # We don't have compute_metrics set up for Trainer, so use validation loss
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         report_to="none"
@@ -429,20 +488,25 @@ def main():
 
     trainer.train()
 
-    # --- Final Test (Rank 0 Only) ---
+    # --- Final Test ---
     if local_rank in [-1, 0]:
         trainer.save_model(args.output_dir)
         processor.save_pretrained(args.output_dir)
+        print("\n=== Running Final Test on ALL Data (Multi-GPU) ===")
+    
+    # Wait for save to complete
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        dist.barrier()
         
-        print("\n=== Running Final Test on Rank 0 ===")
-        test_items = build_items_from_slurp(args.test_file, args.audio_dir, max_samples=100)
-        if test_items:
-            # Note: We use the raw model (or unwrapped) for generation to handle simple inference
-            evaluate_model(model, processor, test_items, device)
-        else:
-            print(f"Test file {args.test_file} not found.")
+    # Load ALL test items (no max_samples limit for final test)
+    test_items = build_items_from_slurp(args.test_file, args.audio_dir, max_samples=None)
+    
+    if test_items:
+        evaluate_model(model, processor, test_items, device, args.output_dir)
+    elif local_rank == 0:
+        print(f"Test file {args.test_file} not found.")
 
-    # Wait for Rank 0 to finish testing before killing other processes
+    # Cleanup
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         dist.barrier()
 
