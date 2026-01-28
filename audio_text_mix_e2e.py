@@ -110,7 +110,9 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         
         # Audio Item
         if data.get("recordings"):
-            path = resolve_audio_path(audio_dir, data["recordings"][0].get("file", ""))
+            # Randomly select one recording from the available recordings
+            selected_recording = random.choice(data["recordings"])
+            path = resolve_audio_path(audio_dir, selected_recording.get("file", ""))
             if path:
                 items.append({
                     "audio_path": path, 
