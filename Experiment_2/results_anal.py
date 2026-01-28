@@ -5,7 +5,7 @@ from sklearn.cluster import AgglomerativeClustering
 from sentence_transformers import SentenceTransformer
 import argparse
 import os
-import random  # 追加
+import random
 
 # ==========================================
 # 0. Configuration
@@ -23,8 +23,6 @@ pd.set_option('display.float_format', '{:.4f}'.format)
 # 1. Data Loading & Clustering Logic
 # ==========================================
 def load_data(pred_path, test_path):
-    # ... (前回のコードと同じなので省略。IDをstrにする修正版を使用してください) ...
-    # 簡略化のため、前回のload_data関数をそのまま使ってください。
     print(f"Loading data from {pred_path} and {test_path}...")
     preds = {}
     with open(pred_path, 'r', encoding='utf-8') as f:
@@ -75,43 +73,32 @@ class LabelClusterer:
         return {self.id_to_label[i]: cluster_id for i, cluster_id in enumerate(labels)}
 
 # ==========================================
-# 2. Analysis Logic (Updated)
+# 2. Analysis Logic
 # ==========================================
 
 def calculate_intra_rate(gt_errors, pred_errors, label_map):
-    """指定されたlabel_mapに基づいて、同じグループ内での間違い率を計算"""
     intra_count = 0
     valid_comparisons = 0
-    
     for gt, pred in zip(gt_errors, pred_errors):
         if gt in label_map and pred in label_map:
             valid_comparisons += 1
             if label_map[gt] == label_map[pred]:
                 intra_count += 1
-    
     return (intra_count / valid_comparisons) if valid_comparisons > 0 else 0.0
 
 def get_random_baseline(all_labels, n_clusters, gt_errors, pred_errors, n_trials=10):
-    """ランダムにグループを作った場合の期待値を計算（モンテカルロ法）"""
     rates = []
     unique_labels = list(all_labels)
-    
     for _ in range(n_trials):
-        # ラベルをシャッフルして、無理やりn_clusters個のグループに割り振る
         random.shuffle(unique_labels)
-        random_map = {
-            label: i % n_clusters  # 剰余を使って均等に振り分け
-            for i, label in enumerate(unique_labels)
-        }
+        random_map = {label: i % n_clusters for i, label in enumerate(unique_labels)}
         rate = calculate_intra_rate(gt_errors, pred_errors, random_map)
         rates.append(rate)
-        
     return np.mean(rates)
 
 def analyze_trend(df_gt, df_pred, target_col, clusterer, n_clusters_list):
     if len(df_gt) == 0: return
 
-    # エラーデータの抽出
     error_mask = df_gt[target_col] != df_pred[target_col]
     total_errors = error_mask.sum()
     
@@ -123,33 +110,40 @@ def analyze_trend(df_gt, df_pred, target_col, clusterer, n_clusters_list):
     pred_errors = df_pred.loc[error_mask, target_col].values
 
     print(f"\n--- Analyzing Target: {target_col} (Total Errors: {total_errors}) ---")
-    print(f"Comparing Semantic Clustering vs Random Baseline (avg of 10 trials)")
+    print(f"Total Unique Labels: {len(clusterer.labels)}")
 
     results = []
     for n_clusters in n_clusters_list:
-        # 1. 意味的クラスタリング (Semantic)
+        # 1. 意味的クラスタリング
         semantic_map = clusterer.create_clusters(n_clusters)
         semantic_rate = calculate_intra_rate(gt_errors, pred_errors, semantic_map)
         
-        # 2. ランダムクラスタリング (Random Baseline)
+        # 2. ランダムベースライン
         random_rate = get_random_baseline(clusterer.labels, n_clusters, gt_errors, pred_errors)
         
-        # 3. Lift (倍率)
+        # 3. 各種指標計算
         lift = semantic_rate / random_rate if random_rate > 0 else 0.0
+        
+        # 平均クラスタサイズ (全ラベル数 / クラスタ数)
+        # 例: 18個のシナリオを3グループに分けたら、平均サイズは6
+        avg_size = len(clusterer.labels) / n_clusters
         
         results.append({
             "N_Clust": n_clusters,
+            "Avg_Sz": avg_size,     # <--- 追加: 1クラスあたりの平均ラベル数
             "Sem_Rate": semantic_rate,
             "Rnd_Rate": random_rate,
-            "Lift (Sem/Rnd)": lift  # >1 なら「意味のある間違い」をしている
+            "Lift": lift
         })
         
     df_res = pd.DataFrame(results)
-    # 読みやすくフォーマット
+    
+    # 見やすいフォーマットで表示
     print(df_res.to_string(index=False, formatters={
+        'Avg_Sz': '{:.1f}'.format,       # 小数点1桁
         'Sem_Rate': '{:.2%}'.format,
         'Rnd_Rate': '{:.2%}'.format,
-        'Lift (Sem/Rnd)': '{:.2f}x'.format
+        'Lift': '{:.2f}x'.format
     }))
 
 # ==========================================
@@ -168,7 +162,7 @@ def main():
     df_gt, df_pred = load_data(args.pred_file, args.test_file)
     if len(df_gt) == 0: return
 
-    # Embeddingの準備
+    # Embedding
     all_scenarios = list(set(df_gt['scenario'].unique().tolist() + df_pred['scenario'].unique().tolist()))
     all_actions = list(set(df_gt['action'].unique().tolist() + df_pred['action'].unique().tolist()))
 
@@ -177,11 +171,11 @@ def main():
     ac_clusterer = LabelClusterer(all_actions)
     
     # 分析実行
-    # Scenario: 種類が少ないので少なめのクラスタ数で
-    analyze_trend(df_gt, df_pred, 'scenario', sc_clusterer, [12, 8, 5, 3, 2])
+    # Scenario (ラベル種少ない) -> Avg_Sz が 2~4 くらいになるような分割を見る
+    analyze_trend(df_gt, df_pred, 'scenario', sc_clusterer, [12, 8, 6, 4, 3])
     
-    # Action: 種類が多いので広めのレンジで
-    analyze_trend(df_gt, df_pred, 'action', ac_clusterer, [30, 20, 10, 5, 3])
+    # Action (ラベル種多い) -> Avg_Sz が 2~5 くらいになるような分割を見る
+    analyze_trend(df_gt, df_pred, 'action', ac_clusterer, [30, 20, 15, 10, 5])
 
 if __name__ == "__main__":
     main()
