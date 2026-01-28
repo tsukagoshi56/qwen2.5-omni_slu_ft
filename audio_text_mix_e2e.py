@@ -549,6 +549,8 @@ def main():
     device = torch.device(f"cuda:{local_rank}") if local_rank != -1 else "cuda"
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    processor.tokenizer.padding_side = "left"  # Required for generation
+    
     model = MODEL_CLS.from_pretrained(
         args.model_name_or_path, dtype=torch.bfloat16, trust_remote_code=True
     ).to(device)
