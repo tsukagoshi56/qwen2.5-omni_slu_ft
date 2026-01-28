@@ -492,7 +492,13 @@ def main():
             inputs = processor.tokenizer(text, return_tensors="pt", padding=True)
             
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        input_len = inputs["input_ids"].size(1)
+        
+        # Debug: print input details
+        if i == 0 and local_rank <= 0:
+            logger.info(f"DEBUG: input_ids shape: {inputs['input_ids'].shape}")
+            logger.info(f"DEBUG: input keys: {list(inputs.keys())}")
+            if 'input_features' in inputs:
+                logger.info(f"DEBUG: input_features shape: {inputs['input_features'].shape}")
         
         # Generate
         with torch.no_grad():
@@ -503,9 +509,19 @@ def main():
                 do_sample=False,
                 repetition_penalty=args.repetition_penalty
             )
-            
-        generated_ids_new = generated_ids[:, input_len:]
-        response_text = processor.batch_decode(generated_ids_new, skip_special_tokens=True)[0]
+        
+        # Match training's SampleGenerationCallback decode logic exactly
+        generated_ids_list = [
+            output_ids[len(input_ids):] 
+            for input_ids, output_ids in zip(inputs['input_ids'], generated_ids)
+        ]
+        response_text = processor.batch_decode(generated_ids_list, skip_special_tokens=True)[0]
+        
+        # Debug: print generation details
+        if i == 0 and local_rank <= 0:
+            logger.info(f"DEBUG: generated_ids shape: {generated_ids.shape}")
+            logger.info(f"DEBUG: generated_ids_list[0] length: {len(generated_ids_list[0])}")
+            logger.info(f"DEBUG: raw response: {repr(response_text)}")
         
         # --- Display similar to SampleGenerationCallback ---
         if local_rank <= 0:
