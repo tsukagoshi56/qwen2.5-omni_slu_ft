@@ -21,6 +21,9 @@ pd.set_option('display.float_format', '{:.4f}'.format)
 # 1. Data Loading & Clustering Logic
 # ==========================================
 def load_data(pred_path, test_path):
+    """
+    Load prediction and ground truth JSONL files and merge them based on slurp_id.
+    """
     print(f"Loading data from {pred_path} and {test_path}...")
     preds = {}
     with open(pred_path, 'r') as f:
@@ -66,6 +69,9 @@ class LabelClusterer:
 # 2. Analysis Logic
 # ==========================================
 def analyze_trend(df_gt, df_pred, target_col, clusterer, n_clusters_list):
+    """
+    Compare GT vs Pred at different clustering granularities to see if errors stay within the same cluster.
+    """
     results = []
     
     # 全体の間違いデータを抽出
