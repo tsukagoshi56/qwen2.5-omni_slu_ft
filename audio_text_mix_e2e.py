@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Audio-Text Mix Training (Distributed Homogeneous Batching)
+Audio-Text Mix Training (Distributed Homogeneous Batching - FIXED)
 =========================================================
-Multi-GPU Support Added:
-- Splits data across ranks (GPUs) so they don't train on duplicates.
-- Maintains "Homogeneous Batching" (Pure Audio or Pure Text batches) locally on each GPU.
+Fixes:
+- Applies Homogeneous Batching to EVALUATION as well (prevents crashes).
+-Clarifies Test data loading.
 """
 
 import argparse
@@ -26,9 +26,8 @@ from transformers import (
 )
 from torch.utils.data import Dataset, Sampler, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+import torch.distributed as dist
 
-# Logging setup to only print on the main process (Rank 0) usually, 
-# but here we keep simple config.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ PROMPT = """You are a voice assistant. Analyze the user's spoken request and out
 Output only valid JSON, no extra text."""
 
 # ==============================================================================
-# 1. Data Loading (Unchanged)
+# 1. Data Loading
 # ==============================================================================
 
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
@@ -93,107 +92,91 @@ class MixedDataset(Dataset):
         return {**self.items[idx], "original_idx": idx}
 
 # ==============================================================================
-# 2. Distributed Homogeneous Batch Sampler (UPDATED)
+# 2. Distributed Homogeneous Batch Sampler
 # ==============================================================================
 
 class DistributedHomogeneousBatchSampler(Sampler):
-    """
-    Groups data by modality (Audio vs Text) AND handles Distributed (DDP) splitting.
-    """
     def __init__(self, dataset: MixedDataset, batch_size: int, 
                  num_replicas: Optional[int] = None, 
                  rank: Optional[int] = None, 
                  drop_last: bool = False,
-                 seed: int = 0):
+                 seed: int = 0,
+                 shuffle: bool = True): # Added shuffle flag
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.seed = seed
         self.epoch = 0
+        self.shuffle = shuffle
 
-        # --- DDP Setup ---
         if num_replicas is None:
             if not torch.distributed.is_available():
-                raise RuntimeError("Requires distributed package to be available")
+                raise RuntimeError("Requires distributed package")
             num_replicas = torch.distributed.get_world_size()
         if rank is None:
             if not torch.distributed.is_available():
-                raise RuntimeError("Requires distributed package to be available")
+                raise RuntimeError("Requires distributed package")
             rank = torch.distributed.get_rank()
             
         self.num_replicas = num_replicas
         self.rank = rank
 
-        # --- Separation & Splitting ---
-        # 1. Identify all indices
         all_audio = [i for i, item in enumerate(dataset.items) if item["audio_path"] is not None]
         all_text = [i for i, item in enumerate(dataset.items) if item["audio_path"] is None]
 
-        # 2. Split indices for THIS specific GPU (Rank)
-        # Using simple striding (0, 2, 4... for Rank0 | 1, 3, 5... for Rank1)
-        # Note: In a real scenario, we might want to shuffle before splitting to ensure randomness across epochs,
-        # but here we keep it stable for simplicity or handle shuffle inside iter.
+        # Split for DDP
         self.local_audio_indices = all_audio[self.rank::self.num_replicas]
         self.local_text_indices = all_text[self.rank::self.num_replicas]
 
     def __iter__(self) -> Iterator[List[int]]:
-        # Deterministic shuffling based on epoch for training variety
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
         
-        # Convert to tensors to use torch.randperm
         audio_indices = torch.tensor(self.local_audio_indices)
         text_indices = torch.tensor(self.local_text_indices)
         
-        # Shuffle indices within their local groups
-        audio_perm = torch.randperm(len(audio_indices), generator=g)
-        text_perm = torch.randperm(len(text_indices), generator=g)
-        
-        audio_idxs = audio_indices[audio_perm].tolist()
-        text_idxs = text_indices[text_perm].tolist()
+        if self.shuffle:
+            audio_perm = torch.randperm(len(audio_indices), generator=g)
+            text_perm = torch.randperm(len(text_indices), generator=g)
+            audio_idxs = audio_indices[audio_perm].tolist()
+            text_idxs = text_indices[text_perm].tolist()
+        else:
+            audio_idxs = audio_indices.tolist()
+            text_idxs = text_indices.tolist()
         
         batches = []
-        
-        # Create Audio batches
         for i in range(0, len(audio_idxs), self.batch_size):
             batch = audio_idxs[i : i + self.batch_size]
             if len(batch) == self.batch_size or not self.drop_last:
                 batches.append(batch)
                 
-        # Create Text batches
         for i in range(0, len(text_idxs), self.batch_size):
             batch = text_idxs[i : i + self.batch_size]
             if len(batch) == self.batch_size or not self.drop_last:
                 batches.append(batch)
         
-        # Shuffle the ORDER of batches
-        # We use standard random here, seeding it ensures all GPUs don't sync their batch types perfectly
-        # (though strictly they are independent now).
-        random.seed(self.seed + self.epoch)
-        random.shuffle(batches)
+        if self.shuffle:
+            random.seed(self.seed + self.epoch)
+            random.shuffle(batches)
         
         for batch in batches:
             yield batch
 
     def __len__(self):
-        # Calculate length based on LOCAL subset size
         audio_len = len(self.local_audio_indices)
         text_len = len(self.local_text_indices)
-        
         audio_batches = (audio_len + self.batch_size - 1) // self.batch_size
         text_batches = (text_len + self.batch_size - 1) // self.batch_size
-        
         if self.drop_last:
             audio_batches = audio_len // self.batch_size
             text_batches = text_len // self.batch_size
-            
         return audio_batches + text_batches
     
     def set_epoch(self, epoch: int):
         self.epoch = epoch
 
 # ==============================================================================
-# 3. Smart Collator (Unchanged)
+# 3. Smart Collator
 # ==============================================================================
 
 @dataclass
@@ -203,20 +186,23 @@ class SmartCollator:
     ignore_index: int = -100
     
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
+        # Critical: Check modality. If mixed, this logic fails. Sampler prevents mixing.
+        if len(batch) == 0: return {}
         is_audio_batch = (batch[0].get("audio_path") is not None)
+        
         if is_audio_batch:
             return self._collate_audio(batch)
         else:
             return self._collate_text(batch)
 
     def _collate_audio(self, batch):
-        input_ids_list = []
-        labels_list = []
-        input_features_list = []
-        feature_mask_list = []
+        input_ids_list, labels_list, input_features_list, feature_mask_list = [], [], [], []
         sr = self.processor.feature_extractor.sampling_rate
         
         for item in batch:
+            if item["audio_path"] is None: 
+                # Safety fallback just in case
+                continue 
             audio, _ = librosa.load(item["audio_path"], sr=sr)
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
@@ -240,20 +226,18 @@ class SmartCollator:
                 while f_mask.dim() > 1: f_mask = f_mask.squeeze(0)
                 feature_mask_list.append(f_mask)
         
-        batch_out = {
+        return {
             "input_ids": pad_sequence(input_ids_list, batch_first=True, padding_value=self.processor.tokenizer.pad_token_id),
             "labels": pad_sequence(labels_list, batch_first=True, padding_value=self.ignore_index),
             "attention_mask": pad_sequence([torch.ones_like(ids) for ids in input_ids_list], batch_first=True, padding_value=0),
-            "input_features": pad_sequence(input_features_list, batch_first=True, padding_value=0.0)
+            "input_features": pad_sequence(input_features_list, batch_first=True, padding_value=0.0),
+            "feature_attention_mask": pad_sequence(feature_mask_list, batch_first=True, padding_value=0) if feature_mask_list else None
         }
-        if feature_mask_list:
-            batch_out["feature_attention_mask"] = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
-        return batch_out
 
     def _collate_text(self, batch):
-        input_ids_list = []
-        labels_list = []
+        input_ids_list, labels_list = [], []
         for item in batch:
+            if item["audio_path"] is not None: continue # Safety fallback
             user_content = [{"type": "text", "text": f"{item['transcript']}\n{PROMPT}"}]
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             full_text = text_input + item["target"]
@@ -268,15 +252,14 @@ class SmartCollator:
             input_ids_list.append(ids)
             labels_list.append(lbs)
             
-        batch_out = {
+        return {
             "input_ids": pad_sequence(input_ids_list, batch_first=True, padding_value=self.processor.tokenizer.pad_token_id),
             "labels": pad_sequence(labels_list, batch_first=True, padding_value=self.ignore_index),
             "attention_mask": pad_sequence([torch.ones_like(ids) for ids in input_ids_list], batch_first=True, padding_value=0),
         }
-        return batch_out
 
 # ==============================================================================
-# 4. Custom Trainer (UPDATED for DDP)
+# 4. Custom Trainer with EVAL Support
 # ==============================================================================
 
 class CustomTrainer(Trainer):
@@ -284,19 +267,45 @@ class CustomTrainer(Trainer):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
         
-        train_dataset = self.train_dataset
-        
-        # Inject DDP info into our custom sampler
         batch_sampler = DistributedHomogeneousBatchSampler(
-            train_dataset,
+            self.train_dataset,
             batch_size=self.args.train_batch_size,
-            num_replicas=self.args.world_size, # Trainer provides this
-            rank=self.args.process_index,      # Trainer provides this
-            drop_last=self.args.dataloader_drop_last
+            num_replicas=self.args.world_size,
+            rank=self.args.process_index,
+            drop_last=self.args.dataloader_drop_last,
+            shuffle=True
+        )
+        return DataLoader(
+            self.train_dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
+    
+    def get_eval_dataloader(self, eval_dataset: Optional[Dataset] = None) -> DataLoader:
+        """
+        Overridden to use Homogeneous Batching during Evaluation too.
+        Without this, standard random sampler mixes Audio/Text and crashes SmartCollator.
+        """
+        if eval_dataset is None and self.eval_dataset is None:
+            raise ValueError("Trainer: evaluation requires an eval_dataset.")
+        eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
+        
+        # Use drop_last=False for eval so we don't lose data
+        # shuffle=False is usually better for eval determinism, but 
+        # mixing audio/text batches order is fine as long as batches are pure.
+        batch_sampler = DistributedHomogeneousBatchSampler(
+            eval_dataset,
+            batch_size=self.args.per_device_eval_batch_size,
+            num_replicas=self.args.world_size,
+            rank=self.args.process_index,
+            drop_last=False, 
+            shuffle=False 
         )
 
         return DataLoader(
-            train_dataset,
+            eval_dataset,
             batch_sampler=batch_sampler,
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers,
@@ -304,71 +313,47 @@ class CustomTrainer(Trainer):
         )
 
 # ==============================================================================
-# 5. Evaluation Logic
+# 5. Final Evaluation Logic
 # ==============================================================================
 
-def evaluate_model(model, processor, items, device, max_samples=None):
+def evaluate_model(model, processor, items, device):
     """
-    Evaluation for testing phase.
-    Specifically: Audio items input = [Audio, Prompt] (No transcript).
+    Runs simple inference on Rank 0 only.
     """
     model.eval()
     results = []
-    
-    if max_samples:
-        items = items[:max_samples]
-    
-    print(f"Evaluating on {len(items)} items...")
+    print(f"Evaluating on {len(items)} items (Rank 0)...")
     
     for i, item in enumerate(items):
         audio_path = item.get("audio_path")
         transcript = item.get("transcript", "")
         
         if audio_path:
-            # Audio-only input (with prompt)
+            # Load audio
             audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
-            user_content = [
-                {"type": "audio", "audio_url": "placeholder"},
-                {"type": "text", "text": PROMPT}
-            ]
-            text_input = processor.apply_chat_template(
-                [{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True
-            )
+            user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+            text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
         else:
-            # Text-only input
             user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
-            text_input = processor.apply_chat_template(
-                [{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True
-            )
+            text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             inputs = processor(text=text_input, return_tensors="pt")
 
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
         with torch.no_grad():
-            from tqdm import tqdm
-            # We don't use tqdm here since it's a small loop or we want clean output
-            output_ids = model.generate(**inputs, max_new_tokens=256)
+            output_ids = model.generate(**inputs, max_new_tokens=128)
             
-        # Get only the generated part
         input_len = inputs["input_ids"].shape[1]
         decoded = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
         
-        results.append({
-            "target": item["target"],
-            "prediction": decoded,
-            "type": "audio" if audio_path else "text"
-        })
+        results.append({"target": item["target"], "prediction": decoded, "type": "audio" if audio_path else "text"})
         
-        if i < 5:
-            print(f"\n[{results[-1]['type'].upper()}] Sample {i}")
-            print(f"Target: {item['target']}")
-            print(f"Pred  : {decoded}")
+        if i < 3:
+            print(f"[{results[-1]['type'].upper()}] Pred: {decoded} | Target: {item['target']}")
 
-    # Simple exact match accuracy
     acc = sum(1 for r in results if r["target"].strip() == r["prediction"].strip()) / len(results)
-    print(f"\nFinal Test Accuracy: {acc:.2%}")
-    return acc
+    print(f"\nFinal Accuracy: {acc:.2%}")
 
 # ==============================================================================
 # Main
@@ -377,105 +362,89 @@ def evaluate_model(model, processor, items, device, max_samples=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_file", type=str, default="slurp/dataset/slurp/train.jsonl")
+    parser.add_argument("--eval_file", type=str, default=None, help="If not set, uses train_file path replaced with devel.jsonl")
+    parser.add_argument("--test_file", type=str, default=None, help="If not set, uses train_file path replaced with test.jsonl")
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--bf16", action="store_true", default=True)
-    parser.add_argument("--eval_steps", type=int, default=50)
     
     args = parser.parse_args()
-    
-    # Check for DDP environment
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    
-    # Device map for Qwen: 
-    # In DDP, each process sees only its assigned GPU as "cuda:0" internally usually,
-    # or we specify device_map explicitly.
-    # Simplest for Trainer + DDP: Let Trainer handle it or load to "cuda:{local_rank}"
-    if local_rank != -1:
-        device = torch.device(f"cuda:{local_rank}")
-    else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(f"cuda:{local_rank}") if local_rank != -1 else "cuda"
 
+    # --- Data Paths ---
+    if args.eval_file is None:
+        args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
+    if args.test_file is None:
+        args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
+
+    # --- Load Data ---
+    train_items = build_items_from_slurp(args.train_file, args.audio_dir, max_samples=args.max_samples)
+    eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, max_samples=args.max_samples // 10 if args.max_samples else None)
+    
+    if local_rank in [-1, 0]:
+        print(f"Train: {len(train_items)} | Eval: {len(eval_items)}")
+        if len(eval_items) == 0:
+            print(f"WARNING: Eval file {args.eval_file} not found or empty.")
+
+    # --- Model & Processor ---
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    
-    # Load model
-    # Note: For heavy models in DDP, avoiding loading purely to CPU first helps memory,
-    # but here we load to specific device to ensure correct placement.
     model = Qwen2AudioForConditionalGeneration.from_pretrained(
-        args.model_name_or_path, 
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-        trust_remote_code=True,
+        args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
     ).to(device)
-    
     model.audio_tower.requires_grad_(False)
     model.multi_modal_projector.requires_grad_(False)
-    
-    # Only print on main process
-    if local_rank in [-1, 0]:
-        print(f"Model loaded on {device}")
 
-    train_items = build_items_from_slurp(args.train_file, args.audio_dir, max_samples=args.max_samples)
-    train_dataset = MixedDataset(train_items)
-    
-    # Load validation data (devel.jsonl)
-    devel_file = args.train_file.replace("train.jsonl", "devel.jsonl")
-    devel_items = build_items_from_slurp(devel_file, args.audio_dir, max_samples=args.max_samples // 10 if args.max_samples else None)
-    eval_dataset = MixedDataset(devel_items) if devel_items else None
-
-    if local_rank in [-1, 0]:
-        print(f"Loaded {len(train_items)} train items.")
-        print(f"Loaded {len(devel_items)} eval items.")
-    
+    # --- Training ---
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=4,
         learning_rate=args.learning_rate,
-        bf16=args.bf16,
-        logging_steps=5,
+        bf16=True,
+        logging_steps=10,
+        eval_strategy="steps" if len(eval_items) > 0 else "no",
+        eval_steps=50,
+        save_strategy="steps",
         save_steps=100,
-        eval_strategy="steps" if eval_dataset else "no",
-        eval_steps=args.eval_steps,
         remove_unused_columns=False,
-        report_to="none",
-        ddp_find_unused_parameters=False, 
-        dataloader_num_workers=0,
+        ddp_find_unused_parameters=False,
+        report_to="none"
     )
-    
+
     trainer = CustomTrainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset, # Add eval_dataset
+        train_dataset=MixedDataset(train_items),
+        eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
         data_collator=SmartCollator(processor),
         tokenizer=processor.tokenizer,
     )
-    
-    if local_rank in [-1, 0]:
-        print("Starting distributed training...")
-        
+
     trainer.train()
-    
+
+    # --- Final Test (Rank 0 Only) ---
     if local_rank in [-1, 0]:
         trainer.save_model(args.output_dir)
         processor.save_pretrained(args.output_dir)
         
-        # 4. Final Evaluation on test.jsonl
-        print("\nStarting final evaluation on test.jsonl...")
-        test_file = args.train_file.replace("train.jsonl", "test.jsonl")
-        test_items = build_items_from_slurp(test_file, args.audio_dir, max_samples=args.max_samples // 10 if args.max_samples else 100)
-        
+        print("\n=== Running Final Test on Rank 0 ===")
+        test_items = build_items_from_slurp(args.test_file, args.audio_dir, max_samples=100)
         if test_items:
-            evaluate_model(model, processor, test_items, device=device)
+            # Note: We use the raw model (or unwrapped) for generation to handle simple inference
+            evaluate_model(model, processor, test_items, device)
         else:
-            print("No test items found for evaluation.")
+            print(f"Test file {args.test_file} not found.")
+
+    # Wait for Rank 0 to finish testing before killing other processes
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        dist.barrier()
 
 if __name__ == "__main__":
     main()
