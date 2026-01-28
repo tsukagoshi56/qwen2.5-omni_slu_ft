@@ -151,13 +151,15 @@ def build_items_from_slurp(jsonl_path, audio_dir,
             if not filler and "span" in e and tokens:
                 try:
                     span = e["span"]
-                    if len(span) == 2:
+                    if isinstance(span, list) and len(span) > 0:
                         start_idx = span[0]
-                        end_idx = span[1]
+                        end_idx = span[-1]
                         selected_tokens = tokens[start_idx : end_idx + 1]
-                        filler = " ".join([t["surface"] for t in selected_tokens])
+                        filler = " ".join([t.get("surface", "") for t in selected_tokens])
                 except Exception as err:
-                    filler = "unknown"
+                    pass
+            if filler is None:
+                filler = ""
             processed_entities.append({"type": e.get("type"), "filler": filler})
 
         sc_group, sc_cands = scenario_manager.get_context(scenario)

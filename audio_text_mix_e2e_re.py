@@ -85,28 +85,35 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         data = json.loads(line)
         slurp_id = data.get("slurp_id", -1)
         
-        # fillerがJSONにないため、tokensとspanから復元する処理を追加
         raw_entities = data.get("entities", [])
         tokens = data.get("tokens", [])
         
         processed_entities = []
         for e in raw_entities:
-            # "filler"キーがあればそれを使うが、なければspanから抽出
             filler = e.get("filler")
             
+            # fillerがない、かつ token/span 情報がある場合のリカバー処理
             if not filler and "span" in e and tokens:
                 try:
                     span = e["span"]
-                    if len(span) == 2:
+                    # spanがリストかつ空でないか確認
+                    if isinstance(span, list) and len(span) > 0:
+                        # [start, end] 形式でも [idx] 形式でも対応できるよう、
+                        # リストの最初と最後を取得して範囲を決める
                         start_idx = span[0]
-                        end_idx = span[1]
-                        # SLURPのspanは閉区間 [start, end] なので、Pythonのスライス用に +1 する
+                        end_idx = span[-1]
+                        
+                        # Pythonのスライスは終了インデックスを含まないため +1
                         selected_tokens = tokens[start_idx : end_idx + 1]
-                        # 各トークンの 'surface' を結合
-                        filler = " ".join([t["surface"] for t in selected_tokens])
+                        
+                        # トークンから単語を結合
+                        filler = " ".join([t.get("surface", "") for t in selected_tokens])
                 except Exception as err:
-                    print(f"[WARN] Failed to extract filler for id {slurp_id}: {err}")
-                    filler = "unknown"
+                    pass
+
+            # それでも取れなかった場合の最終手段
+            if filler is None:
+                filler = "" # 型エラーを防ぐため空文字にしておく
 
             processed_entities.append({
                 "type": e.get("type"), 
@@ -118,7 +125,7 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
             "action": data.get("action", ""),
             "entities": processed_entities
         }
-
+        
         target_str = json.dumps(target_obj, ensure_ascii=False)
         transcript = data.get("sentence", "")
         
