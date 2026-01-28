@@ -379,72 +379,158 @@ def main():
     from torch.utils.data import DataLoader
 
     class EvalCollator:
+        """
+        Collator for evaluation that properly handles audio using feature_extractor 
+        and tokenizer separately (matching train_qwen2_audio_slurp.py pattern).
+        """
         def __init__(self, processor, add_text_only, include_transcript=True):
             self.processor = processor
             self.add_text_only = add_text_only
             self.include_transcript = include_transcript
 
         def __call__(self, batch):
-            batch_texts = []
-            batch_audios = []
+            """
+            Process batch using feature_extractor and tokenizer separately.
+            This avoids the 'audios is not a valid argument' error.
+            """
+            batch_inputs = []
             batch_items = []
+            batch_texts = []
             
             for item in batch:
                 transcript = item.get("transcript", "")
                 
                 # Logic:
                 # If add_text_only=True: Input is [Transcript + Prompt] (Text-only task)
-                # If add_text_only=False: Input is [Audio + Prompt] (Audio task) -> Transcript used only for ref/debug
+                # If add_text_only=False: Input is [Audio + Prompt] (Audio task)
                 
                 if self.add_text_only:
-                     if transcript:
+                    if transcript:
                         prompt_text = f"{transcript}\n{PROMPT}"
-                     else:
+                    else:
                         prompt_text = PROMPT
                 else:
-                     # Audio mode: Do not include transcript in input
-                     prompt_text = PROMPT
+                    # Audio mode: Do not include transcript in input
+                    prompt_text = PROMPT
                 
+                # Build message content for chat template
                 content = []
+                audio = None
+                
                 if not self.add_text_only:
                     audio_input = item.get("audio") or item.get("audio_path")
                     if audio_input:
-                        # For chat template, we just need a placeholder capable logic or path
-                        # Here passing "audio" type uses the path if string, but if dict (HF)?
-                        # Processor apply_chat_template usually expects a dict with 'audio' key pointing to stuff or just placeholder?
-                        # It depends on how we handle it. 
-                        # In training script, we pass raw audio array to processor separately.
-                        # Template just needs placeholder.
-                        content.append({"type": "audio", "audio": "audio_placeholder"})
+                        # Load audio
+                        audio = load_audio_input(audio_input, target_sr=self.processor.feature_extractor.sampling_rate)
+                        # Add audio placeholder for chat template
+                        audio_ref = item.get("audio_ref") or (audio_input if isinstance(audio_input, str) else "audio")
+                        content.append({"type": "audio", "audio": audio_ref})
                 
                 content.append({"type": "text", "text": prompt_text})
                 messages = [{"role": "user", "content": content}]
                 
+                # Apply chat template
                 text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
                 batch_texts.append(text)
                 batch_items.append(item)
                 
-                if not self.add_text_only:
-                    audio_input = item.get("audio") or item.get("audio_path")
-                    # Use helper from training script that handles dict/path/etc
-                    if audio_input:
-                        wav = load_audio_input(audio_input, target_sr=self.processor.feature_extractor.sampling_rate)
-                        batch_audios.append(wav.numpy())
-
-            if self.add_text_only:
-                inputs = self.processor(
-                    text=batch_texts,
+                # Process inputs - use feature_extractor and tokenizer separately
+                if audio is not None:
+                    # Convert to numpy
+                    if isinstance(audio, torch.Tensor):
+                        audio_np = audio.numpy()
+                    else:
+                        audio_np = audio
+                    
+                    # Extract audio features using feature_extractor
+                    audio_features = self.processor.feature_extractor(
+                        audio_np,
+                        sampling_rate=16000,
+                        return_tensors="pt",
+                        padding="max_length",
+                        return_attention_mask=True,
+                    )
+                    
+                    # Tokenize text
+                    text_tokens = self.processor.tokenizer(
+                        text,
+                        return_tensors="pt",
+                        padding=True,
+                    )
+                    
+                    # Combine
+                    inputs = {
+                        **text_tokens,
+                        "input_features": audio_features["input_features"],
+                    }
+                    if "attention_mask" in audio_features:
+                        inputs["feature_attention_mask"] = audio_features["attention_mask"]
+                else:
+                    # Text-only: just tokenize
+                    inputs = self.processor.tokenizer(
+                        text,
+                        return_tensors="pt",
+                        padding=True,
+                    )
+                
+                batch_inputs.append(inputs)
+            
+            # For batch_size=1, return the single input directly
+            if len(batch_inputs) == 1:
+                return batch_inputs[0], batch_items, batch_texts
+            
+            # For batch_size > 1 with audio, we need special handling
+            # Check if all items have audio or all are text-only
+            has_audio = [("input_features" in inp) for inp in batch_inputs]
+            
+            if all(has_audio):
+                # All audio: stack everything
+                max_text_len = max(inp["input_ids"].size(1) for inp in batch_inputs)
+                
+                padded_input_ids = []
+                padded_attention_mask = []
+                stacked_features = []
+                stacked_feature_mask = []
+                
+                for inp in batch_inputs:
+                    # Pad text tokens
+                    pad_len = max_text_len - inp["input_ids"].size(1)
+                    if pad_len > 0:
+                        pad_ids = torch.full((1, pad_len), self.processor.tokenizer.pad_token_id)
+                        pad_mask = torch.zeros((1, pad_len), dtype=torch.long)
+                        padded_input_ids.append(torch.cat([pad_ids, inp["input_ids"]], dim=1))
+                        padded_attention_mask.append(torch.cat([pad_mask, inp["attention_mask"]], dim=1))
+                    else:
+                        padded_input_ids.append(inp["input_ids"])
+                        padded_attention_mask.append(inp["attention_mask"])
+                    
+                    stacked_features.append(inp["input_features"])
+                    if "feature_attention_mask" in inp:
+                        stacked_feature_mask.append(inp["feature_attention_mask"])
+                
+                combined = {
+                    "input_ids": torch.cat(padded_input_ids, dim=0),
+                    "attention_mask": torch.cat(padded_attention_mask, dim=0),
+                    "input_features": torch.cat(stacked_features, dim=0),
+                }
+                if stacked_feature_mask:
+                    combined["feature_attention_mask"] = torch.cat(stacked_feature_mask, dim=0)
+                
+                return combined, batch_items, batch_texts
+            
+            elif not any(has_audio):
+                # All text-only: use tokenizer padding
+                combined = self.processor.tokenizer(
+                    batch_texts,
                     return_tensors="pt",
-                    padding=True
+                    padding=True,
                 )
+                return combined, batch_items, batch_texts
+            
             else:
-                inputs = self.processor(
-                    text=batch_texts,
-                    audios=batch_audios if batch_audios else None,
-                    return_tensors="pt",
-                    padding=True
-                )
-            return inputs, batch_items, batch_texts
+                # Mixed batch - not supported well, process first item only
+                logger.warning("Mixed audio/text batch detected. Using first item only.")
+                return batch_inputs[0], [batch_items[0]], [batch_texts[0]]
 
     collator = EvalCollator(processor, args.add_text_only, include_transcript=not args.no_transcript)
     dataloader = DataLoader(
