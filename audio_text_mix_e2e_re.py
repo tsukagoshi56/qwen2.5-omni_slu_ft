@@ -272,8 +272,9 @@ class SmartCollator:
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             full_text = text_input + item["target"]
             
-            inputs = self.processor(text=full_text, audio=[audio], return_tensors="pt")
-            prompt_inputs = self.processor(text=text_input, audio=[audio], return_tensors="pt")
+            
+            inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
+            prompt_inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
             prompt_len = prompt_inputs["input_ids"].shape[1]
             
             ids = inputs["input_ids"][0]
@@ -390,10 +391,11 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
         # Prepare inputs
         try:
             if audio_path:
-                audio, _ = librosa.load(audio_path, sr=processor.feature_extractor.sampling_rate)
+                sr = processor.feature_extractor.sampling_rate
+                audio, _ = librosa.load(audio_path, sr=sr)
                 user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
                 text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-                inputs = processor(text=text_input, audio=[audio], return_tensors="pt")
+                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
             else:
                 user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
                 text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
