@@ -150,13 +150,6 @@ class AudioTextCollator:
     ignore_index: int = -100
     
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        """
-        Collates mixed audio/text items. 
-        Critical Strategy for Batching:
-        - Even text-only items get a 'dummy' audio feature (silence).
-        - However, text-only items do NOT get the <|audio|> token in their prompt.
-        - This ensures all tensor shapes align (Batch, Seq, Dim) for 'input_features'.
-        """
         
         input_ids_list = []
         attention_mask_list = []
@@ -164,7 +157,6 @@ class AudioTextCollator:
         input_features_list = []
         feature_mask_list = []
         
-        # Sampling rate from processor
         sr = self.processor.feature_extractor.sampling_rate
         
         for item in batch:
@@ -172,63 +164,48 @@ class AudioTextCollator:
             transcript = item.get("transcript", "")
             target = item.get("target", "")
             
+            # --- 1. Load Audio or Create Dummy ---
             audio_np = None
-            is_valid_audio = False
-            
-            # --- 1. Load Audio (or create dummy) ---
             if audio_path:
                 try:
-                    # Load audio
                     audio_np, _ = librosa.load(audio_path, sr=sr)
-                    # Check duration (too short audio causes Qwen crash)
-                    if len(audio_np) < sr * 0.1:  # < 0.1s
-                        logger.warning(f"Audio too short, treating as text-only: {audio_path}")
-                        audio_np = None
-                    else:
-                        is_valid_audio = True
-                except Exception as e:
-                    logger.warning(f"Failed to load {audio_path}: {e}. Treating as text-only.")
+                    if len(audio_np) < sr * 0.1: 
+                        audio_np = None # Too short
+                except:
                     audio_np = None
             
-            # Create dummy silence for text-only items so batching works
             if audio_np is None:
-                # 0.5s silence
+                # バッチ処理のために必ず音声特徴量が必要
+                # 0.5秒の無音を作成
                 audio_np = np.zeros(int(sr * 0.5), dtype=np.float32)
-                is_valid_audio = False
-            
-            # --- 2. Construct Prompt ---
-            if is_valid_audio:
-                # Audio Prompt: Contains placeholder
-                user_content = [
-                    {"type": "audio", "audio_url": "placeholder_path"}, # path string doesn't matter here
-                    {"type": "text", "text": PROMPT}
-                ]
-            else:
-                # Text-Only Prompt: NO audio placeholder
-                # We still pass features, but the model won't look at them because the prompt doesn't link to them.
-                user_content = [
-                    {"type": "text", "text": f"User: {transcript}\n\n{PROMPT}"}
-                ]
 
+            # --- 2. Construct Prompt (重要: 常に音声プレースホルダーを含める) ---
+            # Qwen2-Audioは input_features がある場合、必ず <|AUDIO|> トークンを要求します。
+            # テキストのみのデータでも、無音音声 + テキスト という形で入力します。
+            
+            # audio_url はダミーでも何でもOK（processorがプレースホルダーに置換するため）
+            user_content = [
+                {"type": "audio", "audio_url": "dummy_path"}, 
+                {"type": "text", "text": f"{transcript}\n{PROMPT}"} # transcriptをここに入れる
+            ]
+            
             messages = [{"role": "user", "content": user_content}]
             
-            # Apply chat template
+            # テンプレート適用
+            # これによりテキスト内に <|audio_bos|><|AUDIO|><|audio_eos|> が挿入されます
             prompt_text = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
             full_text = prompt_text + target
             
-            # --- 3. Tokenize & Feature Extraction ---
-            # We process one by one to avoid padding issues at this stage
-            # We treat EVERYTHING as having audio input (dummy or real)
+            # --- 3. Processor Execution ---
+            # padding="longest" はここでは使わず、個別に処理して後で pad_sequence する方が安全
             inputs = self.processor(
                 text=full_text,
-                audio=[audio_np], # List of 1
+                audio=[audio_np],
                 return_tensors="pt",
-                padding="longest", 
             )
             
-            # Calculate prompt length for masking labels
             prompt_inputs = self.processor(
                 text=prompt_text,
                 audio=[audio_np],
@@ -236,44 +213,42 @@ class AudioTextCollator:
             )
             prompt_len = prompt_inputs["input_ids"].shape[1]
             
-            # --- 4. Prepare Tensors ---
+            # --- 4. Tensors ---
             curr_input_ids = inputs["input_ids"][0]
             curr_att_mask = inputs["attention_mask"][0]
             
-            # Labels: mask prompt
             curr_labels = curr_input_ids.clone()
             curr_labels[:prompt_len] = self.ignore_index
             
-            # Audio Features
-            # inputs['input_features'] shape is usually (1, Seq, Dim) or (1, 1, Seq, Dim)
-            # We want to collect (Seq, Dim) and pad them later
+            # Feature extraction
             feat = inputs["input_features"]
-            feat_mask = inputs.get("feature_attention_mask")
+            if feat is not None:
+                while feat.dim() > 2:
+                    feat = feat.squeeze(0) # (Seq, Dim) にする
+                input_features_list.append(feat)
             
-            # Squeeze batch dims to get (Seq, Dim)
-            while feat.dim() > 2:
-                feat = feat.squeeze(0)
-            if feat_mask is not None:
-                while feat_mask.dim() > 1:
-                    feat_mask = feat_mask.squeeze(0)
-            
+            feature_mask = inputs.get("feature_attention_mask")
+            if feature_mask is not None:
+                 while feature_mask.dim() > 1:
+                    feature_mask = feature_mask.squeeze(0)
+                 feature_mask_list.append(feature_mask)
+
             input_ids_list.append(curr_input_ids)
             attention_mask_list.append(curr_att_mask)
             labels_list.append(curr_labels)
-            input_features_list.append(feat) # (Seq, Dim)
-            if feat_mask is not None:
-                feature_mask_list.append(feat_mask)
 
         # --- 5. Batch Padding ---
-        # Pad Text Tokens
         padded_input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=self.processor.tokenizer.pad_token_id)
         padded_att_mask = pad_sequence(attention_mask_list, batch_first=True, padding_value=0)
         padded_labels = pad_sequence(labels_list, batch_first=True, padding_value=self.ignore_index)
         
-        # Pad Audio Features manually (pad_sequence pads dim 0, which is time/seq)
-        # input_features: List of (Time, Dim) -> (Batch, MaxTime, Dim)
-        padded_features = pad_sequence(input_features_list, batch_first=True, padding_value=0.0)
-        
+        # input_features を結合 (Batch, MaxTime, Dim)
+        if input_features_list:
+            padded_features = pad_sequence(input_features_list, batch_first=True, padding_value=0.0)
+        else:
+            # 万が一空の場合（ありえないはずだが）
+            padded_features = torch.empty(0)
+
         batch_out = {
             "input_ids": padded_input_ids,
             "attention_mask": padded_att_mask,
@@ -282,8 +257,7 @@ class AudioTextCollator:
         }
         
         if feature_mask_list:
-            padded_feat_mask = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
-            batch_out["feature_attention_mask"] = padded_feat_mask
+            batch_out["feature_attention_mask"] = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
             
         return batch_out
 
