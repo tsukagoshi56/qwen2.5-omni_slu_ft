@@ -232,11 +232,35 @@ def main():
     else:
         # Standard loading logic: Load both processor and model from the same path
         # This assumes args.model_path points to the directory containing both model and saved processor
+        processor = None
         try:
             logger.info(f"Loading processor from: {args.model_path}")
             processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
         except Exception as e:
-            raise RuntimeError(f"Failed to load processor from {args.model_path}: {e}")
+            logger.warning(f"Failed to load full processor from {args.model_path}: {e}")
+            # Maybe it's a checkpoint with only tokenizer, try to load tokenizer and feature_extractor separately
+            try:
+                from transformers import AutoTokenizer, AutoFeatureExtractor
+                logger.info("Trying to load tokenizer from checkpoint and feature_extractor from base model...")
+                
+                # Detect base model from config
+                config_path = os.path.join(args.model_path, "config.json")
+                base_model_name = "Qwen/Qwen2-Audio-7B-Instruct"  # Default
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        config_data = json.load(f)
+                        base_model_name = config_data.get("_name_or_path", base_model_name)
+                
+                logger.info(f"Loading feature_extractor from base model: {base_model_name}")
+                processor = AutoProcessor.from_pretrained(base_model_name, trust_remote_code=True, fix_mistral_regex=True)
+                
+                # Now replace the tokenizer with the one from checkpoint
+                logger.info(f"Loading tokenizer from checkpoint: {args.model_path}")
+                tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+                processor.tokenizer = tokenizer
+                logger.info("Successfully loaded processor with checkpoint tokenizer and base feature_extractor")
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load processor: {e} | Also failed fallback: {e2}")
 
         try:
             logger.info(f"Loading model from: {args.model_path}")
