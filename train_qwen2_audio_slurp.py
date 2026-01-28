@@ -1146,6 +1146,13 @@ def main() -> None:
     model = MODEL_CLS.from_pretrained(
         args.model_name_or_path, **model_kwargs
     )
+    
+    # Critical: Resize embeddings if tokenizer size > model vocab size
+    # This ensures consistency for any added special tokens
+    if len(processor.tokenizer) > model.config.vocab_size:
+        print(f"Resizing model embeddings from {model.config.vocab_size} to {len(processor.tokenizer)}")
+        model.resize_token_embeddings(len(processor.tokenizer))
+
     model.config.use_cache = False
     # Freeze audio components as per paper
     if hasattr(model, "audio_tower"):
