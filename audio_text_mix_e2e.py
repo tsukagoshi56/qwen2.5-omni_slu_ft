@@ -38,7 +38,7 @@ except Exception:
 
 # Set verbosity for transformers
 import transformers
-transformers.utils.logging.set_verbosity_info()
+transformers.utils.logging.set_verbosity_warning()
 
 local_rank = int(os.environ.get("LOCAL_RANK", -1))
 if local_rank not in [-1, 0]:
