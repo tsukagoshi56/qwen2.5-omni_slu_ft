@@ -577,7 +577,7 @@ class SampleGenerationCallback(TrainerCallback):
                             audio_np = audio_input.numpy()
                         else:
                             audio_np = audio_input
-                        inputs = self.processor(audio=audio_np, **process_kwargs).to(model.device)
+                        inputs = self.processor(audio=audio_np, sampling_rate=16000, **process_kwargs).to(model.device)
                     else:
                         inputs = self.processor(**process_kwargs).to(model.device)
                     
@@ -677,9 +677,9 @@ class Qwen2AudioCollator:
                 else:
                     audio_np = audio
                 
-                # Try passing as tuple (audio, sr) or just numpy array
-                prompt_inputs = self.processor(text=prompt_text, audio=audio_np, **call_kwargs)
-                full_inputs = self.processor(text=full_text, audio=audio_np, **call_kwargs)
+                # Pass audio with sampling_rate
+                prompt_inputs = self.processor(text=prompt_text, audio=audio_np, sampling_rate=16000, **call_kwargs)
+                full_inputs = self.processor(text=full_text, audio=audio_np, sampling_rate=16000, **call_kwargs)
             else:
                 prompt_inputs = self.processor(text=prompt_text, **call_kwargs)
                 full_inputs = self.processor(text=full_text, **call_kwargs)
@@ -711,31 +711,34 @@ class Qwen2AudioCollator:
             
         batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
 
-        if "input_features" in features[0]:
+        # Check which features have input_features (audio items only)
+        audio_feature_list = [f for f in features if "input_features" in f]
+        
+        if audio_feature_list:
             # DEBUG: Check input_features shape
             if not hasattr(self, '_debug_audio_printed'):
                 self._debug_audio_printed = True
-                f0 = features[0]["input_features"]
+                f0 = audio_feature_list[0]["input_features"]
                 print(f"DEBUG: input_features type = {type(f0)}", flush=True)
                 if hasattr(f0, 'shape'):
                     print(f"DEBUG: input_features shape = {f0.shape}", flush=True)
                 elif hasattr(f0, '__len__'):
                     print(f"DEBUG: input_features len = {len(f0)}", flush=True)
                 print(f"DEBUG: feature_extractor type = {type(self.processor.feature_extractor)}", flush=True)
-                print(f"DEBUG: has pad method = {hasattr(self.processor.feature_extractor, 'pad')}", flush=True)
+                print(f"DEBUG: num features with input_features = {len(audio_feature_list)} / {len(features)}", flush=True)
             
             # Try stacking directly instead of using feature_extractor.pad
             try:
                 # Direct stack if shapes are compatible
-                stacked = torch.stack([f["input_features"] for f in features])
+                stacked = torch.stack([f["input_features"] for f in audio_feature_list])
                 batch_out["input_features"] = stacked
             except Exception as e:
                 print(f"DEBUG: torch.stack failed: {e}", flush=True)
                 # Fallback: try padding with feature_extractor
-                audio_features = [{"input_features": f["input_features"]} for f in features]
+                audio_features_for_pad = [{"input_features": f["input_features"]} for f in audio_feature_list]
                 if hasattr(self.processor.feature_extractor, "pad"):
                     audio_out = self.processor.feature_extractor.pad(
-                        audio_features, padding=True, return_tensors="pt"
+                        audio_features_for_pad, padding=True, return_tensors="pt"
                     )
                     batch_out["input_features"] = audio_out["input_features"]
                     if "feature_attention_mask" in audio_out:
