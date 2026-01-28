@@ -187,20 +187,35 @@ def build_items_from_slurp(jsonl_path, audio_dir,
         
         # Audio Item
         if data.get("recordings"):
-            if deterministic:
-                filename = data["recordings"][0].get("file", "")
-            else:
-                filename = random.choice(data["recordings"]).get("file", "")
+            found_path = None
+            found_filename = None
             
-            path = resolve_audio_path(audio_dir, filename)
-            if not path and deterministic and len(data["recordings"]) > 0:
-                 path = resolve_audio_path(audio_dir, data["recordings"][0].get("file", ""))
+            if deterministic:
+                # 決定論的モード: 順にスキャンして最初に見つかったものを使う
+                for rec in data["recordings"]:
+                    filename = rec.get("file", "")
+                    path = resolve_audio_path(audio_dir, filename)
+                    if path:
+                        found_path = path
+                        found_filename = filename
+                        break
+            else:
+                # ランダムモード: シャッフルしてから最初に見つかったものを使う（ロバスト性向上）
+                recs = list(data["recordings"])
+                random.shuffle(recs)
+                for rec in recs:
+                    filename = rec.get("file", "")
+                    path = resolve_audio_path(audio_dir, filename)
+                    if path:
+                        found_path = path
+                        found_filename = filename
+                        break
 
-            if path:
+            if found_path:
                 items.append({
                     "slurp_id": slurp_id,
-                    "file": filename,
-                    "audio_path": path, 
+                    "file": found_filename,
+                    "audio_path": found_path, 
                     "transcript": transcript, 
                     "target": target_text
                 })

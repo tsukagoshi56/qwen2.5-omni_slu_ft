@@ -94,13 +94,23 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         
         # Audio Item
         if data.get("recordings"):
-            filename = data["recordings"][0].get("file", "")
-            path = resolve_audio_path(audio_dir, filename)
-            if path:
+            found_path = None
+            found_filename = None
+            
+            # リストの先頭だけでなく、存在するファイルが見つかるまで探す
+            for rec in data["recordings"]:
+                filename = rec.get("file", "")
+                path = resolve_audio_path(audio_dir, filename)
+                if path:
+                    found_path = path
+                    found_filename = filename
+                    break # 見つかったらループを抜ける
+            
+            if found_path:
                 items.append({
                     "slurp_id": slurp_id,
-                    "file": filename,
-                    "audio_path": path, 
+                    "file": found_filename,
+                    "audio_path": found_path, 
                     "transcript": transcript, 
                     "target": target_str
                 })

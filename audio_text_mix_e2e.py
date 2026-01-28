@@ -122,12 +122,25 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         
         # Audio Item
         if data.get("recordings"):
-            # Randomly select one recording from the available recordings
-            selected_recording = random.choice(data["recordings"])
-            path = resolve_audio_path(audio_dir, selected_recording.get("file", ""))
-            if path:
+            found_path = None
+            found_filename = None
+            
+            # リストの先頭だけでなく、存在するファイルが見つかるまで探す
+            # 訓練時はランダム性を持たせるため、順序を混ぜてから探す選択肢もあるが、
+            # ここではシンプルに先頭から有効なものを探す
+            recs = list(data["recordings"])
+            random.shuffle(recs) # ロバスト性と多様性のバランス
+            for rec in recs:
+                filename = rec.get("file", "")
+                path = resolve_audio_path(audio_dir, filename)
+                if path:
+                    found_path = path
+                    found_filename = filename
+                    break
+            
+            if found_path:
                 items.append({
-                    "audio_path": path, 
+                    "audio_path": found_path, 
                     "transcript": transcript, 
                     "target": target,
                     "slurp_id": slurp_id
