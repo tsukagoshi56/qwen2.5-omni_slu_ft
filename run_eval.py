@@ -399,143 +399,137 @@ def main():
             logger.info("Setting tokenizer padding_side to 'left' for batch inference")
         processor.tokenizer.padding_side = "left"
     
-    from train_qwen2_audio_slurp import load_audio, load_audio_input
-    from torch.utils.data import DataLoader
+    # Remove EvalCollator and DataLoader
+    # We will process items one by one to ensure exact match with training logic and avoid batching issues
     
-    # Define Collator matching the training script's approach
-    class EvalCollator:
-        """Collator for inference that matches training script's audio processing.
-        
-        Uses:
-        - apply_chat_template for proper formatting
-        - processor.feature_extractor with padding="max_length" for fixed 3000 frames
-        - Separate text tokenization combined with audio features
-        """
-        def __init__(self, processor, add_text_only, audio_sampling_rate=16000):
-            self.processor = processor
-            self.add_text_only = add_text_only
-            self.audio_sampling_rate = audio_sampling_rate
-
-        def __call__(self, batch):
-            batch_items = batch
-            batch_inputs_list = []
-            
-            for item in batch:
-                transcript = item.get("transcript", "")
-                
-                # Load audio if needed
-                audio = None
-                if not self.add_text_only:
-                    audio_path = item.get("audio_path")
-                    if audio_path:
-                        try:
-                            # Use load_audio exactly like training's SampleGenerationCallback
-                            audio = load_audio(audio_path, target_sr=self.audio_sampling_rate)
-                        except Exception as e:
-                            logger.warning(f"Failed to load audio for {item}: {e}")
-                    elif item.get("audio"):
-                        # Handle HuggingFace dataset audio dict
-                        try:
-                            audio = load_audio_input(item.get("audio"), self.audio_sampling_rate)
-                        except Exception as e:
-                            logger.warning(f"Failed to load audio dict for {item}: {e}")
-                
-                # Build prompt based on whether we have audio
-                # Matches training: if audio, prompt is just PROMPT; if text-only, use transcript + PROMPT
-                if audio is not None:
-                    prompt_text = PROMPT
-                elif transcript:
-                    prompt_text = f"{transcript}\n{PROMPT}"
-                else:
-                    prompt_text = PROMPT
-                
-                # Build message content for chat template
-                user_content = []
-                if audio is not None:
-                    # Add audio placeholder for chat template
-                    audio_ref = item.get("audio_ref") or item.get("audio_path") or "audio"
-                    user_content.append({"type": "audio", "audio": audio_ref})
-                user_content.append({"type": "text", "text": prompt_text})
-                
-                messages = [{"role": "user", "content": user_content}]
-                
-                # Apply chat template to get properly formatted text
-                text = self.processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-                
-                # Process inputs matching training script approach
-                if audio is not None:
-                    # Convert to numpy if tensor (exactly like SampleGenerationCallback)
-                    if isinstance(audio, torch.Tensor):
-                        audio_np = audio.numpy()
-                    else:
-                        audio_np = audio
-                    
-                    # Extract audio features using feature_extractor with fixed padding (matches training)
-                    audio_features = self.processor.feature_extractor(
-                        audio_np,
-                        sampling_rate=self.audio_sampling_rate,
-                        return_tensors="pt",
-                        padding="max_length",  # Fixed 3000 frames
-                        return_attention_mask=True,
-                    )
-                    
-                    # Tokenize text separately
-                    text_tokens = self.processor.tokenizer(
-                        text,
-                        return_tensors="pt",
-                        padding=True,
-                    )
-                    
-                    # Combine text tokens with audio features
-                    inputs = {
-                        **text_tokens,
-                        "input_features": audio_features["input_features"],
-                    }
-                    if "attention_mask" in audio_features:
-                        inputs["feature_attention_mask"] = audio_features["attention_mask"]
-                else:
-                    # Text-only: just tokenize
-                    inputs = self.processor.tokenizer(
-                        text,
-                        return_tensors="pt",
-                        padding=True,
-                    )
-                
-                batch_inputs_list.append(inputs)
-            
-            # Since batch_size=1, we just return the single input
-            # For batch_size > 1, would need proper padding/stacking (not implemented for simplicity)
-            if len(batch_inputs_list) == 1:
-                final_inputs = batch_inputs_list[0]
-            else:
-                # For batch_size > 1 case (not recommended for audio)
-                # Simple fallback: just use first item
-                logger.warning("Batch size > 1 not fully supported for audio. Using first item only.")
-                final_inputs = batch_inputs_list[0]
-                batch_items = [batch_items[0]]
-                    
-            return final_inputs, batch_items, [text]
-
+    logger.info(f"Starting inference (no DataLoader, sequential processing)...")
+    
+    # Pre-calculate audio sampling rate
     audio_sr = processor.feature_extractor.sampling_rate if hasattr(processor, 'feature_extractor') else 16000
-    collator = EvalCollator(processor, args.add_text_only, audio_sampling_rate=audio_sr)
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False, 
-        num_workers=args.num_workers,
-        collate_fn=collator,
-        sampler=sampler
-    )
-    
-    logger.info(f"Starting inference with batch size {args.batch_size}...")
 
-    for inputs, batch_items, batch_texts in tqdm(dataloader):
-        # Move to device
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    # Manual iteration wrapper
+    data_iterator = tqdm(dataset) if local_rank <= 0 else dataset
+    
+    # Storage for predictions (we will append to this list)
+    # Note: 'predictions' list is already defined above, we just need to populate it inside the loop
+    
+    # Note on DDP: 
+    # Since we removed DataLoader with DistributedSampler, we need to handle sharding manually if DDP is used.
+    # But for "getting it to work", let's assume single GPU or handle simple sharding.
+    if is_distributed:
+        # Simple sharding: each rank processes a slice
+        total_len = len(dataset)
+        chunk_size = (total_len + world_size - 1) // world_size
+        start_idx = local_rank * chunk_size
+        end_idx = min(start_idx + chunk_size, total_len)
         
-        # Generate
+        # Subset dataset for this rank
+        if isinstance(dataset, SlurpDataset) or isinstance(dataset, torch.utils.data.Subset):
+            # SlurpDataset is indexable
+            indices = range(start_idx, end_idx)
+            # Create a localized list of items
+            my_items = [dataset[i] for i in indices]
+            data_iterator = tqdm(my_items) if local_rank <= 0 else my_items
+        else:
+            # Fallback for SpeechMassiveDataset if needed
+             indices = range(start_idx, end_idx)
+             my_items = [dataset[i] for i in indices]
+             data_iterator = tqdm(my_items) if local_rank <= 0 else my_items
+    else:
+        # Single process
+        pass
+
+    for item in data_iterator:
+        # --- Logic copied directly from SampleGenerationCallback in train_qwen2_audio_slurp.py ---
+        
+        transcript = item.get("transcript", "")
+        # Determine prompt
+        if args.add_text_only:
+             if transcript:
+                 prompt_text = f"{transcript}\n{PROMPT}"
+             else:
+                 prompt_text = PROMPT
+        else:
+            # Audio mode logic
+            audio_path = item.get("audio_path")
+            if audio_path:
+                prompt_text = PROMPT
+            elif transcript:
+                prompt_text = f"{transcript}\n{PROMPT}"
+            else:
+                prompt_text = PROMPT
+        
+        # Load audio
+        audio = None
+        if not args.add_text_only:
+            audio_path = item.get("audio_path")
+            if audio_path:
+                try:
+                    audio = load_audio(audio_path, target_sr=audio_sr)
+                except Exception as e:
+                    logger.warning(f"Failed to load audio for {item}: {e}")
+            elif item.get("audio"):
+                 try:
+                    audio = load_audio_input(item.get("audio"), audio_sr)
+                 except Exception as e:
+                    logger.warning(f"Failed to load audio dict for {item}: {e}")
+
+        # Build message
+        user_content = []
+        if audio is not None:
+            audio_ref = item.get("audio_ref") or item.get("audio_path") or "audio"
+            user_content.append({"type": "audio", "audio": audio_ref})
+        user_content.append({"type": "text", "text": prompt_text})
+        
+        messages = [{"role": "user", "content": user_content}]
+        
+        # Apply chat template
+        text = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        
+        inputs = {}
+        input_len = 0
+        
+        if audio is not None:
+            if isinstance(audio, torch.Tensor):
+                audio_np = audio.numpy()
+            else:
+                audio_np = audio
+            
+            # Feature extraction
+            audio_features = processor.feature_extractor(
+                audio_np,
+                sampling_rate=audio_sr,
+                return_tensors="pt",
+                padding="max_length", # Fixed 3000 frames
+                return_attention_mask=True,
+            )
+            
+            # Tokenize text
+            text_tokens = processor.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True, # Padding side left is set globally
+            )
+            
+            inputs = {
+                **text_tokens,
+                "input_features": audio_features["input_features"],
+            }
+            if "attention_mask" in audio_features:
+                inputs["feature_attention_mask"] = audio_features["attention_mask"]
+        else:
+            inputs = processor.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True
+            )
+            
+        # Move to device and generate
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        input_len = inputs["input_ids"].size(1)
+        
         with torch.no_grad():
             generated_ids = model.generate(
                 **inputs,
@@ -544,11 +538,21 @@ def main():
                 do_sample=False,
                 repetition_penalty=args.repetition_penalty
             )
-        
-        # Decode
-        input_len = inputs["input_ids"].size(1)
+            
         generated_ids = generated_ids[:, input_len:]
-        responses = processor.batch_decode(generated_ids, skip_special_tokens=True)
+        response_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        
+        # --- End of inference logic ---
+        
+        # Pack into consistent format for downstream processing
+        batch_items = [item] # Keeping list format for compatibility with existing code below
+        responses = [response_text]
+        generated_ids = generated_ids # kept for debug logging
+        
+        # The existing loop below iterates over zip(batch_items, responses)
+        # So we can keep it, but we need to indent it or integrate it here.
+        # To avoid massive indentation changes, let's just process the result here immediately.
+        
         
         # Processing predictions
         for item, response_text in zip(batch_items, responses):
