@@ -488,7 +488,7 @@ def main():
     parser.add_argument("--train_file", type=str, default="slurp/dataset/slurp/train.jsonl")
     parser.add_argument("--eval_file", type=str, default="slurp/dataset/slurp/devel.jsonl")
     parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl")
-    parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
+    parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
