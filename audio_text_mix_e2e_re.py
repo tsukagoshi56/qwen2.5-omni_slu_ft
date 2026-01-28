@@ -528,7 +528,7 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
     parser.add_argument("--num_train_epochs", type=int, default=2)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
     
     args = parser.parse_args()
@@ -580,7 +580,7 @@ def main():
         bf16=True,
         logging_steps=10,
         eval_strategy="steps" if len(eval_items) > 0 else "no",
-        eval_steps=50,
+        eval_steps=200,
         save_strategy="no",
         save_total_limit=None,
         remove_unused_columns=False,
