@@ -380,9 +380,9 @@ class CustomTrainer(Trainer):
 # 4. Final Evaluation Logic (Multi-GPU DDP)
 # ==============================================================================
 
-def evaluate_model(model, processor, items, device, output_dir):
+def evaluate_model(model, processor, items, device, output_dir, batch_size=4):
     """
-    Runs inference on ALL items using DDP slicing to speed up processing.
+    Runs inference on ALL items using DDP slicing and batched processing.
     Saves predictions in 'prediction.jsonl' format with extended fields.
     """
     from tqdm import tqdm
@@ -398,71 +398,104 @@ def evaluate_model(model, processor, items, device, output_dir):
         end_idx = min(start_idx + chunk_size, total)
         my_items = items[start_idx:end_idx]
     else:
-        my_items = items # Single GPU mode
+        my_items = items
 
     model.eval()
-    results = []
     
     if local_rank in [-1, 0]:
-        print(f"Starting evaluation on {total} items ({len(my_items)} per GPU)...")
+        print(f"Starting evaluation on {total} items ({len(my_items)} per GPU) with batch_size={batch_size}...")
     
-    # Only show tqdm on rank 0 to avoid duplicate progress bars
-    iterator = tqdm(my_items, desc="Evaluating", disable=(local_rank not in [-1, 0]))
+    # Create dataset and dataloader with homogeneous batching
+    eval_dataset = MixedDataset(my_items)
+    eval_sampler = DistributedHomogeneousBatchSampler(
+        eval_dataset,
+        batch_size=batch_size,
+        num_replicas=world_size,
+        rank=local_rank if local_rank != -1 else 0,
+        drop_last=False,
+        shuffle=False
+    )
     
-    for i, item in enumerate(iterator):
-        audio_path = item.get("audio_path")
-        transcript = item.get("transcript", "")
-        slurp_id = item.get("slurp_id", "")
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_sampler=eval_sampler,
+        collate_fn=SmartCollator(processor),
+        num_workers=0,
+        pin_memory=True
+    )
+    
+    results = []
+    item_idx = 0  # Track global index to match back to original items
+    
+    iterator = tqdm(eval_loader, desc="Evaluating", disable=(local_rank not in [-1, 0]))
+    
+    for batch in iterator:
+        batch_size_actual = batch["input_ids"].shape[0]
         
-        if audio_path:
-            sr = processor.feature_extractor.sampling_rate
-            audio, _ = librosa.load(audio_path, sr=sr)
-            user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
-            text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
-            file_key = os.path.basename(audio_path)
-            eval_type = "audio"
-        else:
-            user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
-            text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=text_input, return_tensors="pt")
-            file_key = f"text_{slurp_id}_{i}"
-            eval_type = "text"
-
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        # Move batch to device
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        
+        inputs_dict = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask
+        }
+        
+        # Add audio features if present
+        if "input_features" in batch and batch["input_features"] is not None:
+            inputs_dict["input_features"] = batch["input_features"].to(device)
+            if batch.get("feature_attention_mask") is not None:
+                inputs_dict["feature_attention_mask"] = batch["feature_attention_mask"].to(device)
         
         with torch.no_grad():
-            output_ids = model.generate(**inputs, max_new_tokens=128)
+            output_ids = model.generate(**inputs_dict, max_new_tokens=128)
+        
+        # Decode each item in the batch and match with original metadata
+        for idx in range(batch_size_actual):
+            original_item = my_items[item_idx]
+            item_idx += 1
             
-        input_len = inputs["input_ids"].shape[1]
-        decoded = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-        
-        # Parse JSON output
-        parsed_json = {}
-        try:
-            match = re.search(r'\{.*\}', decoded, re.DOTALL)
-            if match:
-                parsed_json = json.loads(match.group(0))
-            else:
-                parsed_json = json.loads(decoded)
-        except:
+            input_len = input_ids[idx].ne(processor.tokenizer.pad_token_id).sum().item()
+            decoded = processor.decode(output_ids[idx][input_len:], skip_special_tokens=True)
+            
+            # Parse JSON output
             parsed_json = {}
-
-        wer_score = calculate_wer(transcript, decoded)
-        
-        res = {
-            "scenario": parsed_json.get("scenario", ""),
-            "action": parsed_json.get("action", ""),
-            "entities": parsed_json.get("entities", []),
-            "file": file_key,
-            "slurp_id": slurp_id,
-            "wer": wer_score,
-            "transcript": transcript,
-            "raw_output": decoded,
-            "target": item["target"],
-            "type": eval_type
-        }
-        results.append(res)
+            try:
+                match = re.search(r'\{.*\}', decoded, re.DOTALL)
+                if match:
+                    parsed_json = json.loads(match.group(0))
+                else:
+                    parsed_json = json.loads(decoded)
+            except:
+                parsed_json = {}
+            
+            # Compute metadata
+            audio_path = original_item.get("audio_path")
+            transcript = original_item.get("transcript", "")
+            slurp_id = original_item.get("slurp_id", "")
+            
+            if audio_path:
+                file_key = os.path.basename(audio_path)
+                eval_type = "audio"
+            else:
+                file_key = f"text_{slurp_id}_{item_idx}"
+                eval_type = "text"
+            
+            wer_score = calculate_wer(transcript, decoded)
+            
+            res = {
+                "scenario": parsed_json.get("scenario", ""),
+                "action": parsed_json.get("action", ""),
+                "entities": parsed_json.get("entities", []),
+                "file": file_key,
+                "slurp_id": slurp_id,
+                "wer": wer_score,
+                "transcript": transcript,
+                "raw_output": decoded,
+                "target": original_item["target"],
+                "type": eval_type
+            }
+            results.append(res)
 
     rank = local_rank if local_rank != -1 else 0
     rank_file = os.path.join(output_dir, f"predictions_rank_{rank}.jsonl")
