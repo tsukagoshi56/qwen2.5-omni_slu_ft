@@ -140,7 +140,25 @@ def build_items_from_slurp(jsonl_path, audio_dir,
         # --- CoT Target Construction ---
         scenario = data.get("scenario", "")
         action = data.get("action", "")
-        entities = data.get("entities", [])
+        
+        # fillerがJSONにないため、tokensとspanから復元する処理
+        raw_entities = data.get("entities", [])
+        tokens = data.get("tokens", [])
+        
+        processed_entities = []
+        for e in raw_entities:
+            filler = e.get("filler")
+            if not filler and "span" in e and tokens:
+                try:
+                    span = e["span"]
+                    if len(span) == 2:
+                        start_idx = span[0]
+                        end_idx = span[1]
+                        selected_tokens = tokens[start_idx : end_idx + 1]
+                        filler = " ".join([t["surface"] for t in selected_tokens])
+                except Exception as err:
+                    filler = "unknown"
+            processed_entities.append({"type": e.get("type"), "filler": filler})
 
         sc_group, sc_cands = scenario_manager.get_context(scenario)
         sc_text = f"Scenario Context: {sc_group} -> [{', '.join(sc_cands)}]"
@@ -150,8 +168,8 @@ def build_items_from_slurp(jsonl_path, audio_dir,
 
         slot_texts = []
         seen_slot_groups = set()
-        if entities:
-            present_slot_types = list(set([e.get("type") for e in entities]))
+        if processed_entities:
+            present_slot_types = list(set([e.get("type") for e in processed_entities]))
             for s_type in present_slot_types:
                 sl_group, sl_cands = slot_manager.get_context(s_type)
                 if sl_group not in seen_slot_groups:
@@ -164,7 +182,7 @@ def build_items_from_slurp(jsonl_path, audio_dir,
         final_json_obj = {
             "scenario": scenario,
             "action": action,
-            "entities": [{"type": e.get("type"), "filler": e.get("filler")} for e in entities]
+            "entities": processed_entities
         }
         final_json_str = json.dumps(final_json_obj, ensure_ascii=False)
 

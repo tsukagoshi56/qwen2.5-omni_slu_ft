@@ -85,11 +85,40 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         data = json.loads(line)
         slurp_id = data.get("slurp_id", -1)
         
+        # fillerがJSONにないため、tokensとspanから復元する処理を追加
+        raw_entities = data.get("entities", [])
+        tokens = data.get("tokens", [])
+        
+        processed_entities = []
+        for e in raw_entities:
+            # "filler"キーがあればそれを使うが、なければspanから抽出
+            filler = e.get("filler")
+            
+            if not filler and "span" in e and tokens:
+                try:
+                    span = e["span"]
+                    if len(span) == 2:
+                        start_idx = span[0]
+                        end_idx = span[1]
+                        # SLURPのspanは閉区間 [start, end] なので、Pythonのスライス用に +1 する
+                        selected_tokens = tokens[start_idx : end_idx + 1]
+                        # 各トークンの 'surface' を結合
+                        filler = " ".join([t["surface"] for t in selected_tokens])
+                except Exception as err:
+                    print(f"[WARN] Failed to extract filler for id {slurp_id}: {err}")
+                    filler = "unknown"
+
+            processed_entities.append({
+                "type": e.get("type"), 
+                "filler": filler
+            })
+
         target_obj = {
             "scenario": data.get("scenario", ""),
             "action": data.get("action", ""),
-            "entities": [{"type": e.get("type"), "filler": e.get("filler")} for e in data.get("entities", [])]
+            "entities": processed_entities
         }
+
         target_str = json.dumps(target_obj, ensure_ascii=False)
         transcript = data.get("sentence", "")
         
@@ -108,14 +137,13 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
             found_path = None
             found_filename = None
             
-            # リストの先頭だけでなく、存在するファイルが見つかるまで探す
             for rec in data["recordings"]:
                 filename = rec.get("file", "")
                 path = resolve_audio_path(audio_dir, filename)
                 if path:
                     found_path = path
                     found_filename = filename
-                    break # 見つかったらループを抜ける
+                    break 
             
             if found_path:
                 items.append({
