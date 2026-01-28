@@ -572,14 +572,7 @@ class SampleGenerationCallback(TrainerCallback):
                     }
                     
                     if audio_input is not None:
-                        try:
-                            inputs = self.processor(audios=[audio_input], **process_kwargs).to(model.device)
-                        except TypeError as e:
-                            if "audios" in str(e):
-                                print(f"DEBUG: 'audios' arg failed in callback, trying 'audio'. Error: {e}")
-                                inputs = self.processor(audio=[audio_input], **process_kwargs).to(model.device)
-                            else:
-                                raise e
+                        inputs = self.processor(audio=[audio_input], **process_kwargs).to(model.device)
                     else:
                         inputs = self.processor(**process_kwargs).to(model.device)
                     
@@ -662,35 +655,9 @@ class Qwen2AudioCollator:
                 "truncation": True,
                 "max_length": self.config.max_length,
             }
-            
-            # DEBUG: 最初のアイテムでprocessorの情報を出力
-            if not hasattr(self, '_debug_printed'):
-                self._debug_printed = True
-                print(f"DEBUG: processor type = {type(self.processor)}", flush=True)
-                print(f"DEBUG: processor class name = {self.processor.__class__.__name__}", flush=True)
-                try:
-                    sig = inspect.signature(self.processor.__call__)
-                    print(f"DEBUG: processor.__call__ signature = {sig}", flush=True)
-                    print(f"DEBUG: processor.__call__ params = {list(sig.parameters.keys())}", flush=True)
-                except Exception as e:
-                    print(f"DEBUG: Could not get signature: {e}", flush=True)
-                # feature_extractor があるか確認
-                if hasattr(self.processor, 'feature_extractor'):
-                    print(f"DEBUG: processor has feature_extractor = {type(self.processor.feature_extractor)}", flush=True)
-                else:
-                    print(f"DEBUG: processor does NOT have feature_extractor", flush=True)
-            
             if audio is not None:
-                try:
-                    prompt_inputs = self.processor(text=prompt_text, audios=[audio], **call_kwargs)
-                    full_inputs = self.processor(text=full_text, audios=[audio], **call_kwargs)
-                except TypeError as e:
-                    if "audios" in str(e):
-                        # print(f"DEBUG: 'audios' arg failed in collator, trying 'audio'. Error: {e}")
-                        prompt_inputs = self.processor(text=prompt_text, audio=[audio], **call_kwargs)
-                        full_inputs = self.processor(text=full_text, audio=[audio], **call_kwargs)
-                    else:
-                        raise e
+                prompt_inputs = self.processor(text=prompt_text, audio=[audio], **call_kwargs)
+                full_inputs = self.processor(text=full_text, audio=[audio], **call_kwargs)
             else:
                 prompt_inputs = self.processor(text=prompt_text, **call_kwargs)
                 full_inputs = self.processor(text=full_text, **call_kwargs)
