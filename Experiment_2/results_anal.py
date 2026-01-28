@@ -23,13 +23,16 @@ pd.set_option('display.float_format', '{:.4f}'.format)
 def load_data(pred_path, test_path):
     """
     Load prediction and ground truth JSONL files and merge them based on slurp_id.
+    Derives 'scenario' from 'intent' - 'action' if scenario key is missing or logic dictates.
     """
     print(f"Loading data from {pred_path} and {test_path}...")
     preds = {}
     with open(pred_path, 'r') as f:
         for line in f:
             d = json.loads(line)
-            preds[d['slurp_id']] = d
+            sid = d.get('slurp_id')
+            if sid is not None:
+                preds[sid] = d
             
     gts = []
     pred_list = []
@@ -37,8 +40,27 @@ def load_data(pred_path, test_path):
     with open(test_path, 'r') as f:
         for line in f:
             d = json.loads(line)
-            sid = d['slurp_id']
-            if sid in preds:
+            
+            # --- Scenario Derivation Logic (User Request) ---
+            # intent: "qa_currency", action: "currency" -> scenario: "qa"
+            # scenario = intent - action
+            intent = d.get("intent", "")
+            action = d.get("action", "")
+            
+            # Force derivation as per user instruction "use logic intent - action = scenario"
+            # regardless of whether scenario exists, to be safe/consistent with usage.
+            if intent and action:
+                # Remove action from end of intent
+                # Be careful if action is substring but not suffix? usually suffix in SLURP.
+                if intent.endswith(action):
+                    derived = intent[:-(len(action))].strip("_")
+                    d["scenario"] = derived
+                else:
+                    # Fallback: if intent doesn't end with action, keep original or empty
+                    pass
+            
+            sid = d.get('slurp_id')
+            if sid is not None and sid in preds:
                 gts.append(d)
                 pred_list.append(preds[sid])
                 
