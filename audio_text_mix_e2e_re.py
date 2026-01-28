@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Audio-Text Mix Training & Distributed Inference (Slurp Format)
-with Smoke Test Mode (Fixed Inference Sync)
+with Random Candidates Ablation (Standard Loss)
 """
 
 import argparse
@@ -39,15 +39,11 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PROMPT = """You are a voice assistant. Analyze the user's spoken request and output a JSON object with:
-- "scenario": the general intent category
-- "action": the specific action within that scenario
-- "entities": a list of extracted entities as {"type": ..., "filler": ...}
-
-Output only valid JSON, no extra text."""
+# ベースとなるプロンプト（これに動的に候補リストを追加します）
+BASE_PROMPT_TEXT = """You are a voice assistant. Analyze the user's spoken request."""
 
 # ==============================================================================
-# 1. Data Loading
+# 1. Data Loading & Label Collection
 # ==============================================================================
 
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
@@ -60,7 +56,6 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
         if os.path.exists(path):
             return path
     
-    # Debug: Print failure for the first few misses to avoid spam
     if not hasattr(resolve_audio_path, "_debug_count"):
         resolve_audio_path._debug_count = 0
     
@@ -70,7 +65,32 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
         
     return None
 
-def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_samples=None):
+def collect_all_labels(jsonl_paths: List[str]) -> List[str]:
+    """
+    データセット全体をスキャンして、全ての 'scenario_action' ラベルを収集する。
+    """
+    unique_labels = set()
+    logger.info("Scanning datasets to collect all unique labels...")
+    
+    for path in jsonl_paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, "r") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    s = data.get("scenario")
+                    a = data.get("action")
+                    if s and a:
+                        unique_labels.add(f"{s}_{a}")
+                except:
+                    pass
+    
+    label_list = list(unique_labels)
+    logger.info(f"Found {len(label_list)} unique labels.")
+    return label_list
+
+def build_items_from_slurp(jsonl_path, audio_dir, all_labels, add_text_only=True, max_samples=None):
     items = []
     if not os.path.exists(jsonl_path):
         print(f"[WARNING] JSONL file not found: {jsonl_path}")
@@ -85,36 +105,50 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
         data = json.loads(line)
         slurp_id = data.get("slurp_id", -1)
         
+        # --- Random Candidates Logic ---
+        current_label = f"{data.get('scenario')}_{data.get('action')}"
+        
+        # 自分以外のラベルから2つランダムに選ぶ (正解1 + ダミー2 = 3択)
+        candidates = []
+        if len(all_labels) > 2:
+            distractors = random.sample([l for l in all_labels if l != current_label], 2)
+            candidates = [current_label] + distractors
+            random.shuffle(candidates)
+        else:
+            candidates = [current_label] # ラベルが少なすぎる場合のフォールバック
+
+        # 候補リスト文字列を作成
+        cand_str = ", ".join([f"'{c}'" for c in candidates])
+        
+        # 動的システムプロンプトの作成
+        system_prompt = (
+            f"{BASE_PROMPT_TEXT}\n"
+            f"Candidates: [{cand_str}]\n"
+            f"Select the correct action from the candidates and output a JSON object with:\n"
+            f"- \"scenario\": the general intent category\n"
+            f"- \"action\": the specific action\n"
+            f"- \"entities\": a list of extracted entities\n"
+            f"Output only valid JSON, no extra text."
+        )
+
+        # --- Entity Processing ---
         raw_entities = data.get("entities", [])
         tokens = data.get("tokens", [])
-        
         processed_entities = []
         for e in raw_entities:
             filler = e.get("filler")
-            
-            # fillerがない、かつ token/span 情報がある場合のリカバー処理
             if not filler and "span" in e and tokens:
                 try:
                     span = e["span"]
-                    # spanがリストかつ空でないか確認
                     if isinstance(span, list) and len(span) > 0:
-                        # [start, end] 形式でも [idx] 形式でも対応できるよう、
-                        # リストの最初と最後を取得して範囲を決める
                         start_idx = span[0]
                         end_idx = span[-1]
-                        
-                        # Pythonのスライスは終了インデックスを含まないため +1
                         selected_tokens = tokens[start_idx : end_idx + 1]
-                        
-                        # トークンから単語を結合
                         filler = " ".join([t.get("surface", "") for t in selected_tokens])
                 except Exception as err:
                     pass
-
-            # それでも取れなかった場合の最終手段
             if filler is None:
-                filler = "" # 型エラーを防ぐため空文字にしておく
-
+                filler = ""
             processed_entities.append({
                 "type": e.get("type"), 
                 "filler": filler
@@ -134,16 +168,16 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
             items.append({
                 "slurp_id": slurp_id,
                 "file": None,
-                "audio_path": None, 
+                "audio_path": None,  # 【重要】明示的にNoneを入れる（元のスタイルを維持）
                 "transcript": transcript, 
-                "target": target_str
+                "target": target_str,
+                "system_prompt": system_prompt # 新しく追加
             })
         
         # Audio Item
         if data.get("recordings"):
             found_path = None
             found_filename = None
-            
             for rec in data["recordings"]:
                 filename = rec.get("file", "")
                 path = resolve_audio_path(audio_dir, filename)
@@ -156,9 +190,10 @@ def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_sample
                 items.append({
                     "slurp_id": slurp_id,
                     "file": found_filename,
-                    "audio_path": found_path, 
+                    "audio_path": found_path, # 【重要】明示的にパスを入れる
                     "transcript": transcript, 
-                    "target": target_str
+                    "target": target_str,
+                    "system_prompt": system_prompt # 新しく追加
                 })
     return items
 
@@ -171,7 +206,7 @@ class MixedDataset(Dataset):
         return {**self.items[idx], "original_idx": idx}
 
 # ==============================================================================
-# 2. Sampler
+# 2. Sampler (元のコードをそのまま維持)
 # ==============================================================================
 
 class DistributedHomogeneousBatchSampler(Sampler):
@@ -202,6 +237,7 @@ class DistributedHomogeneousBatchSampler(Sampler):
         self.num_replicas = num_replicas
         self.rank = rank
 
+        # 元のコード通り item["audio_path"] でアクセス（build_items_from_slurpで保証されているため安全）
         all_audio = [i for i, item in enumerate(dataset.items) if item["audio_path"] is not None]
         all_text = [i for i, item in enumerate(dataset.items) if item["audio_path"] is None]
 
@@ -280,7 +316,7 @@ class DistributedHomogeneousBatchSampler(Sampler):
         self.epoch = epoch
 
 # ==============================================================================
-# 3. Collator
+# 3. Collator (Dynamic Prompt対応)
 # ==============================================================================
 
 @dataclass
@@ -291,7 +327,7 @@ class SmartCollator:
     
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0: return {}
-        is_audio_batch = (batch[0].get("audio_path") is not None)
+        is_audio_batch = (batch[0]["audio_path"] is not None) # キーは必ずある前提
         if is_audio_batch:
             return self._collate_audio(batch)
         else:
@@ -300,19 +336,19 @@ class SmartCollator:
     def _collate_audio(self, batch):
         input_ids_list, labels_list, input_features_list, feature_mask_list = [], [], [], []
         sr = self.processor.feature_extractor.sampling_rate
-        
-        # 【修正点1】EOSトークンを取得
         eos_token = self.processor.tokenizer.eos_token
         if not eos_token:
-            eos_token = "<|endoftext|>" # 万が一取得できない場合のフォールバック
+            eos_token = "<|endoftext|>"
 
         for item in batch:
             if item["audio_path"] is None: continue 
             audio, _ = librosa.load(item["audio_path"], sr=sr)
-            user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
-            text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             
-            # 【修正点2】targetの後ろに eos_token を結合
+            # アイテムごとのプロンプトを使用
+            prompt_text = item.get("system_prompt", BASE_PROMPT_TEXT)
+            user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}]
+            
+            text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             full_text = text_input + item["target"] + eos_token
             
             inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
@@ -343,18 +379,18 @@ class SmartCollator:
 
     def _collate_text(self, batch):
         input_ids_list, labels_list = [], []
-        
-        # 【修正点1】EOSトークンを取得
         eos_token = self.processor.tokenizer.eos_token
         if not eos_token:
             eos_token = "<|endoftext|>"
 
         for item in batch:
             if item["audio_path"] is not None: continue
-            user_content = [{"type": "text", "text": f"{item['transcript']}\n{PROMPT}"}]
-            text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             
-            # 【修正点2】targetの後ろに eos_token を結合
+            # アイテムごとのプロンプトを使用
+            prompt_text = item.get("system_prompt", BASE_PROMPT_TEXT)
+            user_content = [{"type": "text", "text": f"{item['transcript']}\n{prompt_text}"}]
+            
+            text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             full_text = text_input + item["target"] + eos_token
             
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
@@ -374,7 +410,7 @@ class SmartCollator:
         }
 
 # ==============================================================================
-# 4. Trainer
+# 4. Trainer (元のコードをそのまま維持)
 # ==============================================================================
 
 class CustomTrainer(Trainer):
@@ -433,7 +469,10 @@ class SampleGenerationCallback(TrainerCallback):
                 target = item.get("target", "")
                 audio, _ = librosa.load(audio_path, sr=sr)
                 
-                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                # アイテムごとのプロンプトを使用
+                prompt_text = item.get("system_prompt", BASE_PROMPT_TEXT)
+                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}]
+                
                 text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
                 
                 inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
@@ -510,19 +549,21 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
         try:
             # 入力データの準備
             for item in batch_items:
-                audio_path = item.get("audio_path")
+                audio_path = item.get("audio_path") # キーはあるが念のためget推奨
                 transcript = item.get("transcript", "")
+                
+                # アイテムごとのプロンプトを使用
+                prompt_text = item.get("system_prompt", BASE_PROMPT_TEXT)
 
                 if audio_path:
                     has_audio = True
                     audio, _ = librosa.load(audio_path, sr=sr)
                     audios.append(audio)
-                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
-                    # チャットテンプレート適用
+                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}]
                     text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
                     texts.append(text_input)
                 else:
-                    user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
+                    user_content = [{"type": "text", "text": f"{transcript}\n{prompt_text}"}]
                     text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
                     texts.append(text_input)
 
@@ -533,7 +574,7 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                     audio=audios, 
                     sampling_rate=sr, 
                     return_tensors="pt", 
-                    padding=True # padding=Trueでバッチ化
+                    padding=True
                 )
             else:
                 inputs = processor(
@@ -569,7 +610,6 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                     if json_str: # 空文字チェック
                         parsed_obj = json.loads(json_str)
                 except json.JSONDecodeError:
-                    # JSONが壊れている場合はそのままerror扱い
                     pass
 
                 wer_score = calculate_wer(original_item.get("transcript", ""), raw_output)
@@ -591,7 +631,7 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
         except Exception as e:
             logger.error(f"Rank {rank} failed on batch index {i}: {e}")
             import traceback
-            traceback.print_exc() # 詳細なエラーログを表示
+            traceback.print_exc()
 
     # 3. Save Local Results (以下変更なし)
     temp_output_path = f"{output_path}.rank{rank}"
@@ -655,23 +695,26 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # --- Smoke Mode Adjustment for Training ---
-    # Training用のmax_samples設定
     if args.smoke:
         if rank == 0:
             logger.info("!!! SMOKE MODE ACTIVATED !!!")
-        
-        args.max_samples = 32 # 学習は極小で
+        args.max_samples = 32
         args.num_train_epochs = 3
         args.report_to = "none"
 
-    # --- Data Loading (Train/Eval) ---
     if args.eval_file is None:
         args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
     if args.test_file is None:
         args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
 
-    train_items = build_items_from_slurp(args.train_file, args.audio_dir, max_samples=args.max_samples)
-    eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, max_samples=args.max_samples // 2 if args.max_samples else None)
+    # === Step 1: ラベルリストの収集 ===
+    # 候補作成のために全ファイルをスキャンする
+    all_jsonl = [args.train_file, args.eval_file, args.test_file]
+    all_labels = collect_all_labels(all_jsonl)
+
+    # === Step 2: データセットの構築 (all_labelsを渡す) ===
+    train_items = build_items_from_slurp(args.train_file, args.audio_dir, all_labels, max_samples=args.max_samples)
+    eval_items = build_items_from_slurp(args.eval_file, args.audio_dir, all_labels, max_samples=args.max_samples // 2 if args.max_samples else None)
     
     if rank == 0:
         print(f"Train: {len(train_items)} | Eval: {len(eval_items)}")
@@ -679,7 +722,6 @@ def main():
     # --- Model & Processor ---
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
 
-    # 学習(Collator)でpad_token_idを使うため、ここで設定しておく必要があります
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
@@ -737,17 +779,17 @@ def main():
         dist.barrier()
 
     # --- Inference ---
-    # ここで Smokeモードの時は Testデータを10件に制限
-    
     test_max_samples = 500 if args.smoke else None
     
     if rank == 0 and args.smoke:
         logger.info(f"Loading only {test_max_samples} items for Test (Smoke Mode).")
 
+    # テストデータも同様に候補リスト付きで構築する
     test_items = build_items_from_slurp(
         args.test_file, 
         args.audio_dir, 
-        max_samples=test_max_samples, # Explicitly use 10 for smoke
+        all_labels, # ここでラベルリストを渡す
+        max_samples=test_max_samples, 
         add_text_only=False 
     )
     
@@ -761,7 +803,7 @@ def main():
         device=device,
         rank=rank,
         world_size=world_size,
-        batch_size=args.batch_size  # 引数からバッチサイズを渡す（あるいは固定値8など）
+        batch_size=args.batch_size
     )   
 
     if world_size > 1:
