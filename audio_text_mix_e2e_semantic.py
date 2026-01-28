@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Audio-Text Mix Training & Distributed Inference (Slurp Format)
-Output-Side Semantic Candidates Ablation (SBERT Enhanced & Robust)
+Output-Side Semantic Candidates Ablation (SBERT Enhanced & Fully Robust)
 """
 
 import argparse
@@ -29,7 +29,7 @@ from torch.utils.data import Dataset, Sampler, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.distributed as dist
 
-# --- 新しい依存関係 ---
+# --- SBERTのインポート ---
 try:
     from sentence_transformers import SentenceTransformer
     from sklearn.metrics.pairwise import cosine_similarity
@@ -83,12 +83,10 @@ def collect_all_labels(jsonl_paths: List[str]) -> List[str]:
     return list(unique_labels)
 
 def build_semantic_graph(all_labels: List[str]) -> Dict[str, List[str]]:
-    """
-    SBERTを用いて、ラベル間の「意味的類似度」を計算し、類似度が高い順にリスト化する。
-    """
-    logger.info("Building semantic similarity graph using SBERT...")
+    """SBERTを用いて類似ラベル（Hard Negatives）のグラフを構築"""
+    logger.info("Building semantic similarity graph...")
     graph = {}
-
+    
     cleaned_labels = [label.replace("_", " ") for label in all_labels]
 
     if HAS_SBERT:
@@ -141,7 +139,7 @@ def build_items_from_slurp(jsonl_path, audio_dir, all_labels, semantic_graph, ad
         
         current_label = f"{data.get('scenario')}_{data.get('action')}"
         
-        # --- Logic: Select Semantic Candidates ---
+        # --- Semantic Candidates Logic ---
         rng = random.Random(slurp_id)
         
         distractors = []
@@ -314,7 +312,6 @@ class SmartCollator:
     
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0: return {}
-        # Safe Check
         is_audio_batch = (batch[0].get("audio_path") is not None)
         if is_audio_batch: return self._collate_audio(batch)
         else: return self._collate_text(batch)
@@ -332,8 +329,8 @@ class SmartCollator:
             
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             
-            # Target contains "Candidates: ... Answer: ..."
-            full_text = text_input + item["target"] + eos_token
+            # 【修正】 .get("target", "") を使用
+            full_text = text_input + item.get("target", "") + eos_token
             
             inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
             prompt_inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
@@ -369,12 +366,14 @@ class SmartCollator:
             if item.get("audio_path") is not None: continue
             prompt_text = item.get("system_prompt", BASE_PROMPT_TEXT)
             
-            # 【修正点】ここで item.get("transcript", "") を使用する
+            # 【修正】 .get("transcript", "") を使用
             transcript = item.get("transcript", "")
             user_content = [{"type": "text", "text": f"{transcript}\n{prompt_text}"}]
             
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            full_text = text_input + item["target"] + eos_token
+            
+            # 【修正】 .get("target", "") を使用
+            full_text = text_input + item.get("target", "") + eos_token
             
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
             prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
@@ -441,7 +440,6 @@ class SampleGenerationCallback(TrainerCallback):
                 inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
                 inputs = {k: v.to(device) for k, v in inputs.items()}
                 
-                # Generate longer sequence for candidates
                 with torch.no_grad():
                     output_ids = self.model.generate(**inputs, max_new_tokens=256)
                 
@@ -450,7 +448,8 @@ class SampleGenerationCallback(TrainerCallback):
                 
                 logger.info(f"-" * 60)
                 logger.info(f"File:       {item.get('file', 'Unknown')}")
-                logger.info(f"Target:     {item['target']}")
+                # 【修正】 .get("target", "") を使用
+                logger.info(f"Target:     {item.get('target', 'N/A')}")
                 logger.info(f"Prediction: {generated_text}")
             except Exception as e:
                 logger.error(f"Sample generation failed: {e}")
@@ -485,7 +484,8 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
 def run_distributed_inference(model, processor, items, output_path, device, rank, world_size, batch_size=1):
     model.eval()
     my_items = items[rank::world_size]
-    my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x["slurp_id"]))
+    # 【修正】 ソート時も .get() を使用
+    my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x.get("slurp_id", 0)))
     
     local_results = []
     processor.tokenizer.padding_side = "left"
@@ -539,13 +539,14 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                     "scenario": parsed_obj.get("scenario", ""),
                     "action": parsed_obj.get("action", ""),
                     "entities": parsed_obj.get("entities", []),
-                    "file": original_item["file"],
-                    "slurp_id": original_item["slurp_id"],
+                    "file": original_item.get("file"),
+                    "slurp_id": original_item.get("slurp_id"),
                     "wer": wer_score,
                     "transcript": original_item.get("transcript", ""),
                     "raw_output": raw_output,
                     "extracted_json": json_str,
-                    "target": original_item["target"]
+                    # 【修正】 .get("target", "") を使用
+                    "target": original_item.get("target", "")
                 }
                 local_results.append(result_entry)
         except Exception as e: logger.error(f"Rank {rank} failed on batch {i}: {e}")
