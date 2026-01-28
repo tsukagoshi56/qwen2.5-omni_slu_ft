@@ -301,13 +301,19 @@ class SmartCollator:
         input_ids_list, labels_list, input_features_list, feature_mask_list = [], [], [], []
         sr = self.processor.feature_extractor.sampling_rate
         
+        # 【修正点1】EOSトークンを取得
+        eos_token = self.processor.tokenizer.eos_token
+        if not eos_token:
+            eos_token = "<|endoftext|>" # 万が一取得できない場合のフォールバック
+
         for item in batch:
             if item["audio_path"] is None: continue 
             audio, _ = librosa.load(item["audio_path"], sr=sr)
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            full_text = text_input + item["target"]
             
+            # 【修正点2】targetの後ろに eos_token を結合
+            full_text = text_input + item["target"] + eos_token
             
             inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
             prompt_inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
@@ -337,11 +343,19 @@ class SmartCollator:
 
     def _collate_text(self, batch):
         input_ids_list, labels_list = [], []
+        
+        # 【修正点1】EOSトークンを取得
+        eos_token = self.processor.tokenizer.eos_token
+        if not eos_token:
+            eos_token = "<|endoftext|>"
+
         for item in batch:
             if item["audio_path"] is not None: continue
             user_content = [{"type": "text", "text": f"{item['transcript']}\n{PROMPT}"}]
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-            full_text = text_input + item["target"]
+            
+            # 【修正点2】targetの後ろに eos_token を結合
+            full_text = text_input + item["target"] + eos_token
             
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
             prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
