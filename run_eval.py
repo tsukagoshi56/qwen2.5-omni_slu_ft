@@ -469,33 +469,25 @@ def main():
             except Exception as e:
                 logger.warning(f"Failed to load audio for sample {i}: {e}")
 
-        # Build message
-        user_content = []
+        # Build text WITHOUT chat template (matches SampleGenerationCallback in training)
         if audio is not None:
-            audio_ref = item.get("audio_ref") or (audio_input if isinstance(audio_input, str) else "audio")
-            user_content.append({"type": "audio", "audio": audio_ref})
-        user_content.append({"type": "text", "text": prompt_text})
+            text = f"<|AUDIO|>\n{prompt_text}"
+        else:
+            text = f"{transcript}\n{prompt_text}" if transcript else prompt_text
         
-        messages = [{"role": "user", "content": user_content}]
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        
-        # Prepare inputs
+        # Prepare inputs (matches SampleGenerationCallback logic)
         if audio is not None:
             audio_np = audio.numpy() if isinstance(audio, torch.Tensor) else audio
             if audio_np.ndim > 1:
                 audio_np = audio_np.flatten() # Ensure 1D
-                
-            audio_features = processor.feature_extractor(
-                audio_np,
-                sampling_rate=16000,
+            
+            # Use processor directly like in training's SampleGenerationCallback
+            inputs = processor(
+                text=text,
+                audios=[audio_np],
                 return_tensors="pt",
-                padding="max_length",
-                return_attention_mask=True,
+                padding=True,
             )
-            text_tokens = processor.tokenizer(text, return_tensors="pt", padding=True)
-            inputs = {**text_tokens, "input_features": audio_features["input_features"]}
-            if "attention_mask" in audio_features:
-                inputs["feature_attention_mask"] = audio_features["attention_mask"]
         else:
             inputs = processor.tokenizer(text, return_tensors="pt", padding=True)
             
