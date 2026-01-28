@@ -15,7 +15,6 @@ DEFAULT_PRED_FILE = "prediction.jsonl"
 DEFAULT_TEST_FILE = "test.jsonl"
 OUTPUT_DIR = "Experiment_2"
 
-# 論文用のクリアなフォント設定
 plt.rcParams['font.family'] = 'DejaVu Sans'
 
 # ==========================================
@@ -57,7 +56,7 @@ def load_data(pred_path, test_path):
     return pd.DataFrame(data)
 
 # ==========================================
-# 2. Network Visualization Logic (Enhanced v2)
+# 2. Network Visualization Logic (Fix Text Color)
 # ==========================================
 def visualize_error_network(df, target_type='scenario'):
     gt_col = f'{target_type}_gt'
@@ -73,10 +72,7 @@ def visualize_error_network(df, target_type='scenario'):
     G = nx.DiGraph()
     pair_counts = Counter(zip(error_df[gt_col], error_df[pred_col]))
     
-    # 【改善3: 矢印を減らす】
-    # 閾値を動的に設定 (例: 全エラーの 0.5% 以上発生したペアのみ表示)
-    # これでノイズが消え、主要なフローだけが残る
-    # 少なくとも5回以上は発生していないと表示しない
+    # 閾値設定 (全エラーの 0.5% 以上発生したペアのみ表示)
     threshold = max(5, int(total_errors * 0.005))
     print(f"Edge weight threshold: {threshold} (Pairs with fewer counts are hidden)")
     
@@ -89,41 +85,31 @@ def visualize_error_network(df, target_type='scenario'):
         G.add_edge(src, dst, weight=weight)
         
     # --- ノード設定 ---
-    # 入次数（間違えられた回数）を取得
     in_degrees = dict(G.in_degree(weight='weight'))
     max_in = max(in_degrees.values()) if in_degrees else 1
     
     node_colors = []
     node_sizes = []
-    labels = {}
     
     # ブラックホール認定ライン
     hub_threshold = max_in * 0.2
     
     for node in G.nodes():
         score = in_degrees.get(node, 0)
-        labels[node] = node
-        
-        # 【改善1: サイズ差を強調】
-        # 線形(score/max_in)ではなく、累乗(1.5乗)を使うことで、
-        # スコアが大きいノードが加速度的に巨大になるようにする
+        # サイズ差を累乗で強調
         size_factor = (score / max_in)**1.5
         
         if score > hub_threshold:
-            # Hub (捕食者) -> 赤、巨大
-            node_colors.append('#e74c3c')
+            node_colors.append('#e74c3c') # Hub (赤)
             node_sizes.append(5000 + size_factor * 10000)
         else:
-            # Leaf (被害者) -> 青、中くらい
-            node_colors.append('#3498db')
+            node_colors.append('#3498db') # Leaf (青)
             node_sizes.append(800) 
 
     # --- レイアウト計算 ---
-    # kの値が大きいほどノード間の反発力が強くなり、図が広がる
     pos = nx.spring_layout(G, k=2.5, iterations=100, seed=42, weight='weight')
     
     # --- 描画 ---
-    # 【改善4: 余白削減のため、描画領域を正方形に近くする】
     plt.figure(figsize=(12, 12), facecolor='white')
     ax = plt.gca()
     
@@ -132,54 +118,46 @@ def visualize_error_network(df, target_type='scenario'):
                            node_color=node_colors, 
                            node_size=node_sizes, 
                            alpha=0.9, 
-                           edgecolors='#ecf0f1', # 薄い枠線
+                           edgecolors='#ecf0f1',
                            linewidths=2)
     
     # 2. エッジ（矢印）描画
     edges = G.edges(data=True)
     weights = [d['weight'] for u, v, d in edges]
     max_weight = max(weights) if weights else 1
-    # 太さも累乗で強調
     widths = [2.0 + (w / max_weight)**1.5 * 12 for w in weights]
     
     nx.draw_networkx_edges(G, pos, 
                            width=widths, 
-                           edge_color='#95a5a6', # 落ち着いたグレー
-                           arrowstyle='-|>', # 塗りつぶし矢印
-                           arrowsize=30, # 矢印の頭を大きく
-                           connectionstyle="arc3,rad=0.15", # カーブ
+                           edge_color='#95a5a6',
+                           arrowstyle='-|>',
+                           arrowsize=30,
+                           connectionstyle="arc3,rad=0.15",
                            alpha=0.6)
 
-    # 3. ラベル描画 【改善2: 文字を大きく、黒く、縁取り】
-    # 白い縁取り効果の定義
-    path_effect = [pe.withStroke(linewidth=4, foreground="white")]
+    # 3. ラベル描画 【修正: 縁取りを細くして黒文字を見せる】
+    # 白い縁取り効果の定義 (太さを4 -> 2.5に変更)
+    path_effect = [pe.withStroke(linewidth=2.5, foreground="white")]
     
     for node, (x, y) in pos.items():
         score = in_degrees.get(node, 0)
-        # Hubは特に大きく強調
         if score > hub_threshold:
-            fontsize = 18
-            fontweight = 'bold'
-            zorder = 20
+            fontsize = 18; fontweight = 'bold'; zorder = 20
         else:
-            fontsize = 14
-            fontweight = 'normal'
-            zorder = 15
+            fontsize = 14; fontweight = 'normal'; zorder = 15
             
         plt.text(x, y, node, 
                  fontsize=fontsize, 
                  fontweight=fontweight,
-                 color='black', # 黒文字
+                 color='black', # ここで黒を指定
                  ha='center', va='center',
-                 path_effects=path_effect, # 縁取り適用
+                 path_effects=path_effect, # 細くした縁取りを適用
                  zorder=zorder)
 
     # タイトルと調整
     plt.title(f"Error Concentration Map: {target_type.upper()}\n(Nodes sized by mistake frequency. Major flows shown.)", 
               fontsize=16, color='#2c3e50')
     plt.axis('off')
-    
-    # 【改善4: 余白を極限まで減らす】
     plt.tight_layout(pad=0.1)
     
     # 保存
