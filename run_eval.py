@@ -231,34 +231,41 @@ def main():
             raise
     else:
         # Standard loading logic
-        # Priority: Load processor from Base Model (config.json) to ensure correct chat template
-        # Checkpoint directories might satisfy AutoProcessor but lack full special_tokens_map or chat_template
-        base_model_path_from_config = None
-        try:
-            config_path = os.path.join(args.model_path, "config.json")
-            if os.path.exists(config_path):
-                with open(config_path, "r") as f:
-                    config_dict = json.load(f)
-                base_model_path_from_config = config_dict.get("_name_or_path")
-        except Exception:
-            pass
-
         processor = None
-        # If base model is found, try loading processor from THERE first
-        if base_model_path_from_config and base_model_path_from_config != args.model_path:
+        processor_load_paths = [args.model_path]
+        
+        # If path looks like a checkpoint, try parent directory first
+        if "checkpoint-" in os.path.basename(os.path.normpath(args.model_path)):
+            parent_dir = os.path.dirname(os.path.normpath(args.model_path))
+            processor_load_paths.insert(0, parent_dir)
+            logger.info(f"Detected checkpoint path. Will try parent directory first: {parent_dir}")
+        
+        for load_path in processor_load_paths:
             try:
-                logger.info(f"Loading processor from Base Model: {base_model_path_from_config}")
-                processor = AutoProcessor.from_pretrained(base_model_path_from_config, trust_remote_code=True, fix_mistral_regex=True)
+                logger.info(f"Attempting to load processor from: {load_path}")
+                processor = AutoProcessor.from_pretrained(load_path, trust_remote_code=True, fix_mistral_regex=True)
+                logger.info(f"Successfully loaded processor from: {load_path}")
+                break
             except Exception as e:
-                logger.warning(f"Failed to load processor from base model: {e}")
-
-        # Fallback to checkpoint path if base model failed or wasn't found
+                logger.warning(f"Failed to load processor from {load_path}: {e}")
+                continue
+        
+        # Fallback: Try reading _name_or_path from config.json to find base model
         if processor is None:
-             logger.info(f"Loading processor from Checkpoint: {args.model_path}")
-             try:
-                processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
-             except Exception as e:
-                 raise RuntimeError(f"Failed to load processor from {args.model_path}: {e}")
+            try:
+                config_path = os.path.join(args.model_path, "config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        config_dict = json.load(f)
+                    base_model = config_dict.get("_name_or_path")
+                    if base_model and base_model != args.model_path:
+                        logger.info(f"Fallback: Loading processor from base model in config.json: {base_model}")
+                        processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True, fix_mistral_regex=True)
+            except Exception as e2:
+                logger.warning(f"Fallback (config.json) also failed: {e2}")
+        
+        if processor is None:
+            raise RuntimeError(f"Could not load processor from any path. Tried: {processor_load_paths}")
         try:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 args.model_path,
@@ -387,11 +394,11 @@ def main():
     # Inference Loop
     model.eval()
     
-    # Ensure padding side matches training (right padding)
-    if processor.tokenizer.padding_side != "right":
+    # Set padding side to left for batch generation
+    if processor.tokenizer.padding_side != "left":
         if local_rank <= 0:
-            logger.info("Setting tokenizer padding_side to 'right' to match training")
-        processor.tokenizer.padding_side = "right"
+            logger.info("Setting tokenizer padding_side to 'left' for batch inference")
+        processor.tokenizer.padding_side = "left"
     
     # Remove EvalCollator and DataLoader
     # We will process items one by one to ensure exact match with training logic and avoid batching issues
@@ -453,13 +460,12 @@ def main():
         messages = [{"role": "user", "content": user_content}]
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
-        # Prepare inputs (Reverted to separate calls to match training script exactly)
+        # Prepare inputs
         if audio is not None:
             audio_np = audio.numpy() if isinstance(audio, torch.Tensor) else audio
             if audio_np.ndim > 1:
-                audio_np = audio_np.flatten()
-            
-            # 1. Extract audio features (match training: max_length padding)
+                audio_np = audio_np.flatten() # Ensure 1D
+                
             audio_features = processor.feature_extractor(
                 audio_np,
                 sampling_rate=16000,
@@ -467,18 +473,8 @@ def main():
                 padding="max_length",
                 return_attention_mask=True,
             )
-            
-            # 2. Tokenize text (match training)
-            text_tokens = processor.tokenizer(
-                text,
-                return_tensors="pt",
-                padding=True,
-            )
-            
-            inputs = {
-                **text_tokens,
-                "input_features": audio_features["input_features"],
-            }
+            text_tokens = processor.tokenizer(text, return_tensors="pt", padding=True)
+            inputs = {**text_tokens, "input_features": audio_features["input_features"]}
             if "attention_mask" in audio_features:
                 inputs["feature_attention_mask"] = audio_features["attention_mask"]
         else:
@@ -487,12 +483,14 @@ def main():
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         input_len = inputs["input_ids"].size(1)
         
-        # Generate (Match training script: Greedy Search, 128 tokens)
+        # Generate
         with torch.no_grad():
             generated_ids = model.generate(
                 **inputs,
-                max_new_tokens=128,
-                do_sample=False
+                max_new_tokens=args.max_new_tokens,
+                num_beams=args.num_beams,
+                do_sample=False,
+                repetition_penalty=args.repetition_penalty
             )
             
         generated_ids_new = generated_ids[:, input_len:]
