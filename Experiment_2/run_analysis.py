@@ -133,7 +133,7 @@ class AnalysisCollator:
     def __call__(self, batch):
         batch_items = batch
         batch_texts = []
-        features = []
+        batch_audios = []
         
         for item in batch:
             transcript = item.get("transcript", "")
@@ -153,10 +153,8 @@ class AnalysisCollator:
                 else:
                     prompt_text = PROMPT
             
-            # Build content
-            user_content = []
+            # Load audio if needed
             audio = None
-            
             if not self.add_text_only:
                 audio_input = item.get("audio") or item.get("audio_path")
                 if audio_input:
@@ -170,86 +168,38 @@ class AnalysisCollator:
                             audio_ref = audio_input
                         if not audio_ref:
                             audio_ref = "audio"
-                        user_content.append({"type": "audio", "audio": audio_ref})
+                        # We do NOT add to user_content here per new instruction
                     except Exception as e:
                         logger.warning(f"Failed to load audio for {item}: {e}")
             
-            user_content.append({"type": "text", "text": prompt_text})
+            # Build content for chat template
+            # Do NOT create audio placeholder.
+            user_content = [{"type": "text", "text": prompt_text}]
             messages = [{"role": "user", "content": user_content}]
             
             # Apply chat template
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             batch_texts.append(text)
             
-            # Process inputs
             if audio is not None:
-                if isinstance(audio, torch.Tensor):
-                    audio_np = audio.numpy()
-                else:
-                    audio_np = audio
-                
-                audio_features = self.processor.feature_extractor(
-                    audio_np,
-                    sampling_rate=16000,
-                    return_tensors="pt",
-                    padding="max_length",
-                    return_attention_mask=True,
-                )
-                
-                prompt_tokens = self.processor.tokenizer(
-                     text,
-                     return_tensors="pt",
-                     padding=False,
-                     truncation=False
-                )
-                
-                prompt_inputs = {**prompt_tokens, "input_features": audio_features["input_features"]}
-                if "attention_mask" in audio_features:
-                    prompt_inputs["feature_attention_mask"] = audio_features["attention_mask"]
-            else:
-                prompt_inputs = self.processor.tokenizer(
-                    text,
-                    return_tensors="pt",
-                    padding=False,
-                    truncation=False 
-                )
-            
-            # Squeeze logic
-            feature = {k: v.squeeze(0) if v.ndim > 1 and v.shape[0] == 1 else v.squeeze(0) for k, v in prompt_inputs.items()}
-            # Ensure 1D input_ids/attention_mask after squeeze
-            if feature["input_ids"].ndim == 0:
-                 feature["input_ids"] = feature["input_ids"].unsqueeze(0)
-            if "attention_mask" in feature and feature["attention_mask"].ndim == 0:
-                 feature["attention_mask"] = feature["attention_mask"].unsqueeze(0)
-
-            features.append(feature)
-
-        # Stacking logic
-        text_features = [
-            {k: v for k, v in f.items() if k in ["input_ids", "attention_mask"]}
-            for f in features
-        ]
+                batch_audios.append(audio)
         
-        if self.processor.tokenizer.padding_side != "left":
-            self.processor.tokenizer.padding_side = "left"
+        # Process inputs using processor directly
+        if batch_audios:
+            inputs = self.processor(
+                text=batch_texts,
+                audios=batch_audios,
+                return_tensors="pt",
+                padding=True,
+            )
+        else:
+            inputs = self.processor(
+                text=batch_texts,
+                return_tensors="pt",
+                padding=True,
+            )
             
-        batch_out = self.processor.tokenizer.pad(text_features, padding=True, return_tensors="pt")
-        
-        # Stack audio
-        audio_feature_list = [(i, f) for i, f in enumerate(features) if "input_features" in f]
-        if audio_feature_list:
-            try:
-                stacked_features = torch.stack([f["input_features"] for _, f in audio_feature_list])
-                batch_out["input_features"] = stacked_features
-                
-                if "feature_attention_mask" in audio_feature_list[0][1]:
-                    stacked_mask = torch.stack([f["feature_attention_mask"] for _, f in audio_feature_list])
-                    batch_out["feature_attention_mask"] = stacked_mask
-            except Exception as e:
-                logger.error(f"Stacking audio features failed: {e}")
-                raise e
-                
-        return batch_out, batch_items, batch_texts
+        return inputs, batch_items, batch_texts
 
 
 def run_analysis(args):
