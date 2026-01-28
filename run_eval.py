@@ -394,11 +394,11 @@ def main():
     # Inference Loop
     model.eval()
     
-    # Set padding side to left for batch generation
-    if processor.tokenizer.padding_side != "left":
+    # Set padding side to right to match training configuration (critical for RoPE models)
+    if processor.tokenizer.padding_side != "right":
         if local_rank <= 0:
-            logger.info("Setting tokenizer padding_side to 'left' for batch inference")
-        processor.tokenizer.padding_side = "left"
+            logger.info("Setting tokenizer padding_side to 'right' to match training")
+        processor.tokenizer.padding_side = "right"
     
     # Remove EvalCollator and DataLoader
     # We will process items one by one to ensure exact match with training logic and avoid batching issues
