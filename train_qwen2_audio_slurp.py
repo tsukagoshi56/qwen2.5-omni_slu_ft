@@ -662,6 +662,24 @@ class Qwen2AudioCollator:
                 "truncation": True,
                 "max_length": self.config.max_length,
             }
+            
+            # DEBUG: 最初のアイテムでprocessorの情報を出力
+            if not hasattr(self, '_debug_printed'):
+                self._debug_printed = True
+                print(f"DEBUG: processor type = {type(self.processor)}", flush=True)
+                print(f"DEBUG: processor class name = {self.processor.__class__.__name__}", flush=True)
+                try:
+                    sig = inspect.signature(self.processor.__call__)
+                    print(f"DEBUG: processor.__call__ signature = {sig}", flush=True)
+                    print(f"DEBUG: processor.__call__ params = {list(sig.parameters.keys())}", flush=True)
+                except Exception as e:
+                    print(f"DEBUG: Could not get signature: {e}", flush=True)
+                # feature_extractor があるか確認
+                if hasattr(self.processor, 'feature_extractor'):
+                    print(f"DEBUG: processor has feature_extractor = {type(self.processor.feature_extractor)}", flush=True)
+                else:
+                    print(f"DEBUG: processor does NOT have feature_extractor", flush=True)
+            
             if audio is not None:
                 try:
                     prompt_inputs = self.processor(text=prompt_text, audios=[audio], **call_kwargs)
