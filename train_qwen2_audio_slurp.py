@@ -1,5 +1,4 @@
 import argparse
-import functools
 import inspect
 import json
 import os
@@ -37,8 +36,7 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _load_audio_impl(path: str, target_sr: Optional[int]) -> torch.Tensor:
-    """Internal audio loading implementation."""
+def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
     try:
         import soundfile as sf
 
@@ -72,33 +70,6 @@ def _load_audio_impl(path: str, target_sr: Optional[int]) -> torch.Tensor:
                     "Resample required but torchaudio/librosa not available."
                 ) from exc
     return audio
-
-
-# Performance: LRU cache for audio loading (caches up to 5000 files)
-@functools.lru_cache(maxsize=5000)
-def _load_audio_cached(path: str, target_sr: Optional[int]) -> bytes:
-    """Cached audio loading - stores as bytes for hashability."""
-    audio = _load_audio_impl(path, target_sr)
-    # Convert to bytes for caching (tensors aren't hashable)
-    return audio.numpy().tobytes(), audio.shape, audio.dtype
-
-
-def load_audio(path: str, target_sr: Optional[int]) -> torch.Tensor:
-    """Load audio with optional caching."""
-    # Check if caching is enabled via environment variable
-    use_cache = os.environ.get("AUDIO_CACHE", "1") == "1"
-    
-    if use_cache and isinstance(path, str) and os.path.isfile(path):
-        try:
-            audio_bytes, shape, dtype = _load_audio_cached(path, target_sr)
-            import numpy as np
-            audio_np = np.frombuffer(audio_bytes, dtype=np.float32).reshape(shape)
-            return torch.tensor(audio_np, dtype=torch.float32)
-        except Exception:
-            # Fall back to direct loading if caching fails
-            pass
-    
-    return _load_audio_impl(path, target_sr)
 
 
 def load_audio_input(
