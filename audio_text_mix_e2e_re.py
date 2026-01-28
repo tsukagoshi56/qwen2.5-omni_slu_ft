@@ -623,7 +623,7 @@ def main():
     # --- Inference ---
     # ここで Smokeモードの時は Testデータを10件に制限
     
-    test_max_samples = 1000 if args.smoke else None
+    test_max_samples = 500 if args.smoke else None
     
     if rank == 0 and args.smoke:
         logger.info(f"Loading only {test_max_samples} items for Test (Smoke Mode).")
