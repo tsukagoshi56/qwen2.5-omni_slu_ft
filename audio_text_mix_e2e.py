@@ -470,8 +470,8 @@ def evaluate_model(model, processor, items, device, output_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiments/slurp/dataset/slurp/train.jsonl")
-    parser.add_argument("--eval_file", type=str, default=None)
-    parser.add_argument("--test_file", type=str, default=None)
+    parser.add_argument("--eval_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiments/slurp/dataset/slurp/devel.jsonl")
+    parser.add_argument("--test_file", type=str, default="/lustre/home/71200138/INTERSPEECH/experiments/slurp/dataset/slurp/test.jsonl")
     parser.add_argument("--audio_dir", type=str, default="/lustre/home/71200138/INTERSPEECH/experiments/slurp/audio/slurp_real")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
@@ -488,11 +488,6 @@ def main():
         dist.init_process_group(backend="nccl")
         
     device = torch.device(f"cuda:{local_rank}") if local_rank != -1 else "cuda"
-
-    if args.eval_file is None:
-        args.eval_file = args.train_file.replace("train.jsonl", "devel.jsonl")
-    if args.test_file is None:
-        args.test_file = args.train_file.replace("train.jsonl", "test.jsonl")
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     model = MODEL_CLS.from_pretrained(
