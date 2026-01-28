@@ -59,14 +59,26 @@ Output only valid JSON, no extra text."""
 # ==============================================================================
 
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
+    """
+    Resolve audio file path from various possible locations.
+    audio_root is typically /lustre/home/71200138/INTERSPEECH/experiment1/slurp/audio/slurp_real
+    filename is like "audio-1497872916-headset.flac"
+    """
     candidates = [
-        os.path.join(audio_root, filename),
-        os.path.join(audio_root, "slurp_real", filename),
-        os.path.join("slurp", "audio", "slurp_real", filename),
+        os.path.join(audio_root, filename),  # Direct: /lustre/.../slurp_real/audio-xxx.flac
+        os.path.join(os.path.dirname(audio_root), filename),  # Parent: /lustre/.../audio/audio-xxx.flac
     ]
+    
     for path in candidates:
         if os.path.exists(path):
             return path
+    
+    # Log first missing file for debugging
+    if not hasattr(resolve_audio_path, '_logged_missing'):
+        resolve_audio_path._logged_missing = True
+        logger.warning(f"Could not find audio file: {filename}")
+        logger.warning(f"Searched in: {candidates}")
+    
     return None
 
 def build_items_from_slurp(jsonl_path, audio_dir, add_text_only=True, max_samples=None):
