@@ -1280,8 +1280,6 @@ def main() -> None:
     except ImportError:
         base_config = model.config
     
-    # Critical: Sync vocab_size in config before saving
-    if hasattr(base_config, "vocab_size"):
     # Critical: Sync vocab_size in config before saving to match actual embedding matrix size
     if hasattr(base_config, "vocab_size"):
         # Attempt to get the actual embedding size from the model
