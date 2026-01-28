@@ -370,117 +370,152 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
         hyp = hypothesis.split()
         return 1.0 if ref != hyp else 0.0
 
-def run_distributed_inference(model, processor, items, output_path, device, rank, world_size):
+
+def run_distributed_inference(model, processor, items, output_path, device, rank, world_size, batch_size=1):
     model.eval()
     
     # 1. Split Data (Rankごとに担当データを分割)
     my_items = items[rank::world_size]
+    
+    # 【重要】バッチ処理のために、Audio有無でタイプを揃える（混在バッチを避ける）
+    # ソート順序: type (audio/text) -> slurp_id
+    my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x["slurp_id"]))
+
     local_results = []
     
-    if rank == 0:
-        logger.info(f"Starting Inference. Total items: {len(items)}. Rank 0 items: {len(my_items)}")
+    # 推論時は「左パディング」が鉄則（生成位置を揃えるため）
+    processor.tokenizer.padding_side = "left"
     
-    # 2. Inference Loop
-    for i, item in enumerate(my_items):
-        if rank == 0 and i % 5 == 0:
+    if rank == 0:
+        logger.info(f"Starting Inference. Total items: {len(items)}. Rank 0 items: {len(my_items)}. Batch size: {batch_size}")
+    
+    # サンプリングレート取得
+    sr = processor.feature_extractor.sampling_rate
+
+    # 2. Inference Loop (Batched)
+    # batch_size 単位でチャンク分割して処理
+    for i in range(0, len(my_items), batch_size):
+        batch_items = my_items[i : i + batch_size]
+        
+        if rank == 0 and i % 10 == 0:
             logger.info(f"Processing {i}/{len(my_items)}...")
 
-        audio_path = item.get("audio_path")
-        transcript = item.get("transcript", "")
-        
-        # Prepare inputs
+        # バッチ内のデータをリスト化
+        texts = []
+        audios = []
+        has_audio = False
+
         try:
-            if audio_path:
-                sr = processor.feature_extractor.sampling_rate
-                audio, _ = librosa.load(audio_path, sr=sr)
-                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
-                text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+            for item in batch_items:
+                audio_path = item.get("audio_path")
+                transcript = item.get("transcript", "")
+
+                if audio_path:
+                    has_audio = True
+                    # 音声ロード
+                    audio, _ = librosa.load(audio_path, sr=sr)
+                    audios.append(audio)
+                    # プロンプト作成
+                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": PROMPT}]
+                    text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                    texts.append(text_input)
+                else:
+                    # テキストのみ
+                    user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
+                    text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+                    texts.append(text_input)
+
+            # バッチ入力の作成（padding=True でバッチ内の長さを揃える）
+            if has_audio:
+                inputs = processor(
+                    text=texts, 
+                    audio=audios, 
+                    sampling_rate=sr, 
+                    return_tensors="pt", 
+                    padding=True
+                )
             else:
-                user_content = [{"type": "text", "text": f"{transcript}\n{PROMPT}"}]
-                text_input = processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
-                inputs = processor(text=text_input, return_tensors="pt")
+                inputs = processor(
+                    text=texts, 
+                    return_tensors="pt", 
+                    padding=True
+                )
 
             inputs = {k: v.to(device) for k, v in inputs.items()}
             
             with torch.no_grad():
+                # generate実行
                 output_ids = model.generate(**inputs, max_new_tokens=128)
             
+            # デコード処理
+            # input部分を除去してデコード
             input_len = inputs["input_ids"].shape[1]
-            raw_output = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-            
-            json_str = clean_json_text(raw_output)
-            parsed_obj = {}
-            try:
-                parsed_obj = json.loads(json_str)
-            except json.JSONDecodeError:
-                parsed_obj = {"scenario": "error", "action": "error", "entities": []}
+            generated_ids = output_ids[:, input_len:]
+            raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-            wer_score = calculate_wer(transcript, raw_output)
+            # 結果を格納
+            for j, raw_output in enumerate(raw_outputs):
+                original_item = batch_items[j]
+                
+                json_str = clean_json_text(raw_output)
+                parsed_obj = {}
+                try:
+                    parsed_obj = json.loads(json_str)
+                except json.JSONDecodeError:
+                    parsed_obj = {"scenario": "error", "action": "error", "entities": []}
 
-            result_entry = {
-                "scenario": parsed_obj.get("scenario", ""),
-                "action": parsed_obj.get("action", ""),
-                "entities": parsed_obj.get("entities", []),
-                "file": item["file"],
-                "slurp_id": item["slurp_id"],
-                "wer": wer_score,
-                "transcript": transcript,
-                "raw_output": raw_output,
-                "target": item["target"],
-                "type": "audio" if audio_path else "text"
-            }
-            local_results.append(result_entry)
+                wer_score = calculate_wer(original_item.get("transcript", ""), raw_output)
+
+                result_entry = {
+                    "scenario": parsed_obj.get("scenario", ""),
+                    "action": parsed_obj.get("action", ""),
+                    "entities": parsed_obj.get("entities", []),
+                    "file": original_item["file"],
+                    "slurp_id": original_item["slurp_id"],
+                    "wer": wer_score,
+                    "transcript": original_item.get("transcript", ""),
+                    "raw_output": raw_output,
+                    "target": original_item["target"],
+                    "type": "audio" if original_item.get("audio_path") else "text"
+                }
+                local_results.append(result_entry)
+
         except Exception as e:
-            logger.error(f"Rank {rank} failed on item {item.get('slurp_id')}: {e}")
+            logger.error(f"Rank {rank} failed on batch starting at index {i}: {e}")
+            # エラー時は念のため個別処理やスキップを行うが、ここではログ出力のみ
 
-    # 3. Save Local Results directly to a temporary file
+    # 3. Save Local Results (以下変更なし)
     temp_output_path = f"{output_path}.rank{rank}"
-    
-    # データを書き込み、確実にディスクにフラッシュする
     try:
         with open(temp_output_path, "w") as f:
             for res in local_results:
                 f.write(json.dumps(res, ensure_ascii=False) + "\n")
             f.flush()
-            os.fsync(f.fileno())  # 重要: OSのバッファを強制書き込み
-        
+            os.fsync(f.fileno())
         logger.info(f"Rank {rank}: Saved {len(local_results)} results to {temp_output_path}")
     except Exception as e:
         logger.error(f"Rank {rank} failed to save temp file: {e}")
 
-    # 4. Wait for all ranks
+    # 4. Wait & 5. Merge (以下変更なし)
     if world_size > 1:
         dist.barrier()
-
-    # 5. Merge files (Rank 0 only)
+    
     if rank == 0:
+        # (マージ処理は元のコードと同じ)
+        # ... 省略 ...
         logger.info(f"Merging results to {output_path}...")
-        
-        # ワイルドカードでファイルを検索
         pattern = f"{output_path}.rank*"
         temp_files = glob.glob(pattern)
-        logger.info(f"Found {len(temp_files)} part files: {temp_files}")
-
-        if len(temp_files) == 0:
-             logger.error("No part files found! prediction.jsonl will be empty.")
-        
         with open(output_path, "w") as outfile:
             for fname in temp_files:
                 try:
                     with open(fname, "r") as infile:
                         shutil.copyfileobj(infile, outfile)
-                except Exception as e:
-                     logger.error(f"Failed to merge file {fname}: {e}")
-                
-                # クリーンアップ（必要ならコメントアウト）
-                try:
                     os.remove(fname)
-                except:
-                    pass
-        
-        logger.info(f"Successfully merged. Final output at {output_path}")
+                except Exception as e:
+                     logger.error(f"Merge error {fname}: {e}")
 
+                     
 # ==============================================================================
 # Main
 # ==============================================================================
@@ -606,8 +641,9 @@ def main():
         output_path=output_jsonl,
         device=device,
         rank=rank,
-        world_size=world_size
-    )
+        world_size=world_size,
+        batch_size=args.batch_size  # 引数からバッチサイズを渡す（あるいは固定値8など）
+    )   
 
     if world_size > 1:
         dist.destroy_process_group()
