@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Audio-Text Mix Training & Distributed Inference (Slurp Format)
-Output-Side Semantic Candidates Ablation (SBERT Enhanced)
+Output-Side Semantic Candidates Ablation (SBERT Enhanced & Robust)
 """
 
 import argparse
@@ -89,42 +89,28 @@ def build_semantic_graph(all_labels: List[str]) -> Dict[str, List[str]]:
     logger.info("Building semantic similarity graph using SBERT...")
     graph = {}
 
-    # ラベルの前処理: "email_query" -> "email query" (自然言語に近づける)
-    # これにより、SBERTが意味を捉えやすくなる
     cleaned_labels = [label.replace("_", " ") for label in all_labels]
 
     if HAS_SBERT:
-        # 軽量で高性能なモデルを使用
         model_name = 'all-MiniLM-L6-v2'
         logger.info(f"Loading SBERT model: {model_name}")
         model = SentenceTransformer(model_name)
         
-        # 全ラベルを一括でベクトル化
         embeddings = model.encode(cleaned_labels)
-        
-        # コサイン類似度行列を計算 (Shape: [N, N])
         sim_matrix = cosine_similarity(embeddings)
         
         for i, target in enumerate(all_labels):
-            # i番目のラベルと、他の全ラベルとの類似度を取得
             scores = sim_matrix[i]
-            
-            # (label, score) のペアを作成
             candidates = []
             for j, score in enumerate(scores):
-                if i == j: continue # 自分自身は除外
+                if i == j: continue
                 candidates.append((all_labels[j], score))
             
-            # 類似度が高い順にソート
             candidates.sort(key=lambda x: x[1], reverse=True)
-            
-            # 上位候補のラベル名のみをリストとして保存
-            # ここでは上位10件程度を保持しておく（サンプリング時にここから選ぶ）
             graph[target] = [c[0] for c in candidates[:10]]
             
     else:
         logger.warning("sentence-transformers not found. Falling back to simple rule-based matching.")
-        # フォールバック: 前回のルールベースロジック
         for target in all_labels:
             parts = target.split('_')
             t_s, t_a = parts[0], parts[1:]
@@ -161,21 +147,17 @@ def build_items_from_slurp(jsonl_path, audio_dir, all_labels, semantic_graph, ad
         distractors = []
         similar_candidates = semantic_graph.get(current_label, [])
         
-        # SBERTで計算された「意味的に近い上位候補」からサンプリング
-        # 毎回トップ2を選ぶと固定されすぎるため、上位5つの中からランダムに2つ選ぶ
         if len(similar_candidates) >= 2:
             pool = similar_candidates[:5] 
             distractors = rng.sample(pool, 2)
         elif len(similar_candidates) == 1:
             distractors = [similar_candidates[0]]
         
-        # 足りない場合はランダム補充
         while len(distractors) < 2:
             fallback = rng.choice(all_labels)
             if fallback != current_label and fallback not in distractors:
                 distractors.append(fallback)
 
-        # 結合してシャッフル
         candidates = [current_label] + distractors
         rng.shuffle(candidates)
         
@@ -332,6 +314,7 @@ class SmartCollator:
     
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0: return {}
+        # Safe Check
         is_audio_batch = (batch[0].get("audio_path") is not None)
         if is_audio_batch: return self._collate_audio(batch)
         else: return self._collate_text(batch)
@@ -348,6 +331,8 @@ class SmartCollator:
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}]
             
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
+            
+            # Target contains "Candidates: ... Answer: ..."
             full_text = text_input + item["target"] + eos_token
             
             inputs = self.processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
@@ -357,6 +342,7 @@ class SmartCollator:
             ids = inputs["input_ids"][0]
             lbs = ids.clone()
             lbs[:prompt_len] = self.ignore_index
+            
             input_ids_list.append(ids)
             labels_list.append(lbs)
             feat = inputs["input_features"]
@@ -382,7 +368,11 @@ class SmartCollator:
         for item in batch:
             if item.get("audio_path") is not None: continue
             prompt_text = item.get("system_prompt", BASE_PROMPT_TEXT)
-            user_content = [{"type": "text", "text": f"{item['transcript']}\n{prompt_text}"}]
+            
+            # 【修正点】ここで item.get("transcript", "") を使用する
+            transcript = item.get("transcript", "")
+            user_content = [{"type": "text", "text": f"{transcript}\n{prompt_text}"}]
+            
             text_input = self.processor.apply_chat_template([{"role": "user", "content": user_content}], tokenize=False, add_generation_prompt=True)
             full_text = text_input + item["target"] + eos_token
             
@@ -451,6 +441,7 @@ class SampleGenerationCallback(TrainerCallback):
                 inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
                 inputs = {k: v.to(device) for k, v in inputs.items()}
                 
+                # Generate longer sequence for candidates
                 with torch.no_grad():
                     output_ids = self.model.generate(**inputs, max_new_tokens=256)
                 

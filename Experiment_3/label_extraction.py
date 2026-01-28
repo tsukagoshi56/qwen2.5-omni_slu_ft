@@ -12,6 +12,7 @@ FILES_TO_PROCESS = ["train.jsonl", "devel.jsonl", "test.jsonl"]
 def extract_metadata(data_dir):
     unique_scenarios = set()
     unique_actions = set()
+    unique_intents = set()
     unique_slots = set()
     
     # 統計用カウンター
@@ -34,17 +35,22 @@ def extract_metadata(data_dir):
                     d = json.loads(line)
                     total_samples += 1
                     
+                    scenario = d.get('scenario')
+                    action = d.get('action')
+                    
                     # 1. Scenario Extraction
-                    if 'scenario' in d:
-                        unique_scenarios.add(d['scenario'])
+                    if scenario:
+                        unique_scenarios.add(scenario)
                         
                     # 2. Action Extraction
-                    if 'action' in d:
-                        unique_actions.add(d['action'])
+                    if action:
+                        unique_actions.add(action)
+
+                    # 3. Intent (Scenario:Action) Extraction
+                    if scenario and action:
+                        unique_intents.add(f"{scenario}:{action}")
                         
-                    # 3. Slot (Entity) Type Extraction
-                    # SLURPでは 'entities' キーの中にリスト形式で格納されている
-                    # 例: "entities": [{"span": [4, 5], "type": "currency_name"}]
+                    # 4. Slot (Entity) Type Extraction
                     if 'entities' in d:
                         for entity in d['entities']:
                             if 'type' in entity:
@@ -56,23 +62,26 @@ def extract_metadata(data_dir):
     # ソートしてリスト化
     sorted_scenarios = sorted(list(unique_scenarios))
     sorted_actions = sorted(list(unique_actions))
+    sorted_intents = sorted(list(unique_intents))
     sorted_slots = sorted(list(unique_slots))
     
-    return sorted_scenarios, sorted_actions, sorted_slots, total_samples
+    return sorted_scenarios, sorted_actions, sorted_intents, sorted_slots, total_samples
 
-def save_to_json(scenarios, actions, slots, output_file="slurp_metadata.json"):
+def save_to_json(scenarios, actions, intents, slots, output_file="slurp_metadata.json"):
     data = {
         "scenarios": scenarios,
         "actions": actions,
+        "intents": intents,
         "slot_types": slots,
         "counts": {
             "scenario_count": len(scenarios),
             "action_count": len(actions),
+            "intent_count": len(intents),
             "slot_type_count": len(slots)
         }
     }
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+        json.dump(data, f, indent=4, ensure_ascii=False)
     print(f"\nMetadata saved to {output_file}")
 
 def main():
@@ -82,7 +91,7 @@ def main():
     args = parser.parse_args()
 
     # 抽出実行
-    scenarios, actions, slots, total = extract_metadata(args.data_dir)
+    scenarios, actions, intents, slots, total = extract_metadata(args.data_dir)
     
     if total == 0:
         print("No data processed. Please check the data directory path.")
@@ -99,15 +108,27 @@ def main():
 
     print(f"\n[2] ACTIONS ({len(actions)} types):")
     print("-" * 60)
-    # 見やすく折り返して表示
     print(", ".join(actions))
 
-    print(f"\n[3] SLOT TYPES ({len(slots)} types):")
+    print(f"\n[3] INTENTS (SCENARIO:ACTION) ({len(intents)} types):")
+    print("-" * 60)
+    # 5つずつ表示
+    for i in range(0, len(intents), 5):
+        print(", ".join(intents[i:i+5]))
+
+    print(f"\n[4] SLOT TYPES ({len(slots)} types):")
     print("-" * 60)
     print(", ".join(slots))
     
     # 保存
-    save_to_json(scenarios, actions, slots, args.output)
+    save_to_json(scenarios, actions, intents, slots, args.output)
+
+    # 意図リストをテキストファイルとしても保存
+    intent_txt = args.output.replace(".json", "_intents.txt")
+    with open(intent_txt, 'w', encoding='utf-8') as f:
+        for it in intents:
+            f.write(it + "\n")
+    print(f"Intent list saved to {intent_txt}")
 
 if __name__ == "__main__":
     main()
