@@ -470,7 +470,7 @@ class ContrastiveSLUTrainer(Trainer):
                 # Selectionラベルの開始位置を見つける
                 # "Selection: " の直後のトークンを探す
                 # まず、"Selection" トークンの位置を探す
-                selection_token_ids = self.tokenizer.encode("Selection:", add_special_tokens=False)
+                selection_token_ids = self.processing_class.tokenizer.encode("Selection:", add_special_tokens=False)
                 if not selection_token_ids:
                     continue
                     
@@ -795,7 +795,7 @@ def main():
     trainer = ContrastiveSLUTrainer(
         model=model, args=training_args,
         train_dataset=MixedDataset(train_items), eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor), tokenizer=processor.tokenizer,
+        data_collator=SmartCollator(processor), processing_class=processor,  # 最新のtransformersに準拠
         label_to_token_ids=label_to_token_ids,
         label_to_group=label_to_group,
         contrastive_weight=0.1,  # ハイパーパラメータ: 対照ロスの重み
