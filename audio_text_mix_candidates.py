@@ -22,7 +22,6 @@ import re
 
 from transformers import (
     AutoProcessor,
-    AutoModelForCausalLM,
     TrainingArguments,
     Trainer,
 )
@@ -30,6 +29,13 @@ from transformers import (
 from torch.utils.data import Dataset, Sampler, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.distributed as dist
+
+try:
+    from transformers import Qwen2AudioForConditionalGeneration
+    MODEL_CLS = Qwen2AudioForConditionalGeneration
+except Exception:
+    from transformers import AutoModelForCausalLM
+    MODEL_CLS = AutoModelForCausalLM
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -533,7 +539,10 @@ def main():
     cluster_manager = IntentClusterManager(args.cluster_file)
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device)
+    model = MODEL_CLS.from_pretrained(
+        args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
+    ).to(device)
+    
     model.audio_tower.requires_grad_(False)
     model.multi_modal_projector.requires_grad_(False)
 
