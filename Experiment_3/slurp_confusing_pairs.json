@@ -1,0 +1,105 @@
+{
+    "scenarios": [],
+    "actions": [
+        {
+            "pair": [
+                "volume_down",
+                "volume_up"
+            ],
+            "similarity": 0.8989651799201965
+        },
+        {
+            "pair": [
+                "hue_lightoff",
+                "hue_lightup"
+            ],
+            "similarity": 0.8931316137313843
+        },
+        {
+            "pair": [
+                "hue_lightchange",
+                "hue_lightup"
+            ],
+            "similarity": 0.8694072961807251
+        },
+        {
+            "pair": [
+                "wemo_off",
+                "wemo_on"
+            ],
+            "similarity": 0.866705060005188
+        },
+        {
+            "pair": [
+                "hue_lightchange",
+                "hue_lightoff"
+            ],
+            "similarity": 0.8387075066566467
+        },
+        {
+            "pair": [
+                "hue_lightdim",
+                "hue_lighton"
+            ],
+            "similarity": 0.8378139734268188
+        },
+        {
+            "pair": [
+                "hue_lightchange",
+                "hue_lighton"
+            ],
+            "similarity": 0.8190675973892212
+        },
+        {
+            "pair": [
+                "hue_lightdim",
+                "hue_lightoff"
+            ],
+            "similarity": 0.8186557292938232
+        },
+        {
+            "pair": [
+                "hue_lightdim",
+                "hue_lightup"
+            ],
+            "similarity": 0.8177489638328552
+        },
+        {
+            "pair": [
+                "hue_lightoff",
+                "hue_lighton"
+            ],
+            "similarity": 0.8168848752975464
+        },
+        {
+            "pair": [
+                "hue_lighton",
+                "hue_lightup"
+            ],
+            "similarity": 0.8124812841415405
+        },
+        {
+            "pair": [
+                "hue_lightchange",
+                "hue_lightdim"
+            ],
+            "similarity": 0.8098049163818359
+        }
+    ],
+    "slot types": [
+        {
+            "pair": [
+                "food_type",
+                "meal_type"
+            ],
+            "similarity": 0.8571871519088745
+        },
+        {
+            "pair": [
+                "audiobook_author",
+                "audiobook_name"
+            ],
+            "similarity": 0.839979887008667
+        }
+    ]
+}

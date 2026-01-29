@@ -1,0 +1,242 @@
+{
+    "scenarios": {
+        "5": [
+            "alarm",
+            "iot"
+        ],
+        "2": [
+            "audio",
+            "music",
+            "play"
+        ],
+        "3": [
+            "calendar",
+            "datetime"
+        ],
+        "8": [
+            "cooking"
+        ],
+        "9": [
+            "email"
+        ],
+        "0": [
+            "general",
+            "news",
+            "qa"
+        ],
+        "6": [
+            "lists"
+        ],
+        "1": [
+            "recommendation",
+            "social"
+        ],
+        "4": [
+            "takeaway",
+            "transport"
+        ],
+        "7": [
+            "weather"
+        ]
+    },
+    "actions": {
+        "9": [
+            "addcontact",
+            "querycontact"
+        ],
+        "5": [
+            "audiobook",
+            "music",
+            "podcasts",
+            "radio"
+        ],
+        "12": [
+            "cleaning",
+            "remove"
+        ],
+        "6": [
+            "coffee",
+            "recipe"
+        ],
+        "3": [
+            "convert",
+            "currency",
+            "maths"
+        ],
+        "19": [
+            "createoradd"
+        ],
+        "16": [
+            "definition"
+        ],
+        "2": [
+            "dislikeness",
+            "quirky"
+        ],
+        "4": [
+            "events",
+            "locations",
+            "movies"
+        ],
+        "0": [
+            "factoid",
+            "likeness"
+        ],
+        "1": [
+            "game",
+            "greet",
+            "ticket"
+        ],
+        "11": [
+            "hue_lightchange",
+            "hue_lightdim",
+            "hue_lightoff",
+            "hue_lighton",
+            "hue_lightup"
+        ],
+        "18": [
+            "joke"
+        ],
+        "8": [
+            "order",
+            "stock"
+        ],
+        "7": [
+            "post",
+            "sendemail"
+        ],
+        "17": [
+            "query"
+        ],
+        "10": [
+            "set",
+            "settings"
+        ],
+        "14": [
+            "taxi",
+            "traffic"
+        ],
+        "15": [
+            "volume_down",
+            "volume_mute",
+            "volume_other",
+            "volume_up"
+        ],
+        "13": [
+            "wemo_off",
+            "wemo_on"
+        ]
+    },
+    "slot types": {
+        "3": [
+            "alarm_type",
+            "coffee_type",
+            "color_type",
+            "cooking_type",
+            "drink_type",
+            "food_type",
+            "game_type",
+            "joke_type",
+            "meal_type",
+            "movie_type",
+            "order_type",
+            "sport_type"
+        ],
+        "4": [
+            "app_name",
+            "event_name",
+            "game_name",
+            "list_name",
+            "place_name",
+            "playlist_name"
+        ],
+        "2": [
+            "artist_name",
+            "music_album",
+            "music_descriptor",
+            "music_genre",
+            "song_name"
+        ],
+        "12": [
+            "audiobook_author",
+            "audiobook_name"
+        ],
+        "11": [
+            "business_name",
+            "business_type"
+        ],
+        "6": [
+            "change_amount",
+            "currency_name"
+        ],
+        "16": [
+            "coffee_type",
+            "cooking_type",
+            "drink_type",
+            "food_type",
+            "meal_type"
+        ],
+        "1": [
+            "date",
+            "time",
+            "time_zone",
+            "timeofday"
+        ],
+        "20": [
+            "definition_word"
+        ],
+        "0": [
+            "device_type",
+            "game_type",
+            "media_type",
+            "player_setting"
+        ],
+        "18": [
+            "email_address",
+            "email_folder"
+        ],
+        "8": [
+            "game_name",
+            "game_type",
+            "sport_type"
+        ],
+        "15": [
+            "general_frequency"
+        ],
+        "13": [
+            "house_place",
+            "place_name"
+        ],
+        "17": [
+            "ingredient"
+        ],
+        "14": [
+            "movie_name",
+            "movie_type"
+        ],
+        "19": [
+            "news_topic"
+        ],
+        "10": [
+            "person",
+            "personal_info"
+        ],
+        "5": [
+            "podcast_descriptor",
+            "podcast_name",
+            "radio_name"
+        ],
+        "21": [
+            "relation"
+        ],
+        "7": [
+            "transport_agency",
+            "transport_descriptor",
+            "transport_name",
+            "transport_type"
+        ],
+        "9": [
+            "weather_descriptor"
+        ]
+    }
+}
