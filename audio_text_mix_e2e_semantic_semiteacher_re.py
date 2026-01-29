@@ -833,6 +833,119 @@ class SmartCollator:
             ),
         }
 
+@dataclass
+class InferenceCollator:
+    processor: Any
+    base_prompt: str = BASE_PROMPT_TEXT
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        input_ids_list = []
+        input_features_list = []
+        feature_mask_list = []
+        metadata_list = []
+        
+        sr = self.processor.feature_extractor.sampling_rate
+        
+        # Determine if this batch has audio (should be homogeneous mostly if sorted, but we handle mix)
+        # However, for efficiency, better to treat audio/text differently or unify.
+        # This collator handles both.
+        
+        has_audio_globally = False
+
+        for item in batch:
+            # Metadata pass-through
+            metadata_list.append({
+                "file": item.get("file"),
+                "slurp_id": item.get("slurp_id"),
+                "transcript": item.get("transcript", ""),
+                "target": item.get("target", ""),
+            })
+
+            audio_path = item.get("audio_path")
+            prompt_text = item.get("system_prompt", self.base_prompt)
+            
+            if audio_path:
+                has_audio_globally = True
+                try:
+                    audio, _ = librosa.load(audio_path, sr=sr)
+                except Exception as e:
+                    logger.error(f"Failed to load audio {audio_path}: {e}")
+                    # Fallback to text usage or empty audio? 
+                    # For now, let's just make a dummy or skip audio part.
+                    # But inputs expects it. Let's create a silent audio.
+                    audio = np.zeros(16000, dtype=np.float32)
+
+                user_content = [
+                    {"type": "audio", "audio_url": "placeholder"},
+                    {"type": "text", "text": prompt_text},
+                ]
+                text_input = self.processor.apply_chat_template(
+                    [{"role": "user", "content": user_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                
+                # Check if we should use 'audio' argument or not?
+                # processor(text=..., audio=...)
+                inputs = self.processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+                
+                feat = inputs["input_features"]
+                while feat.dim() > 2:
+                    feat = feat.squeeze(0)
+                input_features_list.append(feat)
+                
+                if "feature_attention_mask" in inputs:
+                    fmask = inputs["feature_attention_mask"]
+                    while fmask.dim() > 1:
+                        fmask = fmask.squeeze(0)
+                    feature_mask_list.append(fmask)
+                
+            else:
+                user_content = [{"type": "text", "text": f"{item.get('transcript', '')}\n{prompt_text}"}]
+                text_input = self.processor.apply_chat_template(
+                    [{"role": "user", "content": user_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                inputs = self.processor.tokenizer(text_input, return_tensors="pt")
+
+            ids = inputs["input_ids"][0]
+            input_ids_list.append(ids)
+
+        # Pad input_ids
+        padded_ids = pad_sequence(
+            input_ids_list,
+            batch_first=True,
+            padding_value=self.processor.tokenizer.pad_token_id,
+        )
+        attention_mask = pad_sequence(
+            [torch.ones_like(x) for x in input_ids_list],
+            batch_first=True,
+            padding_value=0,
+        )
+
+        batch_out = {
+            "input_ids": padded_ids,
+            "attention_mask": attention_mask,
+            "metadata": metadata_list,  # Pass this through to the loop
+        }
+
+        if has_audio_globally and input_features_list:
+             # Pad features
+            batch_out["input_features"] = pad_sequence(
+                input_features_list,
+                batch_first=True,
+                padding_value=0.0,
+            )
+            if feature_mask_list:
+                batch_out["feature_attention_mask"] = pad_sequence(
+                    feature_mask_list,
+                    batch_first=True,
+                    padding_value=0,
+                )
+
+        return batch_out
+
 class CustomTrainer(Trainer):
     def get_train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
@@ -926,97 +1039,98 @@ def run_distributed_inference(
     batch_size: int = 1,
 ):
     model.eval()
+    
+    # 1. Distribute items
     my_items = items[rank::world_size]
+    # Sorting can help with padding efficiency
     my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x.get("slurp_id", 0)))
-
-    local_results = []
-    processor.tokenizer.padding_side = "left"
-    sr = processor.feature_extractor.sampling_rate
 
     if rank == 0:
         logger.info(f"Starting Inference. Items per rank: ~{len(my_items)}")
 
-    for i in range(0, len(my_items), batch_size):
-        if rank == 0 and (i // batch_size) % 10 == 0:
-            logger.info(f"Processing batch {i // batch_size} / {len(my_items) // batch_size}...")
+    # 2. Setup DataLoader
+    # Note: For multiprocessing, we need to be careful with 'processor' if it's not picklable or heavy.
+    # Usually AuthorProcessor is fine.
+    dataset = MixedDataset(my_items) # Re-use MixedDataset as a wrapper list
+    
+    # Use fewer workers if not many items (e.g. smoke test)
+    num_workers = 4 if len(my_items) > 10 else 0
+    
+    collator = InferenceCollator(processor=processor)
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collator,
+        pin_memory=True,
+    )
 
-        batch_items = my_items[i : i + batch_size]
-        texts, audios = [], []
-        has_audio = False
+    processor.tokenizer.padding_side = "left"
+    local_results = []
+    
+    total_batches = len(loader)
 
-        try:
-            for it in batch_items:
-                audio_path = it.get("audio_path")
-                transcript = it.get("transcript", "")
-                prompt_text = it.get("system_prompt", BASE_PROMPT_TEXT)
-
-                if audio_path:
-                    has_audio = True
-                    audio, _ = librosa.load(audio_path, sr=sr)
-                    audios.append(audio)
-                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}]
-                    text_input = processor.apply_chat_template(
-                        [{"role": "user", "content": user_content}],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    texts.append(text_input)
-                else:
-                    user_content = [{"type": "text", "text": f"{transcript}\n{prompt_text}"}]
-                    text_input = processor.apply_chat_template(
-                        [{"role": "user", "content": user_content}],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    texts.append(text_input)
-
-            if has_audio:
-                inputs = processor(text=texts, audio=audios, sampling_rate=sr, return_tensors="pt", padding=True)
-            else:
-                inputs = processor(text=texts, return_tensors="pt", padding=True)
-
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-
-            with torch.no_grad():
+    with torch.no_grad():
+        for batch_idx, batch_data in enumerate(loader):
+            if rank == 0 and batch_idx % 10 == 0:
+                logger.info(f"Processing batch {batch_idx} / {total_batches}...")
+            
+            # Move tensors to device
+            inputs = {}
+            for k, v in batch_data.items():
+                if isinstance(v, torch.Tensor):
+                    inputs[k] = v.to(device)
+            
+            # Metadata is not a tensor, so it stays in batch_data["metadata"]
+            
+            try:
                 output_ids = model.generate(
                     **inputs,
                     max_new_tokens=256,
                     use_cache=True,
                     pad_token_id=processor.tokenizer.pad_token_id,
                 )
-
-            input_len = inputs["input_ids"].shape[1]
-            generated_ids = output_ids[:, input_len:]
-            raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
-
-            for j, raw_output in enumerate(raw_outputs):
-                original = batch_items[j]
-                json_str = extract_json_from_mixed_output(raw_output)
-
-                parsed_obj = {"scenario": "error", "action": "error", "entities": []}
-                try:
-                    if json_str:
-                        parsed_obj = json.loads(json_str)
-                except Exception:
-                    pass
-
-                wer = calculate_wer(original.get("transcript", ""), raw_output)
-                local_results.append(
-                    {
+                
+                input_len = inputs["input_ids"].shape[1]
+                generated_ids = output_ids[:, input_len:]
+                raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                
+                meta_list = batch_data["metadata"]
+                
+                for j, raw_output in enumerate(raw_outputs):
+                    meta = meta_list[j]
+                    
+                    # Post-process
+                    json_str = extract_json_from_mixed_output(raw_output)
+                    parsed_obj = {"scenario": "error", "action": "error", "entities": []}
+                    try:
+                        if json_str:
+                            parsed_obj = json.loads(json_str)
+                    except Exception:
+                        pass
+                    
+                    original_transcript = meta.get("transcript", "")
+                    wer = calculate_wer(original_transcript, raw_output)
+                    
+                    local_results.append({
                         "scenario": parsed_obj.get("scenario", ""),
                         "action": parsed_obj.get("action", ""),
                         "entities": parsed_obj.get("entities", []),
-                        "file": original.get("file"),
-                        "slurp_id": original.get("slurp_id"),
+                        "file": meta.get("file"),
+                        "slurp_id": meta.get("slurp_id"),
                         "wer": wer,
-                        "transcript": original.get("transcript", ""),
+                        "transcript": original_transcript,
                         "raw_output": raw_output,
                         "extracted_json": json_str,
-                        "target": original.get("target", ""),
-                    }
-                )
-        except Exception as e:
-            logger.error(f"Rank {rank} failed on batch {i}: {e}")
+                        "target": meta.get("target", ""),
+                    })
+
+            except Exception as e:
+                logger.error(f"Rank {rank} failed on batch {batch_idx}: {e}")
+                import traceback
+                traceback.print_exc()
 
     tmp = f"{output_path}.rank{rank}"
     with open(tmp, "w") as f:

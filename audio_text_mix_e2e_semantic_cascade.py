@@ -891,17 +891,20 @@ def run_distributed_inference(
     batch_size: int = 1,
 ):
     model.eval()
+    processor.tokenizer.padding_side = "left"
+    processor.tokenizer.pad_token = processor.tokenizer.eos_token
     my_items = items[rank::world_size]
     my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x.get("slurp_id", 0)))
 
     local_results = []
-    processor.tokenizer.padding_side = "left"
     sr = processor.feature_extractor.sampling_rate
 
     if rank == 0:
         logger.info(f"Starting Inference. Items per rank: ~{len(my_items)}")
 
     for i in range(0, len(my_items), batch_size):
+        if rank == 0 and (i // batch_size) % 10 == 0:
+            logger.info(f"Processing batch {i // batch_size} / {len(my_items) // batch_size}...")
         batch_items = my_items[i : i + batch_size]
         texts, audios = [], []
         has_audio = False
@@ -945,6 +948,8 @@ def run_distributed_inference(
                     max_new_tokens=256,
                     use_cache=True,
                     pad_token_id=processor.tokenizer.pad_token_id,
+                    eos_token_id=processor.tokenizer.eos_token_id,
+                    do_sample=False,
                 )
 
             input_len = inputs["input_ids"].shape[1]
@@ -1184,6 +1189,10 @@ def main():
         max_samples=(500 if args.smoke else None),
         include_intent_label_group=args.include_intent_label_group,
     )
+    if world_size > 1:
+        num_items_per_rank = len(test_items) // world_size
+        total_balanced_items = num_items_per_rank * world_size
+        test_items = test_items[:total_balanced_items]
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
     run_distributed_inference(
         model=model,
