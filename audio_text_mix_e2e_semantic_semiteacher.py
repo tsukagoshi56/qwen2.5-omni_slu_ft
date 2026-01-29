@@ -778,6 +778,9 @@ def run_distributed_inference(
         logger.info(f"Starting Inference. Items per rank: ~{len(my_items)}")
 
     for i in range(0, len(my_items), batch_size):
+        if rank == 0 and (i // batch_size) % 10 == 0:
+            logger.info(f"Processing batch {i // batch_size} / {len(my_items) // batch_size}...")
+
         batch_items = my_items[i : i + batch_size]
         texts, audios = [], []
         has_audio = False
