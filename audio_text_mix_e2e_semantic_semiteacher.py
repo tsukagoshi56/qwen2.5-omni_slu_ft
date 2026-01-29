@@ -994,7 +994,7 @@ def main():
         learning_rate=args.learning_rate,
         bf16=torch.cuda.is_available(),
         logging_steps=args.logging_steps,
-        evaluation_strategy=args.eval_strategy if len(eval_items) > 0 else "no",
+        eval_strategy=args.eval_strategy if len(eval_items) > 0 else "no",
         eval_steps=args.eval_steps,
         save_strategy=args.save_strategy,
         report_to="none",
