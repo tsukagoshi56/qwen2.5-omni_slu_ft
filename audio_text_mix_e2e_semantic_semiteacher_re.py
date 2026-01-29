@@ -912,17 +912,24 @@ class InferenceCollator:
             ids = inputs["input_ids"][0]
             input_ids_list.append(ids)
 
-        # Pad input_ids
-        padded_ids = pad_sequence(
-            input_ids_list,
-            batch_first=True,
-            padding_value=self.processor.tokenizer.pad_token_id,
+        # Manual left padding for generation
+        max_len = max(len(ids) for ids in input_ids_list)
+        batch_curr = len(input_ids_list)
+        
+        padded_ids = torch.full(
+            (batch_curr, max_len), 
+            self.processor.tokenizer.pad_token_id, 
+            dtype=input_ids_list[0].dtype
         )
-        attention_mask = pad_sequence(
-            [torch.ones_like(x) for x in input_ids_list],
-            batch_first=True,
-            padding_value=0,
+        attention_mask = torch.zeros(
+            (batch_curr, max_len), 
+            dtype=input_ids_list[0].dtype
         )
+        
+        for i, ids in enumerate(input_ids_list):
+            length = len(ids)
+            padded_ids[i, -length:] = ids
+            attention_mask[i, -length:] = 1
 
         batch_out = {
             "input_ids": padded_ids,
