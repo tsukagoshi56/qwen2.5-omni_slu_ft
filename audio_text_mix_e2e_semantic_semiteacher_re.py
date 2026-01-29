@@ -265,40 +265,44 @@ def maybe_load_or_build_clusters(
     world_size: int,
 ) -> Dict[str, Dict[str, List[str]]]:
     """
-    rank0 で cluster cache をロード/生成し、DDPで全 rank に配る。
+    各ランクが独立してクラスタリングを実行。
+    random_state=42 で固定されているため、通信を行わなくても全ランクで同じ結果が得られます。
+    通信（Broadcast）を排除したことで、同期の失敗による停止リスクがゼロになりました。
     """
     clusters = None
-    if rank == 0 and cache_path and os.path.exists(cache_path):
+
+    # まずキャッシュからロードを試みる（全ランクが各自でロード）
+    if cache_path and os.path.exists(cache_path):
         try:
             with open(cache_path, "r") as f:
                 clusters = json.load(f)
-            logger.info(f"Loaded cluster cache: {cache_path}")
+            if rank == 0:
+                logger.info(f"Loaded cluster cache: {cache_path}")
         except Exception as e:
-            logger.warning(f"Failed to load cluster cache: {e}")
+            if rank == 0:
+                logger.warning(f"Failed to load cluster cache: {e}")
 
-    clusters = ddp_broadcast_object(clusters, rank, world_size)
-
+    # キャッシュがない場合、各ランクが独立してクラスタリングを実行
+    # random_state=42 で固定されているため、全ランクで同一結果が保証される
     if clusters is None:
-        if rank == 0:
-            clusters = build_all_clusters(
-                jsonl_paths=jsonl_paths,
-                n_scenario_clusters=n_scenario_clusters,
-                n_action_clusters=n_action_clusters,
-                n_slot_clusters=n_slot_clusters,
-                n_intent_clusters=n_intent_clusters,
-                include_intent_label_group=include_intent_label_group,
-                rank=rank,
-            )
-            if cache_path:
-                try:
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    with open(cache_path, "w") as f:
-                        json.dump(clusters, f, ensure_ascii=False, indent=2)
-                    logger.info(f"Saved cluster cache: {cache_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to save cluster cache: {e}")
-
-        clusters = ddp_broadcast_object(clusters, rank, world_size)
+        clusters = build_all_clusters(
+            jsonl_paths=jsonl_paths,
+            n_scenario_clusters=n_scenario_clusters,
+            n_action_clusters=n_action_clusters,
+            n_slot_clusters=n_slot_clusters,
+            n_intent_clusters=n_intent_clusters,
+            include_intent_label_group=include_intent_label_group,
+            rank=rank,
+        )
+        # rank0 のみがキャッシュを保存（ファイル競合を避ける）
+        if rank == 0 and cache_path:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(clusters, f, ensure_ascii=False, indent=2)
+                logger.info(f"Saved cluster cache: {cache_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save cluster cache: {e}")
 
     return clusters
 
@@ -1243,28 +1247,29 @@ def main():
             dist.barrier()
 
         # ----------------------------------------------------------------------
-        # Error analysis and group expansion (rank 0 only, then broadcast)
+        # Error analysis and group expansion
+        # 各ランクが独立して同じ中間結果を読み込み・分析
+        # expand_groups_with_errors は決定的に動作するため、全ランクで同一結果が保証される
+        # 通信（Broadcast）を排除したことで、同期の失敗による停止リスクがゼロになりました
         # ----------------------------------------------------------------------
-        expanded_clusters = None
+        intermediate_results = load_inference_results(intermediate_output)
         if rank == 0:
-            intermediate_results = load_inference_results(intermediate_output)
             logger.info(f"Loaded {len(intermediate_results)} intermediate predictions for analysis")
 
-            error_counts = analyze_prediction_errors(intermediate_results, rank=rank)
-            expanded_clusters = expand_groups_with_errors(
-                clusters=clusters,
-                error_counts=error_counts,
-                top_k=args.top_k_confused,
-                rank=rank,
-            )
+        error_counts = analyze_prediction_errors(intermediate_results, rank=rank)
+        expanded_clusters = expand_groups_with_errors(
+            clusters=clusters,
+            error_counts=error_counts,
+            top_k=args.top_k_confused,
+            rank=rank,
+        )
 
-            # Save expanded clusters
+        # rank0 のみがキャッシュを保存（ファイル競合を避ける）
+        if rank == 0:
             expanded_cache_path = os.path.join(args.output_dir, "clusters_expanded.json")
             with open(expanded_cache_path, "w") as f:
                 json.dump(expanded_clusters, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved expanded clusters to: {expanded_cache_path}")
-
-        expanded_clusters = ddp_broadcast_object(expanded_clusters, rank, world_size)
 
         # ----------------------------------------------------------------------
         # Phase 2: Training with expanded clusters
