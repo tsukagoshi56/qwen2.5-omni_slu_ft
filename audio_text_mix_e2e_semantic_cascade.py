@@ -75,6 +75,7 @@ BASE_PROMPT_TEXT = (
     "Then, select the specific label (scenario/action/slots) from that group. "
     "Finally, output the answer as a JSON object."
 )
+ASR_PROMPT_TEXT = "Transcribe the audio."
 
 # ----------------------------------------------------------------------
 # Utils
@@ -116,6 +117,127 @@ def extract_json_from_mixed_output(text: str) -> str:
     if match3:
         return match3[-1].strip()
     return text
+
+def _normalize_asr_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    out: List[str] = []
+    for v in value:
+        if not isinstance(v, str):
+            continue
+        v = re.sub(r"\s+", " ", v.strip())
+        if v:
+            out.append(v)
+    return list(dict.fromkeys(out))
+
+def load_asr_cache(cache_path: str) -> Dict[str, List[str]]:
+    if not cache_path or not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r") as f:
+            raw = json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load ASR cache: {e}")
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    cache: Dict[str, List[str]] = {}
+    for k, v in raw.items():
+        cache[str(k)] = _normalize_asr_list(v)
+    return cache
+
+def save_asr_cache(cache_path: str, cache: Dict[str, List[str]]) -> None:
+    if not cache_path:
+        return
+    try:
+        dir_path = os.path.dirname(cache_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to save ASR cache: {e}")
+
+def build_asr_cache(
+    jsonl_paths: List[str],
+    audio_dir: str,
+    model,
+    processor,
+    device: torch.device,
+    n_best: int,
+) -> Dict[str, List[str]]:
+    n_best = max(1, int(n_best))
+    cache: Dict[str, List[str]] = {}
+    sr = processor.feature_extractor.sampling_rate
+    processor.tokenizer.padding_side = "left"
+    was_training = model.training
+    model.eval()
+
+    for path in jsonl_paths:
+        if not path or not os.path.exists(path):
+            continue
+        with open(path, "r") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                slurp_id = d.get("slurp_id", -1)
+                sid = str(slurp_id)
+                if sid in cache:
+                    continue
+                recs = d.get("recordings", []) or []
+                audio_path = None
+                for rec in recs:
+                    if not isinstance(rec, dict):
+                        continue
+                    fname = rec.get("file", "")
+                    audio_path = resolve_audio_path(audio_dir, fname)
+                    if audio_path:
+                        break
+                if not audio_path:
+                    cache[sid] = []
+                    continue
+
+                audio, _ = librosa.load(audio_path, sr=sr)
+                user_content = [
+                    {"type": "audio", "audio_url": "placeholder"},
+                    {"type": "text", "text": ASR_PROMPT_TEXT},
+                ]
+                text_input = processor.apply_chat_template(
+                    [{"role": "user", "content": user_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt", padding=True)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                with torch.no_grad():
+                    out_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        do_sample=True,
+                        num_return_sequences=n_best,
+                        temperature=0.8,
+                        top_p=0.95,
+                        use_cache=True,
+                        pad_token_id=processor.tokenizer.pad_token_id,
+                    )
+
+                input_len = inputs["input_ids"].shape[1]
+                hyps: List[str] = []
+                for k in range(out_ids.shape[0]):
+                    hyp = processor.decode(out_ids[k][input_len:], skip_special_tokens=True).strip()
+                    hyp = re.sub(r"\s+", " ", hyp)
+                    if hyp:
+                        hyps.append(hyp)
+                cache[sid] = list(dict.fromkeys(hyps))
+
+    if was_training:
+        model.train()
+    return cache
 
 # ----------------------------------------------------------------------
 # 1) Clustering
@@ -261,44 +383,40 @@ def maybe_load_or_build_clusters(
     world_size: int,
 ) -> Dict[str, Dict[str, List[str]]]:
     """
-    各ランクが独立してクラスタリングを実行。
-    random_state=42 で固定されているため、通信を行わなくても全ランクで同じ結果が得られます。
-    通信（Broadcast）を排除したことで、同期の失敗による停止リスクがゼロになりました。
+    rank0 で cluster cache をロード/生成し、DDPで全 rank に配る。
     """
     clusters = None
-
-    # まずキャッシュからロードを試みる（全ランクが各自でロード）
-    if cache_path and os.path.exists(cache_path):
+    if rank == 0 and cache_path and os.path.exists(cache_path):
         try:
             with open(cache_path, "r") as f:
                 clusters = json.load(f)
-            if rank == 0:
-                logger.info(f"Loaded cluster cache: {cache_path}")
+            logger.info(f"Loaded cluster cache: {cache_path}")
         except Exception as e:
-            if rank == 0:
-                logger.warning(f"Failed to load cluster cache: {e}")
+            logger.warning(f"Failed to load cluster cache: {e}")
 
-    # キャッシュがない場合、各ランクが独立してクラスタリングを実行
-    # random_state=42 で固定されているため、全ランクで同一結果が保証される
+    clusters = ddp_broadcast_object(clusters, rank, world_size)
+
     if clusters is None:
-        clusters = build_all_clusters(
-            jsonl_paths=jsonl_paths,
-            n_scenario_clusters=n_scenario_clusters,
-            n_action_clusters=n_action_clusters,
-            n_slot_clusters=n_slot_clusters,
-            n_intent_clusters=n_intent_clusters,
-            include_intent_label_group=include_intent_label_group,
-            rank=rank,
-        )
-        # rank0 のみがキャッシュを保存（ファイル競合を避ける）
-        if rank == 0 and cache_path:
-            try:
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                with open(cache_path, "w") as f:
-                    json.dump(clusters, f, ensure_ascii=False, indent=2)
-                logger.info(f"Saved cluster cache: {cache_path}")
-            except Exception as e:
-                logger.warning(f"Failed to save cluster cache: {e}")
+        if rank == 0:
+            clusters = build_all_clusters(
+                jsonl_paths=jsonl_paths,
+                n_scenario_clusters=n_scenario_clusters,
+                n_action_clusters=n_action_clusters,
+                n_slot_clusters=n_slot_clusters,
+                n_intent_clusters=n_intent_clusters,
+                include_intent_label_group=include_intent_label_group,
+                rank=rank,
+            )
+            if cache_path:
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump(clusters, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Saved cluster cache: {cache_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save cluster cache: {e}")
+
+        clusters = ddp_broadcast_object(clusters, rank, world_size)
 
     return clusters
 
@@ -312,6 +430,7 @@ def build_items_from_slurp(
     jsonl_path: str,
     audio_dir: str,
     clusters: Dict[str, Dict[str, List[str]]],
+    asr_cache: Optional[Dict[str, List[str]]] = None,
     add_text_only: bool = True,
     max_samples: Optional[int] = None,
     include_intent_label_group: bool = True,
@@ -340,6 +459,11 @@ def build_items_from_slurp(
         a = d.get("action") or ""
         transcript = d.get("sentence", "") or ""
         slurp_id = d.get("slurp_id", -1)
+        asr_list = []
+        if asr_cache is not None:
+            asr_list = asr_cache.get(str(slurp_id), [])
+        if asr_list:
+            transcript = random.choice(asr_list)
 
         # entities normalize
         raw_entities = d.get("entities", []) or []
@@ -767,21 +891,17 @@ def run_distributed_inference(
     batch_size: int = 1,
 ):
     model.eval()
-    processor.tokenizer.padding_side = "left"
-    processor.tokenizer.pad_token = processor.tokenizer.eos_token
     my_items = items[rank::world_size]
     my_items.sort(key=lambda x: (1 if x.get("audio_path") else 0, x.get("slurp_id", 0)))
 
     local_results = []
+    processor.tokenizer.padding_side = "left"
     sr = processor.feature_extractor.sampling_rate
 
     if rank == 0:
         logger.info(f"Starting Inference. Items per rank: ~{len(my_items)}")
 
     for i in range(0, len(my_items), batch_size):
-        if rank == 0 and (i // batch_size) % 10 == 0:
-            logger.info(f"Processing batch {i // batch_size} / {len(my_items) // batch_size}...")
-
         batch_items = my_items[i : i + batch_size]
         texts, audios = [], []
         has_audio = False
@@ -825,8 +945,6 @@ def run_distributed_inference(
                     max_new_tokens=256,
                     use_cache=True,
                     pad_token_id=processor.tokenizer.pad_token_id,
-                    eos_token_id=processor.tokenizer.eos_token_id,
-                    do_sample=False,
                 )
 
             input_len = inputs["input_ids"].shape[1]
@@ -886,6 +1004,8 @@ def main():
     parser.add_argument("--eval_file", type=str, default="slurp/dataset/slurp/devel.jsonl")
     parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl")
     parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
+    parser.add_argument("--asr_cache_path", type=str, default="")
+    parser.add_argument("--asr_n_best", type=int, default=5)
 
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
@@ -952,30 +1072,7 @@ def main():
         world_size=world_size,
     )
 
-    # 2) build dataset items
-    train_items = build_items_from_slurp(
-        args.train_file,
-        args.audio_dir,
-        clusters,
-        add_text_only=True,
-        max_samples=args.max_samples,
-        include_intent_label_group=args.include_intent_label_group,
-    )
-    eval_items = build_items_from_slurp(
-        args.eval_file,
-        args.audio_dir,
-        clusters,
-        add_text_only=True,
-        max_samples=(args.max_samples // 2 if args.max_samples else None),
-        include_intent_label_group=args.include_intent_label_group,
-    )
-
-    if rank == 0:
-        logger.info(f"Train items: {len(train_items)} | Eval items: {len(eval_items)}")
-        if train_items:
-            logger.info("\n--- Target format example ---\n" + train_items[0]["target"] + "\n")
-
-    # 3) processor + model
+    # 2) processor + model
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
@@ -994,7 +1091,51 @@ def main():
         if hasattr(model, "multi_modal_projector"):
             model.multi_modal_projector.requires_grad_(False)
 
-    # 4) training args
+    # 3) ASR cache (load/build)
+    asr_cache: Dict[str, List[str]] = {}
+    if args.asr_cache_path:
+        if rank == 0 and (not os.path.exists(args.asr_cache_path)):
+            logger.info(f"Building ASR cache (n_best={args.asr_n_best}) -> {args.asr_cache_path}")
+            asr_cache = build_asr_cache(
+                jsonl_paths=all_jsonl,
+                audio_dir=args.audio_dir,
+                model=model,
+                processor=processor,
+                device=device,
+                n_best=args.asr_n_best,
+            )
+            save_asr_cache(args.asr_cache_path, asr_cache)
+        if world_size > 1:
+            dist.barrier()
+        if not asr_cache:
+            asr_cache = load_asr_cache(args.asr_cache_path)
+
+    # 4) build dataset items
+    train_items = build_items_from_slurp(
+        args.train_file,
+        args.audio_dir,
+        clusters,
+        asr_cache=asr_cache,
+        add_text_only=True,
+        max_samples=args.max_samples,
+        include_intent_label_group=args.include_intent_label_group,
+    )
+    eval_items = build_items_from_slurp(
+        args.eval_file,
+        args.audio_dir,
+        clusters,
+        asr_cache=asr_cache,
+        add_text_only=True,
+        max_samples=(args.max_samples // 2 if args.max_samples else None),
+        include_intent_label_group=args.include_intent_label_group,
+    )
+
+    if rank == 0:
+        logger.info(f"Train items: {len(train_items)} | Eval items: {len(eval_items)}")
+        if train_items:
+            logger.info("\n--- Target format example ---\n" + train_items[0]["target"] + "\n")
+
+    # 5) training args
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
@@ -1033,19 +1174,16 @@ def main():
     if world_size > 1:
         dist.barrier()
 
-    # 5) inference on test (audio-only by default)
+    # 6) inference on test (audio-only by default)
     test_items = build_items_from_slurp(
         args.test_file,
         args.audio_dir,
         clusters,
+        asr_cache=asr_cache,
         add_text_only=False,
         max_samples=(500 if args.smoke else None),
         include_intent_label_group=args.include_intent_label_group,
     )
-    if world_size > 1:
-        num_items_per_rank = len(test_items) // world_size
-        total_balanced_items = num_items_per_rank * world_size
-        test_items = test_items[:total_balanced_items]
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
     run_distributed_inference(
         model=model,
