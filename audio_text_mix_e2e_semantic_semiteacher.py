@@ -261,40 +261,44 @@ def maybe_load_or_build_clusters(
     world_size: int,
 ) -> Dict[str, Dict[str, List[str]]]:
     """
-    rank0 で cluster cache をロード/生成し、DDPで全 rank に配る。
+    各ランクが独立してクラスタリングを実行。
+    random_state=42 で固定されているため、通信を行わなくても全ランクで同じ結果が得られます。
+    通信（Broadcast）を排除したことで、同期の失敗による停止リスクがゼロになりました。
     """
     clusters = None
-    if rank == 0 and cache_path and os.path.exists(cache_path):
+
+    # まずキャッシュからロードを試みる（全ランクが各自でロード）
+    if cache_path and os.path.exists(cache_path):
         try:
             with open(cache_path, "r") as f:
                 clusters = json.load(f)
-            logger.info(f"Loaded cluster cache: {cache_path}")
+            if rank == 0:
+                logger.info(f"Loaded cluster cache: {cache_path}")
         except Exception as e:
-            logger.warning(f"Failed to load cluster cache: {e}")
+            if rank == 0:
+                logger.warning(f"Failed to load cluster cache: {e}")
 
-    clusters = ddp_broadcast_object(clusters, rank, world_size)
-
+    # キャッシュがない場合、各ランクが独立してクラスタリングを実行
+    # random_state=42 で固定されているため、全ランクで同一結果が保証される
     if clusters is None:
-        if rank == 0:
-            clusters = build_all_clusters(
-                jsonl_paths=jsonl_paths,
-                n_scenario_clusters=n_scenario_clusters,
-                n_action_clusters=n_action_clusters,
-                n_slot_clusters=n_slot_clusters,
-                n_intent_clusters=n_intent_clusters,
-                include_intent_label_group=include_intent_label_group,
-                rank=rank,
-            )
-            if cache_path:
-                try:
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    with open(cache_path, "w") as f:
-                        json.dump(clusters, f, ensure_ascii=False, indent=2)
-                    logger.info(f"Saved cluster cache: {cache_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to save cluster cache: {e}")
-
-        clusters = ddp_broadcast_object(clusters, rank, world_size)
+        clusters = build_all_clusters(
+            jsonl_paths=jsonl_paths,
+            n_scenario_clusters=n_scenario_clusters,
+            n_action_clusters=n_action_clusters,
+            n_slot_clusters=n_slot_clusters,
+            n_intent_clusters=n_intent_clusters,
+            include_intent_label_group=include_intent_label_group,
+            rank=rank,
+        )
+        # rank0 のみがキャッシュを保存（ファイル競合を避ける）
+        if rank == 0 and cache_path:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(clusters, f, ensure_ascii=False, indent=2)
+                logger.info(f"Saved cluster cache: {cache_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save cluster cache: {e}")
 
     return clusters
 
