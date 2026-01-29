@@ -21,6 +21,7 @@ Hierarchical Output-Side Semantic Candidates (SBERT Clustering)
 
 import argparse
 import json
+import pickle
 import os
 import random
 import re
@@ -227,11 +228,25 @@ def build_all_clusters(
 def ddp_broadcast_object(obj: Any, rank: int, world_size: int) -> Any:
     """
     rank0 で作った Python object を全 rank へ配布。
+    broadcast_object_list を使い、NCCL バックエンドでも動作するように device を指定する。
     """
     if world_size <= 1:
         return obj
+
+    # Determine device for NCCL backend
+    backend = dist.get_backend()
+    if backend == "nccl":
+        try:
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            device = torch.device(f"cuda:{local_rank}")
+        except Exception:
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device("cpu")
+
+    # Use broadcast_object_list with device parameter (PyTorch >= 1.8)
     obj_list = [obj] if rank == 0 else [None]
-    dist.broadcast_object_list(obj_list, src=0)
+    dist.broadcast_object_list(obj_list, src=0, device=device)
     return obj_list[0]
 
 def maybe_load_or_build_clusters(
