@@ -6,7 +6,7 @@ import argparse
 import random
 import numpy as np
 import torch
-import librosa
+from transformers.pipelines.audio_utils import ffmpeg_read
 from transformers import AutoProcessor, AutoModelForCausalLM
 
 # Qwen2-Audioモデルをインポートする試み
@@ -62,6 +62,11 @@ def set_reproducible(seed: int):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def read_audio_bytes(audio_path: str) -> bytes:
+    with open(audio_path, "rb") as f:
+        return f.read()
 
 def main():
     parser = argparse.ArgumentParser(description="Run ASR on audio files to generate n-best hypotheses.")
@@ -263,8 +268,8 @@ def main():
         print(f"Processing ({i+1}/{len(audio_items)}): {os.path.basename(audio_path)} ...")
         
         try:
-            # 1. 音声ファイルのロード
-            audio, _ = librosa.load(audio_path, sr=sr)
+            # 1. 音声ファイルのロード (official eval-style)
+            audio = ffmpeg_read(read_audio_bytes(audio_path), sampling_rate=sr)
 
             # 2. ASR用のプロンプト作成
             if args.prompt_mode == "chat":
