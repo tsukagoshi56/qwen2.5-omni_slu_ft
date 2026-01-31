@@ -77,6 +77,17 @@ def build_entities(record: Dict[str, Any]) -> List[Dict[str, str]]:
         results.append({"type": ent_type, "filler": filler})
     return results
 
+def extract_slot_types(entities: List[Dict[str, str]]) -> List[str]:
+    seen = set()
+    slot_types: List[str] = []
+    for ent in entities:
+        t = ent.get("type", "")
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        slot_types.append(t)
+    return slot_types
+
 def tokenize(text: str) -> List[str]:
     if not text:
         return []
@@ -103,15 +114,6 @@ def summarize_nbest(hyp_texts: List[str], max_tokens: int = 6) -> Dict[str, List
         "stable": stable[:max_tokens],
         "unstable": unstable[:max_tokens],
     }
-
-def extract_candidate_fillers(texts: List[str], max_fillers: int = 3) -> List[str]:
-    counts = Counter()
-    for t in texts:
-        counts.update(tokenize(t))
-    if not counts:
-        return []
-    fillers = [w for w, _ in counts.most_common(max_fillers)]
-    return fillers
 
 def load_metadata(path: str) -> Dict[str, List[str]]:
     if not os.path.exists(path):
@@ -169,52 +171,44 @@ def pick_recording(recordings: List[Dict[str, Any]], index: int = 0) -> Optional
         return recordings[index].get("file")
     return recordings[0].get("file")
 
-def select_candidates_all(
+def select_candidates_topk(
     gold: str,
     candidates: List[str],
+    k: int,
+    rng: random.Random,
 ) -> List[str]:
-    # Keep a stable order; optionally ensure gold is included.
-    if not candidates:
-        return [gold] if gold else []
-    if gold and gold not in candidates:
-        return [gold] + candidates
-    return candidates
+    k = max(1, k)
+    ordered: List[str] = []
+    if gold:
+        ordered.append(gold)
+    pool = [c for c in candidates if c != gold]
+    rng.shuffle(pool)
+    ordered.extend(pool[: max(0, k - len(ordered))])
+    return ordered[:k]
 
-def select_slot_candidates_all(
-    gold_entities: List[Dict[str, str]],
+def select_slot_types_topk(
+    gold_types: List[str],
     slot_types: List[str],
-    filler_pool: List[str],
-) -> List[Dict[str, str]]:
-    candidates: List[Dict[str, str]] = []
-    used = set()
+    k: int,
+    rng: random.Random,
+) -> List[str]:
+    k = max(1, k)
+    ordered: List[str] = []
+    for t in gold_types:
+        if t not in ordered:
+            ordered.append(t)
+    pool = [t for t in slot_types if t not in ordered]
+    rng.shuffle(pool)
+    ordered.extend(pool[: max(0, k - len(ordered))])
+    return ordered[:k]
 
-    def add_candidate(t: str, f: str):
-        key = (t, f)
-        if key in used:
-            return
-        used.add(key)
-        candidates.append({"type": t, "filler": f})
-
-    # Keep all gold slots first (for stable ordering)
-    for ent in gold_entities:
-        add_candidate(ent.get("type", ""), ent.get("filler", ""))
-
-    # Choose a single representative filler for non-gold types
-    default_filler = ""
-    if filler_pool:
-        default_filler = filler_pool[0]
-    elif gold_entities:
-        default_filler = gold_entities[0].get("filler", "")
-    if not default_filler:
-        default_filler = "unknown"
-
-    for t in slot_types:
-        # If we already have this type from gold, keep its gold filler.
-        if any(c.get("type") == t for c in candidates):
-            continue
-        add_candidate(t, default_filler)
-
-    return candidates
+def select_slot_candidates_topk(
+    gold_types: List[str],
+    slot_types: List[str],
+    k: int,
+    rng: random.Random,
+) -> List[str]:
+    return select_slot_types_topk(gold_types, slot_types, k, rng)
 
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
     if not text:
@@ -235,10 +229,10 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
 def build_prompt_nbest(
     gold_scenario: str,
     gold_action: str,
-    gold_slots: List[Dict[str, str]],
+    gold_slot_types: List[str],
     scenario_candidates: List[str],
     action_candidates: List[str],
-    slot_candidates: List[Dict[str, str]],
+    slot_candidates: List[str],
     nbest_texts: List[str],
     stable_tokens: List[str],
     unstable_tokens: List[str],
@@ -257,7 +251,7 @@ def build_prompt_nbest(
         "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
         f"gold_scenario: {gold_scenario}\n"
         f"gold_action: {gold_action}\n"
-        f"gold_slots: {json.dumps(gold_slots, ensure_ascii=False)}\n"
+        f"gold_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
         f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
         f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
@@ -269,18 +263,18 @@ def build_prompt_nbest(
         '  "evidence": "<stable vs unstable words>",\n'
         '  "scenario_rejects": [{"scenario": "...", "reason": "..."}],\n'
         '  "action_rejects": [{"action": "...", "reason": "..."}],\n'
-        '  "slot_rejects": [{"slot_type": "...", "filler": "...", "reason": "..."}]\n'
+        '  "slot_rejects": [{"slot_type": "...", "reason": "..."}]\n'
         "}\n"
-        "If gold_slots is empty, reject all slot candidates with 'not mentioned'."
+        "If gold_slot_types is empty, reject all slot candidates with 'not mentioned'."
     )
 
 def build_prompt_audio(
     gold_scenario: str,
     gold_action: str,
-    gold_slots: List[Dict[str, str]],
+    gold_slot_types: List[str],
     scenario_candidates: List[str],
     action_candidates: List[str],
-    slot_candidates: List[Dict[str, str]],
+    slot_candidates: List[str],
 ) -> str:
     scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
     action_note = f"action_candidates ({len(action_candidates)}):"
@@ -296,7 +290,7 @@ def build_prompt_audio(
         "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
         f"gold_scenario: {gold_scenario}\n"
         f"gold_action: {gold_action}\n"
-        f"gold_slots: {json.dumps(gold_slots, ensure_ascii=False)}\n"
+        f"gold_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
         f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
         f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n\n"
@@ -305,9 +299,9 @@ def build_prompt_audio(
         '  "evidence": "<audio keywords>",\n'
         '  "scenario_rejects": [{"scenario": "...", "reason": "..."}],\n'
         '  "action_rejects": [{"action": "...", "reason": "..."}],\n'
-        '  "slot_rejects": [{"slot_type": "...", "filler": "...", "reason": "..."}]\n'
+        '  "slot_rejects": [{"slot_type": "...", "reason": "..."}]\n'
         "}\n"
-        "If gold_slots is empty, reject all slot candidates with 'not mentioned'."
+        "If gold_slot_types is empty, reject all slot candidates with 'not mentioned'."
     )
 
 # ----------------------------
@@ -328,6 +322,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
+    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for scenario/action/slot types.")
     parser.add_argument("--max_new_tokens", type=int, default=160)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -335,6 +330,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--preview", type=int, default=0, help="Print prompt and output for first N samples.")
+    parser.add_argument("--limitmode", action="store_true", help="Print pretty JSON results to stdout.")
     parser.add_argument("--save_raw", action="store_true")
     args = parser.parse_args()
 
@@ -350,8 +346,7 @@ def main():
     rng = random.Random(args.seed)
 
     metadata = load_metadata(metadata_path)
-    clusters = load_clusters(clusters_path)
-    action_confusions = load_confusing_pairs(confusing_path)
+    # clusters/confusing_pairs args are kept for compatibility (currently unused)
 
     slurp_map = {}
     if os.path.exists(slurp_path):
@@ -393,6 +388,7 @@ def main():
         scenario = item.get("scenario", "")
         action = item.get("action", "")
         gold_entities = build_entities(item)
+        gold_slot_types = extract_slot_types(gold_entities)
 
         # n-best texts
         nbest_texts: List[str] = []
@@ -405,28 +401,32 @@ def main():
                 if txt:
                     nbest_texts.append(txt.strip())
         stable_unstable = summarize_nbest(nbest_texts)
-        filler_pool = extract_candidate_fillers(nbest_texts)
 
-        scenario_candidates = select_candidates_all(
+        scenario_candidates = select_candidates_topk(
             gold=scenario,
             candidates=metadata["scenarios"],
+            k=args.num_candidates,
+            rng=rng,
         )
-        action_candidates = select_candidates_all(
+        action_candidates = select_candidates_topk(
             gold=action,
             candidates=metadata["actions"],
+            k=args.num_candidates,
+            rng=rng,
         )
 
-        slot_candidates = select_slot_candidates_all(
-            gold_entities=gold_entities,
+        slot_candidates = select_slot_candidates_topk(
+            gold_types=gold_slot_types,
             slot_types=metadata["slot_types"],
-            filler_pool=filler_pool,
+            k=args.num_candidates,
+            rng=rng,
         )
 
         if args.mode == "nbest":
             prompt = build_prompt_nbest(
                 gold_scenario=scenario,
                 gold_action=action,
-                gold_slots=gold_entities,
+                gold_slot_types=gold_slot_types,
                 scenario_candidates=scenario_candidates,
                 action_candidates=action_candidates,
                 slot_candidates=slot_candidates,
@@ -450,7 +450,7 @@ def main():
             prompt = build_prompt_audio(
                 gold_scenario=scenario,
                 gold_action=action,
-                gold_slots=gold_entities,
+                gold_slot_types=gold_slot_types,
                 scenario_candidates=scenario_candidates,
                 action_candidates=action_candidates,
                 slot_candidates=slot_candidates,
@@ -487,7 +487,7 @@ def main():
             "mode": args.mode,
             "gold_scenario": scenario,
             "gold_action": action,
-            "gold_slots": gold_entities,
+            "gold_slot_types": gold_slot_types,
             "scenario_candidates": scenario_candidates,
             "action_candidates": action_candidates,
             "slot_candidates": slot_candidates,
@@ -508,6 +508,9 @@ def main():
             print("-" * 80)
             print("OUTPUT:")
             print(generated)
+        if args.limitmode:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print("")
 
         if (idx + 1) % 10 == 0:
             print(f"[INFO] Processed {idx+1}/{len(items)}")

@@ -52,3 +52,8 @@ uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10
 ```bash
 uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --preview 10
 ```
+
+**Limit mode (pretty JSON to stdout):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10 --limitmode
+```
