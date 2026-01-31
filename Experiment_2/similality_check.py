@@ -172,6 +172,29 @@ def analyze_neighbor_ranks(df_gt, df_pred, target_col, analyzer):
         print("    The model is definitively confused by semantic neighbors.")
     else:
         print(f"\n>>> RESULT WEAK: Only {top3_rate:.1%} of errors are Top-3 neighbors.")
+
+    # --- 1.5. Similarity Threshold Analysis (Explicit Percentage) ---
+    print(f"\n[1.5] Similarity Threshold Analysis")
+    print(f"      What % of errors are 'Similar' (Cosine Sim > X)?")
+    
+    sim_thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
+    sim_stats = []
+    
+    sims_array = np.array(sims)
+    
+    for thresh in sim_thresholds:
+        count = np.sum(sims_array >= thresh)
+        rate = count / total_errors
+        sim_stats.append({
+            "Threshold": f"> {thresh:.1f}",
+            "Count": count,
+            "Rate": rate
+        })
+        
+    df_sim_stats = pd.DataFrame(sim_stats)
+    print(df_sim_stats.to_string(index=False, formatters={
+        'Rate': '{:.1%}'.format
+    }))
     
     # --- 2. Top-1 Mistake Detail ---
     print(f"\n[2] The 'Twin' Confusions (Most Frequent Rank #1 Errors)")
