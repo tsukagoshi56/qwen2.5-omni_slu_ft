@@ -22,6 +22,28 @@ uv run Experiment_Rationale/2_run_asr_on_audio.py
 uv run Experiment_Rationale/2_run_asr_on_audio.py --limit 10
 ```
 
-### Step 2: Rationale Generation and SLU (Next Step)
+### Step 2: Generate Rationale with Qwen2-Audio
 
-*(This step is to be implemented after successfully generating the ASR hypotheses data.)*
+Use the rationale generator to connect gold labels with evidence from either n-best text or audio.
+It outputs a JSONL file with short, structured rationales.
+
+**N-best mode (text-only):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output.jsonl
+```
+
+**Audio mode (audio + gold labels):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode audio \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output_audio.jsonl
+```
+
+**Quick test (limit 10):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10
+```
