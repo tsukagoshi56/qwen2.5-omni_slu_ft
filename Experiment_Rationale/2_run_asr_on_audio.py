@@ -217,6 +217,8 @@ def main():
                 return_tensors="pt"
             )
             inputs = {k: v.to(device) for k, v in inputs.items()}
+            if "input_features" in inputs:
+                inputs["input_features"] = inputs["input_features"].to(dtype=torch_dtype)
 
             # 4. n-bestリストの生成
             with torch.no_grad():
