@@ -8,7 +8,7 @@ The process involves generating n-best ASR hypotheses from audio and then using 
 
 ### Step 1: Run ASR to Generate N-best Hypotheses
 
-This script runs the `Qwen2-Audio` model to perform ASR on the audio files you provide. It uses the `recordings[].file` field from the SLURP jsonl and resolves it under `--audio_dir` (e.g., `slurp/slurp_real`). Audio decoding uses `ffmpeg_read`, matching the official evaluation script. It generates a JSONL file containing the n-best transcription hypotheses for each audio file. You can select which recording to use with `--recording_index` (default: 0). The prompt is fixed to the minimal eval-style input (`<|audio_bos|><|AUDIO|><|audio_eos|>`), with no additional text or system prompt. Use `--dump_prompt` to print the rendered prompt once for debugging. By default it restricts to 2 GPUs via `--cuda_devices 0,1`.
+This script runs the `Qwen2-Audio` model to perform ASR on the audio files you provide. It uses the `recordings[].file` field from the SLURP jsonl and resolves it under `--audio_dir` (e.g., `slurp/slurp_real`). Audio decoding uses `ffmpeg_read`, matching the official evaluation script. It generates a JSONL file containing the n-best transcription hypotheses for each audio file. You can select which recording to use with `--recording_index` (default: 0). The default prompt uses chat-style formatting with an explicit ASR instruction and system prompt; switch to `--prompt_mode eval` for the raw `<|audio_bos|><|AUDIO|><|audio_eos|>` + prompt_text format. Use `--dump_prompt` to print the rendered prompt once for debugging. By default it restricts to 2 GPUs via `--cuda_devices 0,1`.
 
 **Command:**
 Run from the repository root (e.g., `qwen2 2.5-omni_slu_ft`). Errors are printed to the console by default.
