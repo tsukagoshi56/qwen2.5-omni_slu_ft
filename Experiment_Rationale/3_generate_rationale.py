@@ -169,16 +169,16 @@ def pick_recording(recordings: List[Dict[str, Any]], index: int = 0) -> Optional
         return recordings[index].get("file")
     return recordings[0].get("file")
 
-def select_intent_candidates_all(
-    gold_intent: str,
-    intents: List[str],
+def select_candidates_all(
+    gold: str,
+    candidates: List[str],
 ) -> List[str]:
     # Keep a stable order; optionally ensure gold is included.
-    if not intents:
-        return [gold_intent] if gold_intent else []
-    if gold_intent and gold_intent not in intents:
-        return [gold_intent] + intents
-    return intents
+    if not candidates:
+        return [gold] if gold else []
+    if gold and gold not in candidates:
+        return [gold] + candidates
+    return candidates
 
 def select_slot_candidates_all(
     gold_entities: List[Dict[str, str]],
@@ -233,27 +233,33 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 def build_prompt_nbest(
-    gold_intent: str,
+    gold_scenario: str,
+    gold_action: str,
     gold_slots: List[Dict[str, str]],
-    intent_candidates: List[str],
+    scenario_candidates: List[str],
+    action_candidates: List[str],
     slot_candidates: List[Dict[str, str]],
     nbest_texts: List[str],
     stable_tokens: List[str],
     unstable_tokens: List[str],
 ) -> str:
-    intent_note = f"intent_candidates ({len(intent_candidates)}):"
+    scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
+    action_note = f"action_candidates ({len(action_candidates)}):"
     slot_note = f"slot_candidates ({len(slot_candidates)}):"
     return (
         "You are an SLU rationale generator. Keep everything short.\n"
         "Steps:\n"
         "1) Check n-best variation and note reliable vs unreliable words.\n"
-        "2) Reject non-gold intent candidates with a few-word reason.\n"
-        "3) Reject non-gold slot candidates with a few-word reason.\n"
+        "2) Reject non-gold scenario candidates with a few-word reason.\n"
+        "3) Reject non-gold action candidates with a few-word reason.\n"
+        "4) Reject non-gold slot candidates with a few-word reason.\n"
         "Output JSON only.\n"
         "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
-        f"gold_intent: {gold_intent}\n"
+        f"gold_scenario: {gold_scenario}\n"
+        f"gold_action: {gold_action}\n"
         f"gold_slots: {json.dumps(gold_slots, ensure_ascii=False)}\n"
-        f"{intent_note} {json.dumps(intent_candidates, ensure_ascii=False)}\n"
+        f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
+        f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
         f"nbest: {json.dumps(nbest_texts, ensure_ascii=False)}\n"
         f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
@@ -261,36 +267,44 @@ def build_prompt_nbest(
         "Output schema:\n"
         "{\n"
         '  "evidence": "<stable vs unstable words>",\n'
-        '  "intent_rejects": [{"intent": "...", "reason": "..."}],\n'
+        '  "scenario_rejects": [{"scenario": "...", "reason": "..."}],\n'
+        '  "action_rejects": [{"action": "...", "reason": "..."}],\n'
         '  "slot_rejects": [{"slot_type": "...", "filler": "...", "reason": "..."}]\n'
         "}\n"
         "If gold_slots is empty, reject all slot candidates with 'not mentioned'."
     )
 
 def build_prompt_audio(
-    gold_intent: str,
+    gold_scenario: str,
+    gold_action: str,
     gold_slots: List[Dict[str, str]],
-    intent_candidates: List[str],
+    scenario_candidates: List[str],
+    action_candidates: List[str],
     slot_candidates: List[Dict[str, str]],
 ) -> str:
-    intent_note = f"intent_candidates ({len(intent_candidates)}):"
+    scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
+    action_note = f"action_candidates ({len(action_candidates)}):"
     slot_note = f"slot_candidates ({len(slot_candidates)}):"
     return (
         "You are an SLU rationale generator. Keep everything short.\n"
         "Steps:\n"
         "1) Note key audio evidence (very brief).\n"
-        "2) Reject non-gold intent candidates with a few-word reason.\n"
-        "3) Reject non-gold slot candidates with a few-word reason.\n"
+        "2) Reject non-gold scenario candidates with a few-word reason.\n"
+        "3) Reject non-gold action candidates with a few-word reason.\n"
+        "4) Reject non-gold slot candidates with a few-word reason.\n"
         "Output JSON only.\n"
         "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
-        f"gold_intent: {gold_intent}\n"
+        f"gold_scenario: {gold_scenario}\n"
+        f"gold_action: {gold_action}\n"
         f"gold_slots: {json.dumps(gold_slots, ensure_ascii=False)}\n"
-        f"{intent_note} {json.dumps(intent_candidates, ensure_ascii=False)}\n"
+        f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
+        f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n\n"
         "Output schema:\n"
         "{\n"
         '  "evidence": "<audio keywords>",\n'
-        '  "intent_rejects": [{"intent": "...", "reason": "..."}],\n'
+        '  "scenario_rejects": [{"scenario": "...", "reason": "..."}],\n'
+        '  "action_rejects": [{"action": "...", "reason": "..."}],\n'
         '  "slot_rejects": [{"slot_type": "...", "filler": "...", "reason": "..."}]\n'
         "}\n"
         "If gold_slots is empty, reject all slot candidates with 'not mentioned'."
@@ -378,7 +392,6 @@ def main():
 
         scenario = item.get("scenario", "")
         action = item.get("action", "")
-        gold_intent = f"{scenario}:{action}" if scenario and action else ""
         gold_entities = build_entities(item)
 
         # n-best texts
@@ -394,9 +407,13 @@ def main():
         stable_unstable = summarize_nbest(nbest_texts)
         filler_pool = extract_candidate_fillers(nbest_texts)
 
-        intent_candidates = select_intent_candidates_all(
-            gold_intent=gold_intent,
-            intents=metadata["intents"],
+        scenario_candidates = select_candidates_all(
+            gold=scenario,
+            candidates=metadata["scenarios"],
+        )
+        action_candidates = select_candidates_all(
+            gold=action,
+            candidates=metadata["actions"],
         )
 
         slot_candidates = select_slot_candidates_all(
@@ -407,9 +424,11 @@ def main():
 
         if args.mode == "nbest":
             prompt = build_prompt_nbest(
-                gold_intent=gold_intent,
+                gold_scenario=scenario,
+                gold_action=action,
                 gold_slots=gold_entities,
-                intent_candidates=intent_candidates,
+                scenario_candidates=scenario_candidates,
+                action_candidates=action_candidates,
                 slot_candidates=slot_candidates,
                 nbest_texts=nbest_texts,
                 stable_tokens=stable_unstable["stable"],
@@ -429,9 +448,11 @@ def main():
             if audio is None:
                 continue
             prompt = build_prompt_audio(
-                gold_intent=gold_intent,
+                gold_scenario=scenario,
+                gold_action=action,
                 gold_slots=gold_entities,
-                intent_candidates=intent_candidates,
+                scenario_candidates=scenario_candidates,
+                action_candidates=action_candidates,
                 slot_candidates=slot_candidates,
             )
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt}]
@@ -464,9 +485,11 @@ def main():
         result = {
             "slurp_id": slurp_id,
             "mode": args.mode,
-            "gold_intent": gold_intent,
+            "gold_scenario": scenario,
+            "gold_action": action,
             "gold_slots": gold_entities,
-            "intent_candidates": intent_candidates,
+            "scenario_candidates": scenario_candidates,
+            "action_candidates": action_candidates,
             "slot_candidates": slot_candidates,
             "nbest": nbest_texts if args.mode == "nbest" else [],
             "nbest_summary": stable_unstable if args.mode == "nbest" else {},
