@@ -118,6 +118,13 @@ def main():
         help="Explicit ASR instruction for reproducible prompting."
     )
     parser.add_argument(
+        "--prompt_mode",
+        type=str,
+        choices=["eval", "chat"],
+        default="eval",
+        help="Prompt format: 'eval' uses <|audio_bos|><|AUDIO|><|audio_eos|> + prompt_text (official style)."
+    )
+    parser.add_argument(
         "--system_prompt",
         type=str,
         default=(
@@ -260,31 +267,43 @@ def main():
             audio, _ = librosa.load(audio_path, sr=sr)
 
             # 2. ASR用のプロンプト作成
-            user_content = [
-                {"type": "text", "text": args.prompt_text},
-                {"type": "audio", "audio_url": "placeholder"}
-            ]
-            messages = []
-            if args.system_prompt:
-                messages.append({"role": "system", "content": args.system_prompt})
-            messages.append({"role": "user", "content": user_content})
-            text_input = processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+            if args.prompt_mode == "chat":
+                user_content = [
+                    {"type": "text", "text": args.prompt_text},
+                    {"type": "audio", "audio_url": "placeholder"}
+                ]
+                messages = []
+                if args.system_prompt:
+                    messages.append({"role": "system", "content": args.system_prompt})
+                messages.append({"role": "user", "content": user_content})
+                text_input = processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+            else:
+                text_input = f"<|audio_bos|><|AUDIO|><|audio_eos|>{args.prompt_text}"
+
             if args.dump_prompt and i == 0:
                 print("\n--- Rendered Prompt (first item) ---")
                 print(text_input)
                 print("--- End Prompt ---\n")
 
             # 3. モデル入力の準備
-            inputs = processor(
-                text=[text_input], 
-                audio=[audio], 
-                sampling_rate=sr, 
-                return_tensors="pt"
-            )
+            try:
+                inputs = processor(
+                    text=[text_input],
+                    audios=[audio],
+                    sampling_rate=sr,
+                    return_tensors="pt"
+                )
+            except TypeError:
+                inputs = processor(
+                    text=[text_input],
+                    audio=[audio],
+                    sampling_rate=sr,
+                    return_tensors="pt"
+                )
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             # 4. n-bestリストの生成
