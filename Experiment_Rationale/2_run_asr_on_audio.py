@@ -90,7 +90,10 @@ def main():
     parser.add_argument(
         "--prompt_text",
         type=str,
-        default="Please transcribe the audio.",
+        default=(
+            "Transcribe the audio verbatim. "
+            "Return only the spoken words, no explanations or extra text."
+        ),
         help="Explicit ASR instruction for reproducible prompting."
     )
     parser.add_argument(
