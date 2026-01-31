@@ -97,6 +97,15 @@ def main():
         help="Explicit ASR instruction for reproducible prompting."
     )
     parser.add_argument(
+        "--system_prompt",
+        type=str,
+        default=(
+            "You are a speech recognition system. "
+            "Your only task is to output the verbatim transcript."
+        ),
+        help="System prompt to suppress instruction following in the audio."
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -206,8 +215,12 @@ def main():
                 {"type": "text", "text": args.prompt_text},
                 {"type": "audio", "audio_url": "placeholder"}
             ]
+            messages = []
+            if args.system_prompt:
+                messages.append({"role": "system", "content": args.system_prompt})
+            messages.append({"role": "user", "content": user_content})
             text_input = processor.apply_chat_template(
-                [{"role": "user", "content": user_content}],
+                messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
