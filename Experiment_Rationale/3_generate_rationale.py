@@ -320,6 +320,7 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--preview", type=int, default=0, help="Print prompt and output for first N samples.")
     parser.add_argument("--save_raw", action="store_true")
     args = parser.parse_args()
 
@@ -474,6 +475,16 @@ def main():
         if args.save_raw:
             result["rationale_raw"] = generated
         results.append(result)
+
+        if args.preview and idx < args.preview:
+            print("=" * 80)
+            print(f"[PREVIEW] {idx+1} / {args.preview} | slurp_id={slurp_id} | mode={args.mode}")
+            print("-" * 80)
+            print("PROMPT:")
+            print(prompt)
+            print("-" * 80)
+            print("OUTPUT:")
+            print(generated)
 
         if (idx + 1) % 10 == 0:
             print(f"[INFO] Processed {idx+1}/{len(items)}")

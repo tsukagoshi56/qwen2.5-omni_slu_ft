@@ -47,3 +47,8 @@ uv run Experiment_Rationale/3_generate_rationale.py \
 ```bash
 uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10
 ```
+
+**Preview first 10 prompts/outputs:**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --preview 10
+```
