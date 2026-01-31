@@ -145,11 +145,15 @@ def main():
 
     # --- モデルとプロセッサのロード ---
     print(f"Loading model: {args.model_name_or_path} ...")
-    processor = WhisperProcessor.from_pretrained(args.model_name_or_path)
+    processor = WhisperProcessor.from_pretrained(
+        args.model_name_or_path,
+        trust_remote_code=True
+    )
     model = WhisperForConditionalGeneration.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch_dtype,
-        device_map="auto" if device == "cuda" else None
+        device_map="auto" if device == "cuda" else None,
+        trust_remote_code=True
     )
     if device == "cpu":
         model.to(device)
