@@ -3,6 +3,8 @@ import json
 import os
 import glob
 import argparse
+import random
+import numpy as np
 import torch
 import librosa
 from transformers import AutoProcessor, AutoModelForCausalLM
@@ -30,6 +32,16 @@ def load_slurp_entries(input_file: str) -> list:
             except json.JSONDecodeError:
                 continue
     return entries
+
+
+def set_reproducible(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def main():
     parser = argparse.ArgumentParser(description="Run ASR on audio files to generate n-best hypotheses.")
@@ -76,12 +88,26 @@ def main():
         help="Which recordings[] entry to use from SLURP jsonl."
     )
     parser.add_argument(
+        "--prompt_text",
+        type=str,
+        default="Please transcribe the audio.",
+        help="Explicit ASR instruction for reproducible prompting."
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility."
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help="Limit the number of audio files to process (for quick testing)."
     )
     args = parser.parse_args()
+
+    set_reproducible(args.seed)
 
     if args.num_hypotheses > args.num_beams:
         print("Warning: num_hypotheses > num_beams. Setting num_beams = num_hypotheses.")
@@ -173,8 +199,10 @@ def main():
             audio, _ = librosa.load(audio_path, sr=sr)
 
             # 2. ASR用のプロンプト作成
-            # user_content = [{"type": "text", "text": "What does the user say?"}] # 書き起こしを促すプロンプト
-            user_content = [{"type": "audio", "audio_url": "placeholder"}]
+            user_content = [
+                {"type": "text", "text": args.prompt_text},
+                {"type": "audio", "audio_url": "placeholder"}
+            ]
             text_input = processor.apply_chat_template(
                 [{"role": "user", "content": user_content}],
                 tokenize=False,
@@ -197,6 +225,7 @@ def main():
                     max_new_tokens=128,
                     num_beams=args.num_beams,
                     num_return_sequences=args.num_hypotheses,
+                    do_sample=False,
                     early_stopping=True
                 )
             
