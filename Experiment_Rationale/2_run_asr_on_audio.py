@@ -293,17 +293,20 @@ def main():
             try:
                 inputs = processor(
                     text=[text_input],
-                    audios=[audio],
-                    sampling_rate=sr,
-                    return_tensors="pt"
-                )
-            except TypeError:
-                inputs = processor(
-                    text=[text_input],
                     audio=[audio],
                     sampling_rate=sr,
                     return_tensors="pt"
                 )
+            except (TypeError, ValueError) as e_audio:
+                try:
+                    inputs = processor(
+                        text=[text_input],
+                        audios=[audio],
+                        sampling_rate=sr,
+                        return_tensors="pt"
+                    )
+                except Exception:
+                    raise e_audio
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             # 4. n-bestリストの生成
