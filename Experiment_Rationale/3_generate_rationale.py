@@ -36,6 +36,12 @@ def write_jsonl(path: str, items: List[Dict[str, Any]]):
         for item in items:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
+def write_raw_jsonl(path: str, outputs: List[str]):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for output in outputs:
+            f.write(json.dumps(output, ensure_ascii=False) + "\n")
+
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     if not filename:
         return None
@@ -114,6 +120,14 @@ def summarize_nbest(hyp_texts: List[str], max_tokens: int = 6) -> Dict[str, List
         "stable": stable[:max_tokens],
         "unstable": unstable[:max_tokens],
     }
+
+def format_interpretations(nbest_texts: List[str], max_items: int = 5) -> str:
+    if not nbest_texts:
+        return "interpretation_1: (none)"
+    lines = []
+    for i, text in enumerate(nbest_texts[:max_items]):
+        lines.append(f"interpretation_{i+1}: {text}")
+    return "\n".join(lines)
 
 def load_metadata(path: str) -> Dict[str, List[str]]:
     if not os.path.exists(path):
@@ -240,65 +254,132 @@ def build_prompt_nbest(
 ) -> str:
     scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
     action_note = f"action_candidates ({len(action_candidates)}):"
-    slot_note = f"slot_candidates ({len(slot_candidates)}):"
+    slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
+    interpretations_text = format_interpretations(nbest_texts)
     fewshot = ""
     if use_fewshot:
         fewshot = (
-            "Example:\n"
-            "gold_scenario: music\n"
-            "gold_action: play\n"
-            "gold_slot_types: [\"song_name\"]\n"
-            "scenario_candidates (3): [\"music\",\"alarm\",\"weather\"]\n"
-            "action_candidates (3): [\"play\",\"query\",\"set\"]\n"
-            "slot_candidates (3): [\"song_name\",\"artist_name\",\"time\"]\n"
-            "nbest: [\"play yesterday\",\"play yester day\",\"please play yesterday\"]\n"
+            "EXAMPLE INPUT:\n"
+            "reference_scenario: music\n"
+            "reference_action: play\n"
+            "reference_slot_types: [\"song_name\"]\n"
+            "scenario_candidates (5): [\"music\",\"alarm\",\"weather\",\"general\",\"qa\"]\n"
+            "action_candidates (5): [\"play\",\"query\",\"set\",\"remove\",\"greet\"]\n"
+            "allowed_slot_types (5): [\"song_name\",\"artist_name\",\"time\",\"date\",\"place_name\"]\n"
+            "interpretations:\n"
+            "interpretation_1: play yesterday\n"
+            "interpretation_2: play yester day\n"
+            "interpretation_3: please play yesterday\n"
             "stable_tokens: [\"play\",\"yesterday\"]\n"
             "unstable_tokens: []\n"
-            "Output:\n"
+            "decision_pivots: [\"play\",\"yesterday\"]\n"
+            "EXAMPLE OUTPUT:\n"
             "{\n"
-            "  \"evidence\": \"stable: play,yesterday\",\n"
-            "  \"scenario_rejects\": [\n"
-            "    {\"scenario\": \"alarm\", \"reason\": \"no alarm words\"},\n"
-            "    {\"scenario\": \"weather\", \"reason\": \"no weather words\"}\n"
+            "  \"interpretation_uncertainty_analysis\": {\n"
+            "    \"stable_cues\": [\"play\",\"yesterday\"],\n"
+            "    \"unstable_cues\": [],\n"
+            "    \"decision_pivots\": [\"play\",\"yesterday\"]\n"
+            "  },\n"
+            "  \"semantic_core\": \"user asks to play the song yesterday\",\n"
+            "  \"topk_scenarios\": [\n"
+            "    {\"scenario\": \"music\"},\n"
+            "    {\"scenario\": \"alarm\"},\n"
+            "    {\"scenario\": \"weather\"},\n"
+            "    {\"scenario\": \"general\"},\n"
+            "    {\"scenario\": \"qa\"}\n"
             "  ],\n"
-            "  \"action_rejects\": [\n"
-            "    {\"action\": \"query\", \"reason\": \"no question words\"},\n"
-            "    {\"action\": \"set\", \"reason\": \"no setting words\"}\n"
+            "  \"scenario_elimination\": [\n"
+            "    {\"scenario\": \"alarm\", \"reason\": \"no alarm cue in play,yesterday\"},\n"
+            "    {\"scenario\": \"weather\", \"reason\": \"no weather cue in play,yesterday\"},\n"
+            "    {\"scenario\": \"general\", \"reason\": \"no greeting or joke cue\"},\n"
+            "    {\"scenario\": \"qa\", \"reason\": \"no factual question cue\"}\n"
             "  ],\n"
-            "  \"slot_rejects\": [\n"
-            "    {\"slot_type\": \"artist_name\", \"reason\": \"no artist mentioned\"},\n"
-            "    {\"slot_type\": \"time\", \"reason\": \"no time mentioned\"}\n"
-            "  ]\n"
+            "  \"topk_actions\": [\n"
+            "    {\"action\": \"play\"},\n"
+            "    {\"action\": \"query\"},\n"
+            "    {\"action\": \"set\"},\n"
+            "    {\"action\": \"remove\"},\n"
+            "    {\"action\": \"greet\"}\n"
+            "  ],\n"
+            "  \"action_elimination\": [\n"
+            "    {\"action\": \"query\", \"reason\": \"no question cue in play,yesterday\"},\n"
+            "    {\"action\": \"set\", \"reason\": \"no setting cue in play,yesterday\"},\n"
+            "    {\"action\": \"remove\", \"reason\": \"no removal cue in play,yesterday\"},\n"
+            "    {\"action\": \"greet\", \"reason\": \"no greeting cue\"}\n"
+            "  ],\n"
+            "  \"slot_grounding\": [\n"
+            "    {\"slot_type\": \"song_name\", \"supported\": true, \"best_span\": \"yesterday\", \"source_hypothesis\": \"interpretation_1\"}\n"
+            "  ],\n"
+            "  \"final_rationalization\": \"stable play,yesterday supports music-play with song_name despite minor uncertainty\"\n"
             "}\n"
             "\n"
         )
     return (
-        "You are an SLU rationale generator. Keep everything short.\n"
-        "Steps:\n"
-        "1) Check n-best variation and note reliable vs unreliable words.\n"
-        "2) Reject non-gold scenario candidates with a few-word reason.\n"
-        "3) Reject non-gold action candidates with a few-word reason.\n"
-        "4) Reject non-gold slot candidates with a few-word reason.\n"
-        "Output JSON only.\n"
-        "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
-        f"{fewshot}"
-        f"gold_scenario: {gold_scenario}\n"
-        f"gold_action: {gold_action}\n"
-        f"gold_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
+        "You are a teacher model whose role is NOT to predict labels, but to rationalize GIVEN reference labels.\n"
+        "Use ONLY the information provided below. Output ENGLISH ONLY. Output JSON ONLY.\n\n"
+        "==================================================\n"
+        "GENERAL RULES\n"
+        "==================================================\n"
+        "- Do NOT invent scenarios, actions, or slot types outside the provided candidates.\n"
+        "- Do NOT hallucinate slot values not supported by the utterance.\n"
+        "- Do NOT output the reference labels in the JSON.\n"
+        "- The maximum TOP-K for scenario/action is fixed to 5.\n\n"
+        "==================================================\n"
+        "INPUT (REFERENCE + CANDIDATES + INTERPRETATIONS)\n"
+        "==================================================\n"
+        f"reference_scenario: {gold_scenario}\n"
+        f"reference_action: {gold_action}\n"
+        f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
         f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
         f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
-        f"nbest: {json.dumps(nbest_texts, ensure_ascii=False)}\n"
+        "interpretations:\n"
+        f"{interpretations_text}\n"
         f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
-        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n\n"
-        "Output schema:\n"
+        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n"
+        "decision_pivots: []\n\n"
+        "==================================================\n"
+        "REASONING PROCEDURE (FOLLOW IN ORDER)\n"
+        "==================================================\n"
+        "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
+        "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
+        "- Do NOT reference scenario/action/slot names.\n"
+        "Step 2: SEMANTIC CORE DERIVATION\n"
+        "- One short sentence, no labels.\n"
+        "Step 3: TOP-5 SCENARIO CANDIDATES\n"
+        "- Use ONLY scenario_candidates; include reference_scenario.\n"
+        "Step 4: SCENARIO ELIMINATION\n"
+        "- Eliminate non-reference scenarios with one-sentence reasons citing cues.\n"
+        "Step 5: TOP-5 ACTION CANDIDATES\n"
+        "- Use ONLY action_candidates; include reference_action.\n"
+        "Step 6: ACTION ELIMINATION\n"
+        "- Eliminate non-reference actions with one-sentence reasons citing cues.\n"
+        "Step 7: SLOT GROUNDING\n"
+        "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
+        "- source_hypothesis must be interpretation_1..interpretation_5 or \"none\".\n"
+        "Step 8: FINAL RATIONALIZATION\n"
+        "- One concise sentence linking cues to reference labels.\n\n"
+        "==================================================\n"
+        "OUTPUT FORMAT (STRICT JSON)\n"
+        "==================================================\n"
         "{\n"
-        '  "evidence": "<stable vs unstable words>",\n'
-        '  "scenario_rejects": [{"scenario": "...", "reason": "..."}],\n'
-        '  "action_rejects": [{"action": "...", "reason": "..."}],\n'
-        '  "slot_rejects": [{"slot_type": "...", "reason": "..."}]\n'
-        "}\n"
-        "If gold_slot_types is empty, reject all slot candidates with 'not mentioned'."
+        "  \"interpretation_uncertainty_analysis\": {\n"
+        "    \"stable_cues\": [],\n"
+        "    \"unstable_cues\": [],\n"
+        "    \"decision_pivots\": []\n"
+        "  },\n"
+        "  \"semantic_core\": \"\",\n"
+        "  \"topk_scenarios\": [{\"scenario\": \"\"}],\n"
+        "  \"scenario_elimination\": [{\"scenario\": \"\", \"reason\": \"\"}],\n"
+        "  \"topk_actions\": [{\"action\": \"\"}],\n"
+        "  \"action_elimination\": [{\"action\": \"\", \"reason\": \"\"}],\n"
+        "  \"slot_grounding\": [\n"
+        "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
+        "  ],\n"
+        "  \"final_rationalization\": \"\"\n"
+        "}\n\n"
+        f"{fewshot}"
+        "Now produce the JSON for the given INPUT."
     )
 
 def build_prompt_audio(
@@ -312,59 +393,129 @@ def build_prompt_audio(
 ) -> str:
     scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
     action_note = f"action_candidates ({len(action_candidates)}):"
-    slot_note = f"slot_candidates ({len(slot_candidates)}):"
+    slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
     fewshot = ""
     if use_fewshot:
         fewshot = (
-            "Example:\n"
-            "gold_scenario: alarm\n"
-            "gold_action: set\n"
-            "gold_slot_types: [\"time\"]\n"
-            "scenario_candidates (3): [\"alarm\",\"music\",\"weather\"]\n"
-            "action_candidates (3): [\"set\",\"query\",\"remove\"]\n"
-            "slot_candidates (3): [\"time\",\"date\",\"location\"]\n"
-            "Output:\n"
+            "EXAMPLE INPUT:\n"
+            "reference_scenario: alarm\n"
+            "reference_action: set\n"
+            "reference_slot_types: [\"time\"]\n"
+            "scenario_candidates (5): [\"alarm\",\"music\",\"weather\",\"general\",\"qa\"]\n"
+            "action_candidates (5): [\"set\",\"query\",\"remove\",\"play\",\"greet\"]\n"
+            "allowed_slot_types (5): [\"time\",\"date\",\"location\",\"song_name\",\"person\"]\n"
+            "interpretations:\n"
+            "interpretation_1: (audio only)\n"
+            "stable_tokens: []\n"
+            "unstable_tokens: []\n"
+            "decision_pivots: [\"time\"]\n"
+            "EXAMPLE OUTPUT:\n"
             "{\n"
-            "  \"evidence\": \"heard time phrase\",\n"
-            "  \"scenario_rejects\": [\n"
-            "    {\"scenario\": \"music\", \"reason\": \"no music words\"},\n"
-            "    {\"scenario\": \"weather\", \"reason\": \"no weather words\"}\n"
+            "  \"interpretation_uncertainty_analysis\": {\n"
+            "    \"stable_cues\": [\"time\"],\n"
+            "    \"unstable_cues\": [],\n"
+            "    \"decision_pivots\": [\"time\"]\n"
+            "  },\n"
+            "  \"semantic_core\": \"user wants an alarm time set\",\n"
+            "  \"topk_scenarios\": [\n"
+            "    {\"scenario\": \"alarm\"},\n"
+            "    {\"scenario\": \"music\"},\n"
+            "    {\"scenario\": \"weather\"},\n"
+            "    {\"scenario\": \"general\"},\n"
+            "    {\"scenario\": \"qa\"}\n"
             "  ],\n"
-            "  \"action_rejects\": [\n"
-            "    {\"action\": \"query\", \"reason\": \"not a question\"},\n"
-            "    {\"action\": \"remove\", \"reason\": \"no removal words\"}\n"
+            "  \"scenario_elimination\": [\n"
+            "    {\"scenario\": \"music\", \"reason\": \"no music cue in time\"},\n"
+            "    {\"scenario\": \"weather\", \"reason\": \"no weather cue in time\"},\n"
+            "    {\"scenario\": \"general\", \"reason\": \"no greeting or joke cue\"},\n"
+            "    {\"scenario\": \"qa\", \"reason\": \"no factual question cue\"}\n"
             "  ],\n"
-            "  \"slot_rejects\": [\n"
-            "    {\"slot_type\": \"date\", \"reason\": \"no date mentioned\"},\n"
-            "    {\"slot_type\": \"location\", \"reason\": \"no location mentioned\"}\n"
-            "  ]\n"
+            "  \"topk_actions\": [\n"
+            "    {\"action\": \"set\"},\n"
+            "    {\"action\": \"query\"},\n"
+            "    {\"action\": \"remove\"},\n"
+            "    {\"action\": \"play\"},\n"
+            "    {\"action\": \"greet\"}\n"
+            "  ],\n"
+            "  \"action_elimination\": [\n"
+            "    {\"action\": \"query\", \"reason\": \"not a question cue\"},\n"
+            "    {\"action\": \"remove\", \"reason\": \"no removal cue\"},\n"
+            "    {\"action\": \"play\", \"reason\": \"no play cue\"},\n"
+            "    {\"action\": \"greet\", \"reason\": \"no greeting cue\"}\n"
+            "  ],\n"
+            "  \"slot_grounding\": [\n"
+            "    {\"slot_type\": \"time\", \"supported\": true, \"best_span\": \"time\", \"source_hypothesis\": \"interpretation_1\"}\n"
+            "  ],\n"
+            "  \"final_rationalization\": \"audio cues about time align with alarm set and time slot\"\n"
             "}\n"
             "\n"
         )
     return (
-        "You are an SLU rationale generator. Keep everything short.\n"
-        "Steps:\n"
-        "1) Note key audio evidence (very brief).\n"
-        "2) Reject non-gold scenario candidates with a few-word reason.\n"
-        "3) Reject non-gold action candidates with a few-word reason.\n"
-        "4) Reject non-gold slot candidates with a few-word reason.\n"
-        "Output JSON only.\n"
-        "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
-        f"{fewshot}"
-        f"gold_scenario: {gold_scenario}\n"
-        f"gold_action: {gold_action}\n"
-        f"gold_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
+        "You are a teacher model whose role is NOT to predict labels, but to rationalize GIVEN reference labels.\n"
+        "Use ONLY the information provided below. Output ENGLISH ONLY. Output JSON ONLY.\n\n"
+        "==================================================\n"
+        "GENERAL RULES\n"
+        "==================================================\n"
+        "- Do NOT invent scenarios, actions, or slot types outside the provided candidates.\n"
+        "- Do NOT hallucinate slot values not supported by the utterance.\n"
+        "- Do NOT output the reference labels in the JSON.\n"
+        "- The maximum TOP-K for scenario/action is fixed to 5.\n\n"
+        "==================================================\n"
+        "INPUT (REFERENCE + CANDIDATES)\n"
+        "==================================================\n"
+        f"reference_scenario: {gold_scenario}\n"
+        f"reference_action: {gold_action}\n"
+        f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
         f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
         f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
-        f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n\n"
-        "Output schema:\n"
+        f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
+        "interpretations:\n"
+        "interpretation_1: (audio only)\n"
+        "stable_tokens: []\n"
+        "unstable_tokens: []\n"
+        "decision_pivots: []\n\n"
+        "==================================================\n"
+        "REASONING PROCEDURE (FOLLOW IN ORDER)\n"
+        "==================================================\n"
+        "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
+        "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
+        "- Do NOT reference scenario/action/slot names.\n"
+        "Step 2: SEMANTIC CORE DERIVATION\n"
+        "- One short sentence, no labels.\n"
+        "Step 3: TOP-5 SCENARIO CANDIDATES\n"
+        "- Use ONLY scenario_candidates; include reference_scenario.\n"
+        "Step 4: SCENARIO ELIMINATION\n"
+        "- Eliminate non-reference scenarios with one-sentence reasons citing cues.\n"
+        "Step 5: TOP-5 ACTION CANDIDATES\n"
+        "- Use ONLY action_candidates; include reference_action.\n"
+        "Step 6: ACTION ELIMINATION\n"
+        "- Eliminate non-reference actions with one-sentence reasons citing cues.\n"
+        "Step 7: SLOT GROUNDING\n"
+        "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
+        "- source_hypothesis must be interpretation_1 or \"none\".\n"
+        "Step 8: FINAL RATIONALIZATION\n"
+        "- One concise sentence linking cues to reference labels.\n\n"
+        "==================================================\n"
+        "OUTPUT FORMAT (STRICT JSON)\n"
+        "==================================================\n"
         "{\n"
-        '  "evidence": "<audio keywords>",\n'
-        '  "scenario_rejects": [{"scenario": "...", "reason": "..."}],\n'
-        '  "action_rejects": [{"action": "...", "reason": "..."}],\n'
-        '  "slot_rejects": [{"slot_type": "...", "reason": "..."}]\n'
-        "}\n"
-        "If gold_slot_types is empty, reject all slot candidates with 'not mentioned'."
+        "  \"interpretation_uncertainty_analysis\": {\n"
+        "    \"stable_cues\": [],\n"
+        "    \"unstable_cues\": [],\n"
+        "    \"decision_pivots\": []\n"
+        "  },\n"
+        "  \"semantic_core\": \"\",\n"
+        "  \"topk_scenarios\": [{\"scenario\": \"\"}],\n"
+        "  \"scenario_elimination\": [{\"scenario\": \"\", \"reason\": \"\"}],\n"
+        "  \"topk_actions\": [{\"action\": \"\"}],\n"
+        "  \"action_elimination\": [{\"action\": \"\", \"reason\": \"\"}],\n"
+        "  \"slot_grounding\": [\n"
+        "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
+        "  ],\n"
+        "  \"final_rationalization\": \"\"\n"
+        "}\n\n"
+        f"{fewshot}"
+        "Now produce the JSON for the given INPUT."
     )
 
 # ----------------------------
@@ -381,6 +532,7 @@ def main():
     parser.add_argument("--clusters_file", type=str, default="Experiment_3/slurp_clusters.json")
     parser.add_argument("--confusing_pairs_file", type=str, default="Experiment_3/slurp_confusing_pairs.json")
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/rationale_output.jsonl")
+    parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write only model outputs; full: write metadata JSON.")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
@@ -435,6 +587,7 @@ def main():
     model.eval()
 
     results: List[Dict[str, Any]] = []
+    raw_outputs: List[str] = []
     sr = processor.feature_extractor.sampling_rate
 
     for idx, item in enumerate(items):
@@ -548,19 +701,19 @@ def main():
         result = {
             "slurp_id": slurp_id,
             "mode": args.mode,
-            "gold_scenario": scenario,
-            "gold_action": action,
-            "gold_slot_types": gold_slot_types,
             "scenario_candidates": scenario_candidates,
             "action_candidates": action_candidates,
             "slot_candidates": slot_candidates,
             "nbest": nbest_texts if args.mode == "nbest" else [],
             "nbest_summary": stable_unstable if args.mode == "nbest" else {},
             "rationale": parsed,
+            "raw_output": generated,
         }
         if args.save_raw:
             result["rationale_raw"] = generated
-        results.append(result)
+        raw_outputs.append(generated)
+        if args.output_mode == "full":
+            results.append(result)
 
         if args.preview and idx < args.preview:
             print("=" * 80)
@@ -572,13 +725,21 @@ def main():
             print("OUTPUT:")
             print(generated)
         if args.limitmode:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            limit_view = {
+                "slurp_id": slurp_id,
+                "prompt": prompt,
+                "raw_output": generated,
+            }
+            print(json.dumps(limit_view, ensure_ascii=False, indent=2))
             print("")
 
         if (idx + 1) % 10 == 0:
             print(f"[INFO] Processed {idx+1}/{len(items)}")
 
-    write_jsonl(output_path, results)
+    if args.output_mode == "full":
+        write_jsonl(output_path, results)
+    else:
+        write_raw_jsonl(output_path, raw_outputs)
     print(f"Done. Saved to {output_path}")
 
 if __name__ == "__main__":

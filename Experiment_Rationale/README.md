@@ -59,3 +59,4 @@ uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10 --li
 ```
 
 Note: The prompt includes a small few-shot example by default to encourage concise rejection reasons.
+Output JSONL defaults to raw model outputs; use `--output_mode full` for metadata JSON.
