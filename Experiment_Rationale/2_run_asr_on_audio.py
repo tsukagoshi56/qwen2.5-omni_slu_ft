@@ -9,6 +9,76 @@ import torch
 from transformers.pipelines.audio_utils import ffmpeg_read
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
+def normalize_text(text: str) -> str:
+    return " ".join(text.lower().strip().split())
+
+
+def levenshtein_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i]
+        for j, cb in enumerate(b, start=1):
+            insert = curr[j - 1] + 1
+            delete = prev[j] + 1
+            replace = prev[j - 1] + (ca != cb)
+            curr.append(min(insert, delete, replace))
+        prev = curr
+    return prev[-1]
+
+
+def normalized_edit_distance(a: str, b: str) -> float:
+    a = normalize_text(a)
+    b = normalize_text(b)
+    denom = max(len(a), len(b), 1)
+    return levenshtein_distance(a, b) / denom
+
+
+def select_diverse(hyps: list, k: int) -> list:
+    if k <= 0:
+        return []
+    seen = set()
+    unique = []
+    for h in hyps:
+        key = normalize_text(h)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(h)
+    if len(unique) <= k:
+        return unique
+
+    def avg_dist(idx):
+        base = unique[idx]
+        total = 0.0
+        for j, cand in enumerate(unique):
+            if j == idx:
+                continue
+            total += normalized_edit_distance(base, cand)
+        return total / max(len(unique) - 1, 1)
+
+    first_idx = max(range(len(unique)), key=avg_dist)
+    selected = [unique[first_idx]]
+    remaining = [u for i, u in enumerate(unique) if i != first_idx]
+
+    while len(selected) < k and remaining:
+        best_idx = None
+        best_score = -1.0
+        for idx, cand in enumerate(remaining):
+            score = min(normalized_edit_distance(cand, s) for s in selected)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        selected.append(remaining.pop(best_idx))
+    return selected
+
 def load_slurp_entries(input_file: str) -> list:
     """
     SLURPのjsonlファイルを読み込み、各エントリのリストを返す。
@@ -92,10 +162,41 @@ def main():
         help="Language code for Whisper decoding (e.g., en, ja, zh)."
     )
     parser.add_argument(
+        "--diversity_method",
+        type=str,
+        choices=["group_beam", "sampling_pool", "none"],
+        default="group_beam",
+        help="Diversity method for n-best: group_beam, sampling_pool, or none."
+    )
+    parser.add_argument(
         "--diversity_penalty",
         type=float,
         default=1.0,
         help="Diversity penalty for group beam search (e.g., 0.5 to 2.0)."
+    )
+    parser.add_argument(
+        "--sampling_pool",
+        type=int,
+        default=0,
+        help="If >0, sample this many candidates and select diverse n-best."
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature (used when --sampling_pool > 0)."
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=0.95,
+        help="Top-p nucleus sampling (used when --sampling_pool > 0)."
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=50,
+        help="Top-k sampling (used when --sampling_pool > 0)."
     )
     parser.add_argument(
         "--dump_prompt",
@@ -231,25 +332,90 @@ def main():
                 inputs["input_features"] = inputs["input_features"].to(dtype=torch_dtype)
 
             # 4. n-bestリストの生成
+            used_sampling = False
             with torch.no_grad():
                 forced_decoder_ids = processor.get_decoder_prompt_ids(
                     language=args.language,
                     task="transcribe"
                 )
-                output_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=128,
-                    num_beams=args.num_beams,
-                    num_return_sequences=args.num_hypotheses,
-                    do_sample=False,
-                    early_stopping=True,
-                    forced_decoder_ids=forced_decoder_ids,
-                    num_beam_groups=args.num_beams,
-                    diversity_penalty=args.diversity_penalty
-                )
+                if args.diversity_method == "sampling_pool":
+                    if args.sampling_pool <= 0:
+                        raise ValueError("--sampling_pool must be > 0 when using sampling_pool.")
+                    gen = torch.Generator(device=device).manual_seed(args.seed + i)
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=128,
+                        do_sample=True,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        top_k=args.top_k,
+                        num_beams=1,
+                        num_return_sequences=args.sampling_pool,
+                        early_stopping=True,
+                        forced_decoder_ids=forced_decoder_ids,
+                        generator=gen
+                    )
+                    used_sampling = True
+                elif args.diversity_method == "group_beam":
+                    try:
+                        output_ids = model.generate(
+                            **inputs,
+                            max_new_tokens=128,
+                            num_beams=args.num_beams,
+                            num_return_sequences=args.num_hypotheses,
+                            do_sample=False,
+                            early_stopping=True,
+                            forced_decoder_ids=forced_decoder_ids,
+                            num_beam_groups=args.num_beams,
+                            diversity_penalty=args.diversity_penalty
+                        )
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if "group beam search requires trust_remote_code" in msg and args.sampling_pool > 0:
+                            print("Warning: group beam search unavailable; falling back to sampling_pool.")
+                            gen = torch.Generator(device=device).manual_seed(args.seed + i)
+                            output_ids = model.generate(
+                                **inputs,
+                                max_new_tokens=128,
+                                do_sample=True,
+                                temperature=args.temperature,
+                                top_p=args.top_p,
+                                top_k=args.top_k,
+                                num_beams=1,
+                                num_return_sequences=args.sampling_pool,
+                                early_stopping=True,
+                                forced_decoder_ids=forced_decoder_ids,
+                                generator=gen
+                            )
+                            used_sampling = True
+                        elif "group beam search requires trust_remote_code" in msg:
+                            print("Warning: group beam search unavailable; falling back to standard beam search.")
+                            output_ids = model.generate(
+                                **inputs,
+                                max_new_tokens=128,
+                                num_beams=args.num_beams,
+                                num_return_sequences=args.num_hypotheses,
+                                do_sample=False,
+                                early_stopping=True,
+                                forced_decoder_ids=forced_decoder_ids
+                            )
+                        else:
+                            raise
+                else:
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=128,
+                        num_beams=args.num_beams,
+                        num_return_sequences=args.num_hypotheses,
+                        do_sample=False,
+                        early_stopping=True,
+                        forced_decoder_ids=forced_decoder_ids
+                    )
             
             # 5. 結果のデコード
             transcriptions = processor.batch_decode(output_ids, skip_special_tokens=True)
+            if used_sampling:
+                transcriptions = select_diverse(transcriptions, args.num_hypotheses)
 
             # 6. 出力データの整形
             hypotheses = [{"text": trans.strip()} for trans in transcriptions]
