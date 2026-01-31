@@ -236,10 +236,42 @@ def build_prompt_nbest(
     nbest_texts: List[str],
     stable_tokens: List[str],
     unstable_tokens: List[str],
+    use_fewshot: bool = True,
 ) -> str:
     scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
     action_note = f"action_candidates ({len(action_candidates)}):"
     slot_note = f"slot_candidates ({len(slot_candidates)}):"
+    fewshot = ""
+    if use_fewshot:
+        fewshot = (
+            "Example:\n"
+            "gold_scenario: music\n"
+            "gold_action: play\n"
+            "gold_slot_types: [\"song_name\"]\n"
+            "scenario_candidates (3): [\"music\",\"alarm\",\"weather\"]\n"
+            "action_candidates (3): [\"play\",\"query\",\"set\"]\n"
+            "slot_candidates (3): [\"song_name\",\"artist_name\",\"time\"]\n"
+            "nbest: [\"play yesterday\",\"play yester day\",\"please play yesterday\"]\n"
+            "stable_tokens: [\"play\",\"yesterday\"]\n"
+            "unstable_tokens: []\n"
+            "Output:\n"
+            "{\n"
+            "  \"evidence\": \"stable: play,yesterday\",\n"
+            "  \"scenario_rejects\": [\n"
+            "    {\"scenario\": \"alarm\", \"reason\": \"no alarm words\"},\n"
+            "    {\"scenario\": \"weather\", \"reason\": \"no weather words\"}\n"
+            "  ],\n"
+            "  \"action_rejects\": [\n"
+            "    {\"action\": \"query\", \"reason\": \"no question words\"},\n"
+            "    {\"action\": \"set\", \"reason\": \"no setting words\"}\n"
+            "  ],\n"
+            "  \"slot_rejects\": [\n"
+            "    {\"slot_type\": \"artist_name\", \"reason\": \"no artist mentioned\"},\n"
+            "    {\"slot_type\": \"time\", \"reason\": \"no time mentioned\"}\n"
+            "  ]\n"
+            "}\n"
+            "\n"
+        )
     return (
         "You are an SLU rationale generator. Keep everything short.\n"
         "Steps:\n"
@@ -249,6 +281,7 @@ def build_prompt_nbest(
         "4) Reject non-gold slot candidates with a few-word reason.\n"
         "Output JSON only.\n"
         "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
+        f"{fewshot}"
         f"gold_scenario: {gold_scenario}\n"
         f"gold_action: {gold_action}\n"
         f"gold_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
@@ -275,10 +308,39 @@ def build_prompt_audio(
     scenario_candidates: List[str],
     action_candidates: List[str],
     slot_candidates: List[str],
+    use_fewshot: bool = True,
 ) -> str:
     scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
     action_note = f"action_candidates ({len(action_candidates)}):"
     slot_note = f"slot_candidates ({len(slot_candidates)}):"
+    fewshot = ""
+    if use_fewshot:
+        fewshot = (
+            "Example:\n"
+            "gold_scenario: alarm\n"
+            "gold_action: set\n"
+            "gold_slot_types: [\"time\"]\n"
+            "scenario_candidates (3): [\"alarm\",\"music\",\"weather\"]\n"
+            "action_candidates (3): [\"set\",\"query\",\"remove\"]\n"
+            "slot_candidates (3): [\"time\",\"date\",\"location\"]\n"
+            "Output:\n"
+            "{\n"
+            "  \"evidence\": \"heard time phrase\",\n"
+            "  \"scenario_rejects\": [\n"
+            "    {\"scenario\": \"music\", \"reason\": \"no music words\"},\n"
+            "    {\"scenario\": \"weather\", \"reason\": \"no weather words\"}\n"
+            "  ],\n"
+            "  \"action_rejects\": [\n"
+            "    {\"action\": \"query\", \"reason\": \"not a question\"},\n"
+            "    {\"action\": \"remove\", \"reason\": \"no removal words\"}\n"
+            "  ],\n"
+            "  \"slot_rejects\": [\n"
+            "    {\"slot_type\": \"date\", \"reason\": \"no date mentioned\"},\n"
+            "    {\"slot_type\": \"location\", \"reason\": \"no location mentioned\"}\n"
+            "  ]\n"
+            "}\n"
+            "\n"
+        )
     return (
         "You are an SLU rationale generator. Keep everything short.\n"
         "Steps:\n"
@@ -288,6 +350,7 @@ def build_prompt_audio(
         "4) Reject non-gold slot candidates with a few-word reason.\n"
         "Output JSON only.\n"
         "Constraints: evidence <= 12 words; each reason <= 6 words.\n\n"
+        f"{fewshot}"
         f"gold_scenario: {gold_scenario}\n"
         f"gold_action: {gold_action}\n"
         f"gold_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
