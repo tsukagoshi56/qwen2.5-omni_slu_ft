@@ -44,7 +44,7 @@ def levenshtein_distance(a: str, b: str) -> int:
         prev = curr
     return prev[-1]
 
-def select_diverse_hypotheses(hypotheses: list, k: int) -> list:
+def select_diverse_hypotheses(hypotheses: list, k: int, dedup_mode: str = "normalize") -> list:
     """
     プールされた仮説の中から、互いに編集距離が遠いものを選抜して多様性を確保する
     """
@@ -52,13 +52,16 @@ def select_diverse_hypotheses(hypotheses: list, k: int) -> list:
         return []
     
     # 1. 重複排除（完全に同じテキストはまとめる）
-    unique_map = {}
-    for h in hypotheses:
-        # 空文字は除外しても良いが、ASR結果としてありうるので残す
-        norm = normalize_text(h)
-        if norm not in unique_map:
-            unique_map[norm] = h
-    unique_hyps = list(unique_map.values())
+    if dedup_mode == "none":
+        unique_hyps = list(hypotheses)
+    else:
+        unique_map = {}
+        for h in hypotheses:
+            # 空文字は除外しても良いが、ASR結果としてありうるので残す
+            key = normalize_text(h) if dedup_mode == "normalize" else h
+            if key not in unique_map:
+                unique_map[key] = h
+        unique_hyps = list(unique_map.values())
     
     # 候補が要求数以下ならそのまま返す
     if len(unique_hyps) <= k:
@@ -142,6 +145,10 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0, help="Higher = more diversity (try 0.8-1.2)")
     parser.add_argument("--top_p", type=float, default=0.95, help="Nucleus sampling probability")
     parser.add_argument("--top_k", type=int, default=50, help="Top-k sampling")
+    parser.add_argument("--dedup_mode", type=str, default="normalize", choices=["normalize", "exact", "none"],
+                        help="How to deduplicate before diversity selection")
+    parser.add_argument("--debug_raw", action="store_true", help="Print raw sampling stats")
+    parser.add_argument("--save_raw", action="store_true", help="Save raw sampled hypotheses to output JSONL")
     
     # System arguments
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -232,15 +239,21 @@ def main():
 
             # デコード
             raw_texts = processor.batch_decode(outputs, skip_special_tokens=True)
+            if args.debug_raw:
+                uniq = len(set(raw_texts))
+                print(f"[{slurp_id}] raw_hypotheses={len(raw_texts)} unique={uniq}")
+                print(f"[{slurp_id}] raw_sample={raw_texts[:5]}")
             
             # 多様性の選抜 (プールから多様なトップK個を選ぶ)
-            final_texts = select_diverse_hypotheses(raw_texts, args.num_hypotheses)
+            final_texts = select_diverse_hypotheses(raw_texts, args.num_hypotheses, args.dedup_mode)
 
             hypotheses = [{"text": t.strip()} for t in final_texts]
             
             output_item = meta_entry.copy()
             output_item["slurp_id"] = slurp_id
             output_item["asr_hypotheses"] = hypotheses
+            if args.save_raw:
+                output_item["asr_raw_hypotheses"] = [{"text": t.strip()} for t in raw_texts]
             
             results.append(output_item)
 
