@@ -140,6 +140,11 @@ def main():
         help="Disable filtering of assistant-style responses."
     )
     parser.add_argument(
+        "--dump_prompt",
+        action="store_true",
+        help="Print the rendered prompt once for debugging."
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -268,6 +273,10 @@ def main():
                 tokenize=False,
                 add_generation_prompt=True
             )
+            if args.dump_prompt and i == 0:
+                print("\n--- Rendered Prompt (first item) ---")
+                print(text_input)
+                print("--- End Prompt ---\n")
 
             # 3. モデル入力の準備
             inputs = processor(
