@@ -106,13 +106,24 @@ def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) ->
 # ==============================================================================
 
 
-def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
+def resolve_audio_path(
+    audio_root: str,
+    filename: str,
+    return_searched_paths: bool = False,
+) -> Any:
     if not filename:
+        if return_searched_paths:
+            return None, []
         return None
 
     filename = str(filename).strip()
-    if os.path.isabs(filename) and os.path.exists(filename):
-        return filename
+    searched_paths: List[str] = []
+    if os.path.isabs(filename):
+        searched_paths.append(filename)
+        if os.path.exists(filename):
+            if return_searched_paths:
+                return filename, searched_paths
+            return filename
 
     basename = os.path.basename(filename)
     candidates = [
@@ -124,7 +135,10 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
         os.path.join("slurp", "audio", "slurp_real", basename),
     ]
     for path in candidates:
+        searched_paths.append(path)
         if os.path.exists(path):
+            if return_searched_paths:
+                return path, searched_paths
             return path
 
     # Last-resort fallback: build one-time basename index under audio_root.
@@ -138,6 +152,9 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
             resolve_audio_path._audio_index = index
         fallback = resolve_audio_path._audio_index.get(basename)
         if fallback and os.path.exists(fallback):
+            searched_paths.append(f"[indexed] {fallback}")
+            if return_searched_paths:
+                return fallback, searched_paths
             return fallback
 
     if not hasattr(resolve_audio_path, "_debug_count"):
@@ -145,6 +162,8 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     if resolve_audio_path._debug_count < 10:
         logger.warning("Could not find %s. Checked: %s", filename, candidates)
         resolve_audio_path._debug_count += 1
+    if return_searched_paths:
+        return None, searched_paths
     return None
 
 
@@ -265,6 +284,9 @@ def build_items_from_rationale_jsonl(
     add_text_only: bool = False,
     max_samples: Optional[int] = None,
     allow_text_fallback_when_audio_missing: bool = True,
+    print_audio_search_paths: bool = False,
+    audio_search_print_limit: int = 100,
+    strict_audio_missing: bool = False,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -277,6 +299,7 @@ def build_items_from_rationale_jsonl(
     parsed_rows = 0
     rows_with_filename = 0
     rows_with_audio = 0
+    rows_missing_audio = 0
 
     for data in records:
         if max_samples is not None and len(items) >= max_samples:
@@ -306,7 +329,14 @@ def build_items_from_rationale_jsonl(
         target_obj = extract_target_obj(data)
         target_str = json.dumps(target_obj, ensure_ascii=False)
 
-        audio_path = resolve_audio_path(audio_dir, filename) if filename else None
+        if filename:
+            audio_path, searched_paths = resolve_audio_path(
+                audio_dir,
+                filename,
+                return_searched_paths=True,
+            )
+        else:
+            audio_path, searched_paths = None, []
 
         base_item = {
             "id": sample_id,
@@ -327,6 +357,20 @@ def build_items_from_rationale_jsonl(
         if audio_path:
             items.append(base_item)
             rows_with_audio += 1
+            if print_audio_search_paths and rows_with_audio <= audio_search_print_limit:
+                print(f"[AUDIO_OK] id={sample_id} file={filename}")
+                print(f"  resolved={audio_path}")
+        else:
+            rows_missing_audio += 1
+            if rows_missing_audio <= audio_search_print_limit:
+                print(f"[AUDIO_NG] id={sample_id} file={filename} (not found)")
+                for p in searched_paths:
+                    print(f"  searched: {p}")
+            if strict_audio_missing:
+                raise RuntimeError(
+                    f"Audio not found for id={sample_id}, file={filename}. "
+                    f"Searched paths: {searched_paths}"
+                )
 
     if (not add_text_only) and len(items) == 0 and parsed_rows > 0 and allow_text_fallback_when_audio_missing:
         logger.warning(
@@ -337,12 +381,16 @@ def build_items_from_rationale_jsonl(
         items.extend(fallback_text_items)
 
     logger.info(
-        "Loaded %s -> %d items (parsed_rows=%d, rows_with_filename=%d, rows_with_audio=%d)",
+        (
+            "Loaded %s -> %d items "
+            "(parsed_rows=%d, rows_with_filename=%d, rows_with_audio=%d, rows_missing_audio=%d)"
+        ),
         jsonl_path,
         len(items),
         parsed_rows,
         rows_with_filename,
         rows_with_audio,
+        rows_missing_audio,
     )
     return items
 
@@ -1095,6 +1143,22 @@ def main():
         action="store_true",
         help="Disable automatic text-only fallback when audio files cannot be resolved.",
     )
+    parser.add_argument(
+        "--print_audio_search_paths",
+        action="store_true",
+        help="Print searched audio paths to stdout.",
+    )
+    parser.add_argument(
+        "--audio_search_print_limit",
+        type=int,
+        default=100,
+        help="Maximum number of audio path debug prints per split.",
+    )
+    parser.add_argument(
+        "--strict_audio_missing",
+        action="store_true",
+        help="Raise an error immediately when an audio file cannot be resolved.",
+    )
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
@@ -1124,6 +1188,9 @@ def main():
         add_text_only=args.add_text_only,
         max_samples=args.max_samples,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+        print_audio_search_paths=args.print_audio_search_paths,
+        audio_search_print_limit=args.audio_search_print_limit,
+        strict_audio_missing=args.strict_audio_missing,
     )
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
@@ -1131,6 +1198,9 @@ def main():
         add_text_only=args.add_text_only,
         max_samples=(args.max_samples // 2) if args.max_samples else None,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+        print_audio_search_paths=args.print_audio_search_paths,
+        audio_search_print_limit=args.audio_search_print_limit,
+        strict_audio_missing=args.strict_audio_missing,
     )
 
     if rank == 0:
@@ -1211,6 +1281,9 @@ def main():
         add_text_only=False,
         max_samples=test_max_samples,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+        print_audio_search_paths=args.print_audio_search_paths,
+        audio_search_print_limit=args.audio_search_print_limit,
+        strict_audio_missing=args.strict_audio_missing,
     )
 
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
