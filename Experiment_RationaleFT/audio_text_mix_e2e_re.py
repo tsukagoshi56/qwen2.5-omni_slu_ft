@@ -302,6 +302,10 @@ def extract_sample_id(record: Dict[str, Any], fallback_index: int) -> str:
 
 def extract_filename(record: Dict[str, Any]) -> str:
     meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+    if not meta:
+        meta_obj = parse_json_like(record.get("meta"))
+        if isinstance(meta_obj, dict):
+            meta = meta_obj
     rationale_obj = parse_json_like(record.get("rationale_text"))
     rationale_meta = (
         rationale_obj.get("meta", {})
@@ -335,6 +339,7 @@ def extract_filename(record: Dict[str, Any]) -> str:
         extract_filename_from_text(record.get("rationale_text")),
         extract_filename_from_text(record.get("rationale")),
         extract_filename_from_text(record.get("meta")),
+        extract_filename_from_text(json.dumps(record, ensure_ascii=False)),
     )
 
 
@@ -394,6 +399,31 @@ def _normalize_loaded_obj_to_records(obj: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def is_record_like_dict(record: Dict[str, Any]) -> bool:
+    if not isinstance(record, dict):
+        return False
+    record_like_keys = {
+        "id",
+        "slurp_id",
+        "filename",
+        "file",
+        "audio_filename",
+        "audio_file",
+        "candidates",
+        "final",
+        "rationale_text",
+        "meta",
+        "recordings",
+    }
+    if any(k in record for k in record_like_keys):
+        return True
+
+    # Accept cases where only rationale text contains recoverable filename.
+    if extract_filename(record):
+        return True
+    return False
+
+
 def load_rationale_records(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
@@ -421,7 +451,9 @@ def load_rationale_records(path: str) -> List[Dict[str, Any]]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        records.extend(_normalize_loaded_obj_to_records(obj))
+        for rec in _normalize_loaded_obj_to_records(obj):
+            if is_record_like_dict(rec):
+                records.append(rec)
     if records:
         logger.info("Loaded %s as JSONL (%d records).", path, len(records))
         return records
@@ -440,7 +472,9 @@ def load_rationale_records(path: str) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             i += 1
             continue
-        records.extend(_normalize_loaded_obj_to_records(obj))
+        for rec in _normalize_loaded_obj_to_records(obj):
+            if is_record_like_dict(rec):
+                records.append(rec)
         i = j
     logger.info("Loaded %s as JSON stream fallback (%d records).", path, len(records))
     return records
@@ -475,6 +509,8 @@ def build_items_from_rationale_jsonl(
             break
         try:
             if not isinstance(data, dict):
+                continue
+            if not is_record_like_dict(data):
                 continue
             parsed_rows += 1
 
