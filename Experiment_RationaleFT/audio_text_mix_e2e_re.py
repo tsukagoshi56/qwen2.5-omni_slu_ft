@@ -1466,43 +1466,6 @@ def evaluate_prediction_file(prediction_path: str) -> Dict[str, float]:
 # ==============================================================================
 
 
-class Qwen2AudioProcessorWrapper:
-    def __init__(self, feature_extractor, tokenizer):
-        self.feature_extractor = feature_extractor
-        self.tokenizer = tokenizer
-
-    @property
-    def chat_template(self):
-        return self.tokenizer.chat_template
-
-    def apply_chat_template(self, *args, **kwargs):
-        return self.tokenizer.apply_chat_template(*args, **kwargs)
-
-    def __call__(self, text=None, audio=None, sampling_rate=None, return_tensors="pt", **kwargs):
-        res = {}
-        if audio is not None:
-            # WhisperFE expects raw audio
-            # format: feature_extractor(raw_speech, sampling_rate=...)
-            # It returns {'input_features': ...}
-            audio_out = self.feature_extractor(
-                audio, sampling_rate=sampling_rate, return_tensors=return_tensors, **kwargs
-            )
-            res.update(audio_out)
-
-        if text is not None:
-            # tokenizer(text, ...)
-            text_out = self.tokenizer(text, return_tensors=return_tensors, **kwargs)
-            res.update(text_out)
-
-        return res
-
-    def batch_decode(self, *args, **kwargs):
-        return self.tokenizer.batch_decode(*args, **kwargs)
-
-    def decode(self, *args, **kwargs):
-        return self.tokenizer.decode(*args, **kwargs)
-
-
 def main():
     parser = argparse.ArgumentParser()
 
@@ -1614,11 +1577,6 @@ def main():
         raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if not hasattr(processor, "tokenizer"):
-        logger.warning("AutoProcessor returned a feature extractor. Manually loading tokenizer and wrapping.")
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-        processor = Qwen2AudioProcessorWrapper(processor, tokenizer)
-
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
