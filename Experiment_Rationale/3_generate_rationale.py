@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import librosa
+from tqdm import tqdm
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
 # ----------------------------
@@ -36,7 +37,7 @@ def write_jsonl(path: str, items: List[Dict[str, Any]]):
         for item in items:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-def write_raw_jsonl(path: str, outputs: List[str]):
+def write_raw_jsonl(path: str, outputs: List[Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for output in outputs:
@@ -268,6 +269,54 @@ def postprocess_rationale_output(
     parsed["final_prediction"] = final_prediction
     return parsed
 
+def validate_topk_intents(
+    parsed: Optional[Dict[str, Any]],
+    intent_candidates: List[str],
+    reference_intent: str,
+) -> Tuple[bool, str]:
+    if not isinstance(parsed, dict):
+        return False, "output is not valid JSON object"
+    topk_intents = parsed.get("topk_intents")
+    if not isinstance(topk_intents, list):
+        return False, "topk_intents is not a list"
+    if len(topk_intents) != 5:
+        return False, f"topk_intents must contain exactly 5 items, got {len(topk_intents)}"
+
+    normalized: List[str] = []
+    for idx, item in enumerate(topk_intents):
+        if not isinstance(item, dict):
+            return False, f"topk_intents[{idx}] is not an object"
+        intent = str(item.get("intent", "")).strip()
+        if not intent:
+            return False, f"topk_intents[{idx}].intent is empty"
+        normalized.append(intent)
+
+    if len(set(normalized)) != 5:
+        return False, "topk_intents must contain 5 unique intents"
+    invalid = [intent for intent in normalized if intent not in intent_candidates]
+    if invalid:
+        return False, f"topk_intents contains intents outside candidates: {invalid}"
+    if reference_intent and normalized.count(reference_intent) != 1:
+        return False, "topk_intents must include reference_intent exactly once"
+    return True, ""
+
+def build_retry_prompt(base_prompt: str, previous_output: str, error_reason: str) -> str:
+    return (
+        "Your previous output violated format constraints.\n"
+        f"Violation: {error_reason}\n"
+        "Regenerate the COMPLETE JSON from scratch.\n"
+        "Hard constraints:\n"
+        "- topk_intents must have exactly 5 unique items.\n"
+        "- each intent in topk_intents must come from intent_candidates.\n"
+        "- topk_intents must include reference_intent exactly once.\n"
+        "- intent_elimination should explain only the 4 non-reference intents from topk_intents.\n"
+        "- Output JSON ONLY.\n\n"
+        "ORIGINAL TASK:\n"
+        f"{base_prompt}\n\n"
+        "PREVIOUS OUTPUT (invalid):\n"
+        f"{previous_output}"
+    )
+
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
@@ -319,7 +368,6 @@ def build_prompt_nbest(
             "    \"unstable_cues\": [],\n"
             "    \"decision_pivots\": [\"play\",\"yesterday\"]\n"
             "  },\n"
-            "  \"semantic_core\": \"user asks to play the song yesterday\",\n"
             "  \"topk_intents\": [\n"
             "    {\"intent\": \"music:play\"},\n"
             "    {\"intent\": \"music:query\"},\n"
@@ -328,10 +376,10 @@ def build_prompt_nbest(
             "    {\"intent\": \"qa:factoid\"}\n"
             "  ],\n"
             "  \"intent_elimination\": [\n"
-            "    {\"intent\": \"music:query\", \"reason\": \"request is imperative, not an information question\"},\n"
-            "    {\"intent\": \"alarm:set\", \"reason\": \"no alarm or wake-up cue\"},\n"
-            "    {\"intent\": \"weather:query\", \"reason\": \"no weather-related cue\"},\n"
-            "    {\"intent\": \"qa:factoid\", \"reason\": \"no factual Q&A pattern\"}\n"
+            "    {\"intent\": \"music:query\", \"reason\": \"utterance is command style; no interrogative pattern for retrieval\"},\n"
+            "    {\"intent\": \"alarm:set\", \"reason\": \"lexical focus is media playback, not alarm scheduling parameters\"},\n"
+            "    {\"intent\": \"weather:query\", \"reason\": \"content refers to a track name, not meteorological information request\"},\n"
+            "    {\"intent\": \"qa:factoid\", \"reason\": \"intent asks execution of playback action, not fact-seeking answer\"}\n"
             "  ],\n"
             "  \"final_prediction\": {\n"
             "    \"intent\": \"music:play\",\n"
@@ -353,6 +401,10 @@ def build_prompt_nbest(
         "- Do NOT invent intents or slot types outside the provided candidates.\n"
         "- Do NOT hallucinate slot values not supported by the utterance.\n"
         "- Do NOT output the reference labels in the JSON.\n"
+        "- topk_intents MUST contain exactly 5 unique intents from intent_candidates.\n"
+        "- topk_intents MUST include reference_intent exactly once.\n"
+        "- intent_elimination MUST have exactly 4 items, each for a non-reference intent in topk_intents.\n"
+        "- Do NOT repeat the same elimination wording pattern; avoid generic \"no ... cue\" only responses.\n"
         "- The maximum TOP-K for intents is fixed to 5.\n\n"
         "==================================================\n"
         "INPUT (REFERENCE + CANDIDATES + INTERPRETATIONS)\n"
@@ -372,18 +424,19 @@ def build_prompt_nbest(
         "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
         "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
         "- Do NOT reference intent/slot labels.\n"
-        "Step 2: SEMANTIC CORE DERIVATION\n"
-        "- One short sentence, no labels.\n"
-        "Step 3: TOP-5 INTENT CANDIDATES\n"
-        "- Use ONLY intent_candidates; include reference_intent.\n"
-        "Step 4: INTENT ELIMINATION\n"
-        "- Eliminate non-reference intents with one-sentence reasons citing cues.\n"
-        "Step 5: FINAL INTENT RESOLUTION\n"
+        "Step 2: TOP-5 INTENT CANDIDATES\n"
+        "- Use ONLY intent_candidates.\n"
+        "- Produce EXACTLY 5 unique intents and include reference_intent exactly once.\n"
+        "Step 3: INTENT ELIMINATION\n"
+        "- Eliminate ONLY the 4 non-reference intents in topk_intents.\n"
+        "- Each reason must be specific and non-repetitive.\n"
+        "- Prefer different evidence dimensions across reasons (speech-act mismatch, domain mismatch, argument/slot mismatch, target mismatch).\n"
+        "Step 4: FINAL INTENT RESOLUTION\n"
         "- Select one intent from topk_intents and split it into scenario/action by the first ':'.\n"
-        "Step 6: SLOT GROUNDING\n"
+        "Step 5: SLOT GROUNDING\n"
         "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
         "- source_hypothesis must be interpretation_1..interpretation_5 or \"none\".\n"
-        "Step 7: FINAL RATIONALIZATION\n"
+        "Step 6: FINAL RATIONALIZATION\n"
         "- One concise sentence linking cues to reference labels.\n\n"
         "==================================================\n"
         "OUTPUT FORMAT (STRICT JSON)\n"
@@ -394,9 +447,19 @@ def build_prompt_nbest(
         "    \"unstable_cues\": [],\n"
         "    \"decision_pivots\": []\n"
         "  },\n"
-        "  \"semantic_core\": \"\",\n"
-        "  \"topk_intents\": [{\"intent\": \"\"}],\n"
-        "  \"intent_elimination\": [{\"intent\": \"\", \"reason\": \"\"}],\n"
+        "  \"topk_intents\": [\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"}\n"
+        "  ],\n"
+        "  \"intent_elimination\": [\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"}\n"
+        "  ],\n"
         "  \"final_prediction\": {\"intent\": \"\", \"scenario\": \"\", \"action\": \"\"},\n"
         "  \"slot_grounding\": [\n"
         "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
@@ -437,7 +500,6 @@ def build_prompt_audio(
             "    \"unstable_cues\": [],\n"
             "    \"decision_pivots\": [\"time\"]\n"
             "  },\n"
-            "  \"semantic_core\": \"user wants an alarm time set\",\n"
             "  \"topk_intents\": [\n"
             "    {\"intent\": \"alarm:set\"},\n"
             "    {\"intent\": \"alarm:query\"},\n"
@@ -446,10 +508,10 @@ def build_prompt_audio(
             "    {\"intent\": \"general:greet\"}\n"
             "  ],\n"
             "  \"intent_elimination\": [\n"
-            "    {\"intent\": \"alarm:query\", \"reason\": \"command style indicates setting, not querying\"},\n"
-            "    {\"intent\": \"calendar:set\", \"reason\": \"no meeting/event cue\"},\n"
-            "    {\"intent\": \"datetime:query\", \"reason\": \"not asking current time/date\"},\n"
-            "    {\"intent\": \"general:greet\", \"reason\": \"no greeting cue\"}\n"
+            "    {\"intent\": \"alarm:query\", \"reason\": \"prosodic and command framing indicate execution request, not information retrieval\"},\n"
+            "    {\"intent\": \"calendar:set\", \"reason\": \"requested parameter is wake-up time, missing event-specific arguments\"},\n"
+            "    {\"intent\": \"datetime:query\", \"reason\": \"user is assigning a time target rather than asking current date/time\"},\n"
+            "    {\"intent\": \"general:greet\", \"reason\": \"utterance carries task intent and parameters instead of social salutation\"}\n"
             "  ],\n"
             "  \"final_prediction\": {\n"
             "    \"intent\": \"alarm:set\",\n"
@@ -471,6 +533,10 @@ def build_prompt_audio(
         "- Do NOT invent intents or slot types outside the provided candidates.\n"
         "- Do NOT hallucinate slot values not supported by the utterance.\n"
         "- Do NOT output the reference labels in the JSON.\n"
+        "- topk_intents MUST contain exactly 5 unique intents from intent_candidates.\n"
+        "- topk_intents MUST include reference_intent exactly once.\n"
+        "- intent_elimination MUST have exactly 4 items, each for a non-reference intent in topk_intents.\n"
+        "- Do NOT repeat the same elimination wording pattern; avoid generic \"no ... cue\" only responses.\n"
         "- The maximum TOP-K for intents is fixed to 5.\n\n"
         "==================================================\n"
         "INPUT (REFERENCE + CANDIDATES)\n"
@@ -490,18 +556,19 @@ def build_prompt_audio(
         "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
         "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
         "- Do NOT reference intent/slot labels.\n"
-        "Step 2: SEMANTIC CORE DERIVATION\n"
-        "- One short sentence, no labels.\n"
-        "Step 3: TOP-5 INTENT CANDIDATES\n"
-        "- Use ONLY intent_candidates; include reference_intent.\n"
-        "Step 4: INTENT ELIMINATION\n"
-        "- Eliminate non-reference intents with one-sentence reasons citing cues.\n"
-        "Step 5: FINAL INTENT RESOLUTION\n"
+        "Step 2: TOP-5 INTENT CANDIDATES\n"
+        "- Use ONLY intent_candidates.\n"
+        "- Produce EXACTLY 5 unique intents and include reference_intent exactly once.\n"
+        "Step 3: INTENT ELIMINATION\n"
+        "- Eliminate ONLY the 4 non-reference intents in topk_intents.\n"
+        "- Each reason must be specific and non-repetitive.\n"
+        "- Prefer different evidence dimensions across reasons (speech-act mismatch, domain mismatch, argument/slot mismatch, target mismatch).\n"
+        "Step 4: FINAL INTENT RESOLUTION\n"
         "- Select one intent from topk_intents and split it into scenario/action by the first ':'.\n"
-        "Step 6: SLOT GROUNDING\n"
+        "Step 5: SLOT GROUNDING\n"
         "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
         "- source_hypothesis must be interpretation_1 or \"none\".\n"
-        "Step 7: FINAL RATIONALIZATION\n"
+        "Step 6: FINAL RATIONALIZATION\n"
         "- One concise sentence linking cues to reference labels.\n\n"
         "==================================================\n"
         "OUTPUT FORMAT (STRICT JSON)\n"
@@ -512,9 +579,19 @@ def build_prompt_audio(
         "    \"unstable_cues\": [],\n"
         "    \"decision_pivots\": []\n"
         "  },\n"
-        "  \"semantic_core\": \"\",\n"
-        "  \"topk_intents\": [{\"intent\": \"\"}],\n"
-        "  \"intent_elimination\": [{\"intent\": \"\", \"reason\": \"\"}],\n"
+        "  \"topk_intents\": [\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"}\n"
+        "  ],\n"
+        "  \"intent_elimination\": [\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"}\n"
+        "  ],\n"
         "  \"final_prediction\": {\"intent\": \"\", \"scenario\": \"\", \"action\": \"\"},\n"
         "  \"slot_grounding\": [\n"
         "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
@@ -539,7 +616,7 @@ def main():
     parser.add_argument("--clusters_file", type=str, default="Experiment_3/slurp_clusters.json")
     parser.add_argument("--confusing_pairs_file", type=str, default="Experiment_3/slurp_confusing_pairs.json")
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/rationale_output.jsonl")
-    parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write only model outputs; full: write metadata JSON.")
+    parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write compact records with raw outputs; full: write full metadata JSON.")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
@@ -554,6 +631,7 @@ def main():
     parser.add_argument("--preview", type=int, default=0, help="Print prompt and output for first N samples.")
     parser.add_argument("--limitmode", action="store_true", help="Print pretty JSON results to stdout.")
     parser.add_argument("--save_raw", action="store_true")
+    parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     args = parser.parse_args()
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -594,10 +672,10 @@ def main():
     model.eval()
 
     results: List[Dict[str, Any]] = []
-    raw_outputs: List[str] = []
+    raw_outputs: List[Any] = []
     sr = processor.feature_extractor.sampling_rate
 
-    for idx, item in enumerate(items):
+    for idx, item in enumerate(tqdm(items, desc="Generating rationale", unit="sample")):
         slurp_id = str(item.get("slurp_id", ""))
         fallback = slurp_map.get(slurp_id)
         if fallback:
@@ -611,6 +689,7 @@ def main():
         scenario = item.get("scenario", "")
         action = item.get("action", "")
         gold_intent = compose_intent(scenario, action)
+        input_text = str(item.get("sentence", "") or "")
         gold_entities = build_entities(item)
         gold_slot_types = extract_slot_types(gold_entities)
 
@@ -640,6 +719,14 @@ def main():
             rng=rng,
         )
 
+        audio = None
+        if args.mode == "audio":
+            filename = pick_recording(item.get("recordings", []), args.recording_index)
+            audio_path = resolve_audio_path(audio_root, filename) if filename else None
+            audio = load_audio(audio_path, target_sr=sr) if audio_path else None
+            if audio is None:
+                continue
+
         if args.mode == "nbest":
             prompt = build_prompt_nbest(
                 gold_intent=gold_intent,
@@ -650,34 +737,13 @@ def main():
                 stable_tokens=stable_unstable["stable"],
                 unstable_tokens=stable_unstable["unstable"],
             )
-            user_content = [{"type": "text", "text": prompt}]
-            text_input = processor.apply_chat_template(
-                [{"role": "user", "content": user_content}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            inputs = processor(text=text_input, return_tensors="pt")
         else:
-            filename = pick_recording(item.get("recordings", []), args.recording_index)
-            audio_path = resolve_audio_path(audio_root, filename) if filename else None
-            audio = load_audio(audio_path, target_sr=sr) if audio_path else None
-            if audio is None:
-                continue
             prompt = build_prompt_audio(
                 gold_intent=gold_intent,
                 gold_slot_types=gold_slot_types,
                 intent_candidates=intent_candidates,
                 slot_candidates=slot_candidates,
             )
-            user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt}]
-            text_input = processor.apply_chat_template(
-                [{"role": "user", "content": user_content}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
-
-        inputs = {k: v.to(args.device) for k, v in inputs.items()}
 
         gen_kwargs = {
             "max_new_tokens": args.max_new_tokens,
@@ -690,25 +756,70 @@ def main():
                 "top_p": args.top_p,
             })
 
-        with torch.no_grad():
-            output_ids = model.generate(**inputs, **gen_kwargs)
-        input_len = inputs["input_ids"].shape[1]
-        generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-        parsed = postprocess_rationale_output(extract_json(generated), fallback_intent=gold_intent)
+        base_prompt = prompt
+        generated = ""
+        parsed: Optional[Dict[str, Any]] = None
+        topk_valid = False
+        validation_error = ""
+        max_attempts = max(1, args.format_retries + 1)
+        for attempt in range(max_attempts):
+            current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
+            if args.mode == "nbest":
+                user_content = [{"type": "text", "text": current_prompt}]
+                text_input = processor.apply_chat_template(
+                    [{"role": "user", "content": user_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                inputs = processor(text=text_input, return_tensors="pt")
+            else:
+                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
+                text_input = processor.apply_chat_template(
+                    [{"role": "user", "content": user_content}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+
+            inputs = {k: v.to(args.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                output_ids = model.generate(**inputs, **gen_kwargs)
+            input_len = inputs["input_ids"].shape[1]
+            generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+            parsed = extract_json(generated)
+            topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
+            if topk_valid:
+                break
+
+        parsed = postprocess_rationale_output(parsed, fallback_intent=gold_intent)
 
         result = {
             "slurp_id": slurp_id,
             "mode": args.mode,
+            "input_text": input_text,
+            "gold_intent": gold_intent,
+            "gold_scenario": scenario,
+            "gold_action": action,
             "intent_candidates": intent_candidates,
             "slot_candidates": slot_candidates,
             "nbest": nbest_texts if args.mode == "nbest" else [],
             "nbest_summary": stable_unstable if args.mode == "nbest" else {},
             "rationale": parsed,
+            "topk_valid": topk_valid,
+            "topk_validation_error": "" if topk_valid else validation_error,
             "raw_output": generated,
         }
         if args.save_raw:
             result["rationale_raw"] = generated
-        raw_outputs.append(generated)
+        raw_record = {
+            "slurp_id": slurp_id,
+            "input_text": input_text,
+            "gold_intent": gold_intent,
+            "raw_output": generated,
+            "topk_valid": topk_valid,
+            "topk_validation_error": "" if topk_valid else validation_error,
+        }
+        raw_outputs.append(raw_record)
         if args.output_mode == "full":
             results.append(result)
 
@@ -724,14 +835,13 @@ def main():
         if args.limitmode:
             limit_view = {
                 "slurp_id": slurp_id,
+                "input_text": input_text,
+                "gold_intent": gold_intent,
                 "prompt": prompt,
                 "raw_output": generated,
             }
             print(json.dumps(limit_view, ensure_ascii=False, indent=2))
             print("")
-
-        if (idx + 1) % 10 == 0:
-            print(f"[INFO] Processed {idx+1}/{len(items)}")
 
     if args.output_mode == "full":
         write_jsonl(output_path, results)
