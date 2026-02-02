@@ -117,7 +117,7 @@ and includes `rationale.topk_slot_types`.
 ```bash
 uv run Experiment_Rationale/3_generate_rationale_two_stage.py \
   --mode nbest \
-  --text_model_name_or_path Qwen/Qwen3-8B-Thinking-2507 \
+  --text_model_name_or_path Qwen/Qwen3-4B-Thinking-2507 \
   --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
   --output_file Experiment_Rationale/rationale_output_two_stage.jsonl
 ```
@@ -172,7 +172,7 @@ cat Experiment_Rationale/rationale_output_two_stage_parallel.w0of2.jsonl \
 - Stage format checks and retry logic are applied independently to intent/slot stages.
 - Parallel options are available in both scripts: `--num_workers`, `--worker_rank`, `--append_worker_suffix`.
 - If `--append_worker_suffix` is not used, give each worker a different `--output_file`.
-- In `--mode nbest`, two-stage script uses `--text_model_name_or_path` (default: `Qwen/Qwen3-8B-Thinking-2507`).
+- In `--mode nbest`, two-stage script uses `--text_model_name_or_path` (default: `Qwen/Qwen3-4B-Thinking-2507`).
 - In `--mode audio`, two-stage script uses `--model_name_or_path` (Qwen2-Audio family).
 - `allowed_slot_types` uses the full slot-type inventory from metadata.
 - If any sub-stage output is invalid after retries, deterministic fallback JSON is produced so processing can continue.

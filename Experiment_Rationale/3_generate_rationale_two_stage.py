@@ -1441,7 +1441,7 @@ def main():
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/rationale_output_two_stage.jsonl")
     parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write compact records with raw outputs; full: write full metadata JSON.")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
-    parser.add_argument("--text_model_name_or_path", type=str, default="Qwen/Qwen3-8B-Thinking-2507")
+    parser.add_argument("--text_model_name_or_path", type=str, default="Qwen/Qwen3-4B-Thinking-2507")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
