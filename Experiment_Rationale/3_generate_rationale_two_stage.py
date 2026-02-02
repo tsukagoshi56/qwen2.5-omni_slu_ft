@@ -237,6 +237,19 @@ def select_slot_candidates_topk(
 ) -> List[str]:
     return select_slot_types_topk(gold_types, slot_types, k, rng)
 
+def build_full_slot_candidates(
+    reference_slot_types: List[str],
+    slot_inventory: List[str],
+) -> List[str]:
+    ordered: List[str] = []
+    for slot_type in reference_slot_types:
+        if slot_type and slot_type not in ordered:
+            ordered.append(slot_type)
+    for slot_type in slot_inventory:
+        if slot_type and slot_type not in ordered:
+            ordered.append(slot_type)
+    return ordered
+
 def compose_intent(scenario: str, action: str) -> str:
     if not scenario or not action:
         return ""
@@ -369,6 +382,9 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
 def to_topk_dicts(intents: List[str]) -> List[Dict[str, str]]:
     return [{"intent": intent} for intent in intents[:5]]
 
+def to_topk_slot_type_dicts(slot_types: List[str]) -> List[Dict[str, str]]:
+    return [{"slot_type": slot_type} for slot_type in slot_types[:5]]
+
 def extract_topk_intents(parsed: Optional[Dict[str, Any]]) -> List[str]:
     if not isinstance(parsed, dict):
         return []
@@ -384,23 +400,102 @@ def extract_topk_intents(parsed: Optional[Dict[str, Any]]) -> List[str]:
             results.append(intent)
     return results
 
+def extract_topk_slot_types(parsed: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(parsed, dict):
+        return []
+    topk_slot_types = parsed.get("topk_slot_types")
+    if not isinstance(topk_slot_types, list):
+        return []
+    results: List[str] = []
+    for item in topk_slot_types:
+        if not isinstance(item, dict):
+            continue
+        slot_type = str(item.get("slot_type", "")).strip()
+        if slot_type:
+            results.append(slot_type)
+    return results
+
+def validate_topk_slot_types(
+    parsed: Optional[Dict[str, Any]],
+    slot_candidates: List[str],
+    reference_slot_types: List[str],
+) -> Tuple[bool, str]:
+    if not isinstance(parsed, dict):
+        return False, "output is not valid JSON object"
+    topk_slot_types = parsed.get("topk_slot_types")
+    if not isinstance(topk_slot_types, list):
+        return False, "topk_slot_types is not a list"
+    if len(topk_slot_types) != 5:
+        return False, f"topk_slot_types must contain exactly 5 items, got {len(topk_slot_types)}"
+
+    normalized: List[str] = []
+    for idx, item in enumerate(topk_slot_types):
+        if not isinstance(item, dict):
+            return False, f"topk_slot_types[{idx}] is not an object"
+        slot_type = str(item.get("slot_type", "")).strip()
+        if not slot_type:
+            return False, f"topk_slot_types[{idx}].slot_type is empty"
+        normalized.append(slot_type)
+
+    if len(set(normalized)) != 5:
+        return False, "topk_slot_types must contain 5 unique slot types"
+    invalid = [slot_type for slot_type in normalized if slot_type not in slot_candidates]
+    if invalid:
+        return False, f"topk_slot_types contains slot types outside candidates: {invalid}"
+
+    unique_reference = []
+    for slot_type in reference_slot_types:
+        if slot_type and slot_type not in unique_reference:
+            unique_reference.append(slot_type)
+    if len(unique_reference) <= 5:
+        missing_reference = [slot_type for slot_type in unique_reference if slot_type not in normalized]
+        if missing_reference:
+            return False, f"topk_slot_types must include all reference_slot_types when possible: {missing_reference}"
+    return True, ""
+
+def validate_stage1_output(
+    parsed: Optional[Dict[str, Any]],
+    intent_candidates: List[str],
+    reference_intent: str,
+    slot_candidates: List[str],
+    reference_slot_types: List[str],
+) -> Tuple[bool, str]:
+    intents_ok, intents_error = validate_topk_intents(parsed, intent_candidates, reference_intent)
+    if not intents_ok:
+        return False, intents_error
+    slots_ok, slots_error = validate_topk_slot_types(parsed, slot_candidates, reference_slot_types)
+    if not slots_ok:
+        return False, slots_error
+    return True, ""
+
 def validate_stage2_output(
     parsed: Optional[Dict[str, Any]],
-    stage1_topk: List[str],
+    stage1_topk_intents: List[str],
+    stage1_topk_slot_types: List[str],
     reference_intent: str,
 ) -> Tuple[bool, str]:
     if not isinstance(parsed, dict):
         return False, "output is not valid JSON object"
-    expected_topk = stage1_topk[:5]
-    expected_set = set(expected_topk)
-    if len(expected_topk) != 5:
+    expected_topk_intents = stage1_topk_intents[:5]
+    expected_intent_set = set(expected_topk_intents)
+    if len(expected_topk_intents) != 5:
         return False, "stage1 topk does not contain 5 intents"
 
     topk_now = extract_topk_intents(parsed)
     if len(topk_now) != 5:
         return False, "topk_intents must contain exactly 5 items"
-    if set(topk_now) != expected_set:
+    if set(topk_now) != expected_intent_set:
         return False, "stage2 topk_intents must match stage1 candidates"
+
+    expected_topk_slots = stage1_topk_slot_types[:5]
+    expected_slot_set = set(expected_topk_slots)
+    if len(expected_topk_slots) != 5:
+        return False, "stage1 topk does not contain 5 slot types"
+    topk_slot_now = extract_topk_slot_types(parsed)
+    if len(topk_slot_now) != 5:
+        return False, "topk_slot_types must contain exactly 5 items"
+    if set(topk_slot_now) != expected_slot_set:
+        return False, "stage2 topk_slot_types must match stage1 candidates"
 
     intent_elimination = parsed.get("intent_elimination")
     if not isinstance(intent_elimination, list):
@@ -408,7 +503,7 @@ def validate_stage2_output(
     if len(intent_elimination) != 4:
         return False, f"intent_elimination must contain exactly 4 items, got {len(intent_elimination)}"
 
-    non_reference = [intent for intent in expected_topk if intent != reference_intent]
+    non_reference = [intent for intent in expected_topk_intents if intent != reference_intent]
     seen = set()
     for idx, item in enumerate(intent_elimination):
         if not isinstance(item, dict):
@@ -431,7 +526,7 @@ def validate_stage2_output(
     final_intent = str(final_prediction.get("intent", "")).strip()
     if not final_intent:
         return False, "final_prediction.intent is empty"
-    if final_intent not in expected_set:
+    if final_intent not in expected_intent_set:
         return False, "final_prediction.intent must be included in stage1 topk"
     return True, ""
 
@@ -471,6 +566,13 @@ def build_stage1_prompt_nbest(
             "    {\"intent\": \"alarm:set\"},\n"
             "    {\"intent\": \"weather:query\"},\n"
             "    {\"intent\": \"qa:factoid\"}\n"
+            "  ],\n"
+            "  \"topk_slot_types\": [\n"
+            "    {\"slot_type\": \"song_name\"},\n"
+            "    {\"slot_type\": \"artist_name\"},\n"
+            "    {\"slot_type\": \"time\"},\n"
+            "    {\"slot_type\": \"date\"},\n"
+            "    {\"slot_type\": \"place_name\"}\n"
             "  ]\n"
             "}\n\n"
         )
@@ -482,7 +584,9 @@ def build_stage1_prompt_nbest(
         "==================================================\n"
         "- topk_intents MUST contain exactly 5 unique intents from intent_candidates.\n"
         "- topk_intents MUST include reference_intent exactly once.\n"
-        "- Output ONLY topk_intents in JSON.\n\n"
+        "- topk_slot_types MUST contain exactly 5 unique slot types from allowed_slot_types.\n"
+        "- topk_slot_types MUST include all reference_slot_types when possible.\n"
+        "- Output BOTH topk_intents and topk_slot_types in JSON.\n\n"
         "==================================================\n"
         "INPUT (REFERENCE + CANDIDATES + INTERPRETATIONS)\n"
         "==================================================\n"
@@ -501,7 +605,9 @@ def build_stage1_prompt_nbest(
         "Step 1: TOP-5 INTENT CANDIDATES\n"
         "- Use ONLY intent_candidates.\n"
         "- Produce EXACTLY 5 unique intents and include reference_intent exactly once.\n"
-        "- Focus on intents only in Stage-1.\n\n"
+        "Step 2: TOP-5 SLOT TYPE CANDIDATES\n"
+        "- Use ONLY allowed_slot_types.\n"
+        "- Produce EXACTLY 5 unique slot types and include reference_slot_types when possible.\n\n"
         "==================================================\n"
         "OUTPUT FORMAT (STRICT JSON)\n"
         "==================================================\n"
@@ -512,6 +618,13 @@ def build_stage1_prompt_nbest(
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"}\n"
+        "  ],\n"
+        "  \"topk_slot_types\": [\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"}\n"
         "  ]\n"
         "}\n\n"
         f"{fewshot}"
@@ -549,6 +662,13 @@ def build_stage1_prompt_audio(
             "    {\"intent\": \"calendar:set\"},\n"
             "    {\"intent\": \"datetime:query\"},\n"
             "    {\"intent\": \"general:greet\"}\n"
+            "  ],\n"
+            "  \"topk_slot_types\": [\n"
+            "    {\"slot_type\": \"time\"},\n"
+            "    {\"slot_type\": \"date\"},\n"
+            "    {\"slot_type\": \"location\"},\n"
+            "    {\"slot_type\": \"song_name\"},\n"
+            "    {\"slot_type\": \"person\"}\n"
             "  ]\n"
             "}\n\n"
         )
@@ -560,7 +680,9 @@ def build_stage1_prompt_audio(
         "==================================================\n"
         "- topk_intents MUST contain exactly 5 unique intents from intent_candidates.\n"
         "- topk_intents MUST include reference_intent exactly once.\n"
-        "- Output ONLY topk_intents in JSON.\n\n"
+        "- topk_slot_types MUST contain exactly 5 unique slot types from allowed_slot_types.\n"
+        "- topk_slot_types MUST include all reference_slot_types when possible.\n"
+        "- Output BOTH topk_intents and topk_slot_types in JSON.\n\n"
         "==================================================\n"
         "INPUT (REFERENCE + CANDIDATES)\n"
         "==================================================\n"
@@ -579,7 +701,9 @@ def build_stage1_prompt_audio(
         "Step 1: TOP-5 INTENT CANDIDATES\n"
         "- Use ONLY intent_candidates.\n"
         "- Produce EXACTLY 5 unique intents and include reference_intent exactly once.\n"
-        "- Focus on intents only in Stage-1.\n\n"
+        "Step 2: TOP-5 SLOT TYPE CANDIDATES\n"
+        "- Use ONLY allowed_slot_types.\n"
+        "- Produce EXACTLY 5 unique slot types and include reference_slot_types when possible.\n\n"
         "==================================================\n"
         "OUTPUT FORMAT (STRICT JSON)\n"
         "==================================================\n"
@@ -590,6 +714,13 @@ def build_stage1_prompt_audio(
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"}\n"
+        "  ],\n"
+        "  \"topk_slot_types\": [\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"}\n"
         "  ]\n"
         "}\n\n"
         f"{fewshot}"
@@ -603,10 +734,12 @@ def build_stage2_prompt_nbest(
     nbest_texts: List[str],
     stable_tokens: List[str],
     unstable_tokens: List[str],
-    stage1_topk: List[str],
+    stage1_topk_intents: List[str],
+    stage1_topk_slot_types: List[str],
     use_fewshot: bool = False,
 ) -> str:
-    topk_json = json.dumps(to_topk_dicts(stage1_topk), ensure_ascii=False)
+    topk_intents_json = json.dumps(to_topk_dicts(stage1_topk_intents), ensure_ascii=False)
+    topk_slot_types_json = json.dumps(to_topk_slot_type_dicts(stage1_topk_slot_types), ensure_ascii=False)
     interpretations_text = format_interpretations(nbest_texts)
     fewshot = ""
     if use_fewshot:
@@ -615,6 +748,7 @@ def build_stage2_prompt_nbest(
             "reference_intent: play:music\n"
             "reference_slot_types: [\"song_name\"]\n"
             "stage1_topk_intents: [{\"intent\":\"play:music\"},{\"intent\":\"music:query\"},{\"intent\":\"alarm:set\"},{\"intent\":\"weather:query\"},{\"intent\":\"qa:factoid\"}]\n"
+            "stage1_topk_slot_types: [{\"slot_type\":\"song_name\"},{\"slot_type\":\"artist_name\"},{\"slot_type\":\"time\"},{\"slot_type\":\"date\"},{\"slot_type\":\"place_name\"}]\n"
             "interpretations:\n"
             "interpretation_1: play yesterday\n"
             "interpretation_2: please play yesterday\n"
@@ -633,6 +767,13 @@ def build_stage2_prompt_nbest(
             "    {\"intent\": \"alarm:set\"},\n"
             "    {\"intent\": \"weather:query\"},\n"
             "    {\"intent\": \"qa:factoid\"}\n"
+            "  ],\n"
+            "  \"topk_slot_types\": [\n"
+            "    {\"slot_type\": \"song_name\"},\n"
+            "    {\"slot_type\": \"artist_name\"},\n"
+            "    {\"slot_type\": \"time\"},\n"
+            "    {\"slot_type\": \"date\"},\n"
+            "    {\"slot_type\": \"place_name\"}\n"
             "  ],\n"
             "  \"intent_elimination\": [\n"
             "    {\"intent\": \"music:query\", \"reason\": \"command style favors execution over info retrieval\"},\n"
@@ -654,7 +795,9 @@ def build_stage2_prompt_nbest(
         "GENERAL RULES\n"
         "==================================================\n"
         "- Use stage1_topk_intents as fixed candidates.\n"
+        "- Use stage1_topk_slot_types as fixed candidates.\n"
         "- topk_intents in output must contain the same 5 intents as stage1_topk_intents.\n"
+        "- topk_slot_types in output must contain the same 5 slot types as stage1_topk_slot_types.\n"
         "- intent_elimination MUST contain exactly 4 non-reference intents from stage1_topk_intents.\n"
         "- final_prediction.intent MUST be one of stage1_topk_intents.\n"
         "- Do NOT invent slot types outside allowed_slot_types.\n\n"
@@ -664,7 +807,8 @@ def build_stage2_prompt_nbest(
         f"reference_intent: {gold_intent}\n"
         f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
         f"allowed_slot_types ({len(slot_candidates)}): {json.dumps(slot_candidates, ensure_ascii=False)}\n"
-        f"stage1_topk_intents: {topk_json}\n"
+        f"stage1_topk_intents: {topk_intents_json}\n"
+        f"stage1_topk_slot_types: {topk_slot_types_json}\n"
         "interpretations:\n"
         f"{interpretations_text}\n"
         f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
@@ -686,6 +830,13 @@ def build_stage2_prompt_nbest(
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"}\n"
         "  ],\n"
+        "  \"topk_slot_types\": [\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"}\n"
+        "  ],\n"
         "  \"intent_elimination\": [\n"
         "    {\"intent\": \"\", \"reason\": \"\"},\n"
         "    {\"intent\": \"\", \"reason\": \"\"},\n"
@@ -706,10 +857,12 @@ def build_stage2_prompt_audio(
     gold_intent: str,
     gold_slot_types: List[str],
     slot_candidates: List[str],
-    stage1_topk: List[str],
+    stage1_topk_intents: List[str],
+    stage1_topk_slot_types: List[str],
     use_fewshot: bool = False,
 ) -> str:
-    topk_json = json.dumps(to_topk_dicts(stage1_topk), ensure_ascii=False)
+    topk_intents_json = json.dumps(to_topk_dicts(stage1_topk_intents), ensure_ascii=False)
+    topk_slot_types_json = json.dumps(to_topk_slot_type_dicts(stage1_topk_slot_types), ensure_ascii=False)
     fewshot = ""
     if use_fewshot:
         fewshot = (
@@ -717,6 +870,7 @@ def build_stage2_prompt_audio(
             "reference_intent: alarm:set\n"
             "reference_slot_types: [\"time\"]\n"
             "stage1_topk_intents: [{\"intent\":\"alarm:set\"},{\"intent\":\"alarm:query\"},{\"intent\":\"calendar:set\"},{\"intent\":\"datetime:query\"},{\"intent\":\"general:greet\"}]\n"
+            "stage1_topk_slot_types: [{\"slot_type\":\"time\"},{\"slot_type\":\"date\"},{\"slot_type\":\"location\"},{\"slot_type\":\"song_name\"},{\"slot_type\":\"person\"}]\n"
             "EXAMPLE OUTPUT:\n"
             "{\n"
             "  \"interpretation_uncertainty_analysis\": {\n"
@@ -730,6 +884,13 @@ def build_stage2_prompt_audio(
             "    {\"intent\": \"calendar:set\"},\n"
             "    {\"intent\": \"datetime:query\"},\n"
             "    {\"intent\": \"general:greet\"}\n"
+            "  ],\n"
+            "  \"topk_slot_types\": [\n"
+            "    {\"slot_type\": \"time\"},\n"
+            "    {\"slot_type\": \"date\"},\n"
+            "    {\"slot_type\": \"location\"},\n"
+            "    {\"slot_type\": \"song_name\"},\n"
+            "    {\"slot_type\": \"person\"}\n"
             "  ],\n"
             "  \"intent_elimination\": [\n"
             "    {\"intent\": \"alarm:query\", \"reason\": \"prosody indicates command execution, not a query\"},\n"
@@ -751,7 +912,9 @@ def build_stage2_prompt_audio(
         "GENERAL RULES\n"
         "==================================================\n"
         "- Use stage1_topk_intents as fixed candidates.\n"
+        "- Use stage1_topk_slot_types as fixed candidates.\n"
         "- topk_intents in output must contain the same 5 intents as stage1_topk_intents.\n"
+        "- topk_slot_types in output must contain the same 5 slot types as stage1_topk_slot_types.\n"
         "- intent_elimination MUST contain exactly 4 non-reference intents from stage1_topk_intents.\n"
         "- final_prediction.intent MUST be one of stage1_topk_intents.\n"
         "- source_hypothesis must be interpretation_1 or \"none\".\n\n"
@@ -761,7 +924,8 @@ def build_stage2_prompt_audio(
         f"reference_intent: {gold_intent}\n"
         f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
         f"allowed_slot_types ({len(slot_candidates)}): {json.dumps(slot_candidates, ensure_ascii=False)}\n"
-        f"stage1_topk_intents: {topk_json}\n"
+        f"stage1_topk_intents: {topk_intents_json}\n"
+        f"stage1_topk_slot_types: {topk_slot_types_json}\n"
         "interpretations:\n"
         "interpretation_1: (audio only)\n"
         "stable_tokens: []\n"
@@ -782,6 +946,13 @@ def build_stage2_prompt_audio(
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"}\n"
+        "  ],\n"
+        "  \"topk_slot_types\": [\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"}\n"
         "  ],\n"
         "  \"intent_elimination\": [\n"
         "    {\"intent\": \"\", \"reason\": \"\"},\n"
@@ -854,7 +1025,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
-    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for slot types.")
+    parser.add_argument("--num_candidates", type=int, default=5, help="(Compatibility) ignored: all slot types are always used as candidates.")
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -950,11 +1121,9 @@ def main():
 
         intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
 
-        slot_candidates = select_slot_candidates_topk(
-            gold_types=gold_slot_types,
-            slot_types=metadata["slot_types"],
-            k=args.num_candidates,
-            rng=rng,
+        slot_candidates = build_full_slot_candidates(
+            reference_slot_types=gold_slot_types,
+            slot_inventory=metadata["slot_types"],
         )
 
         audio = None
@@ -1019,20 +1188,40 @@ def main():
                 sampling_rate=sr,
             )
             stage1_parsed = extract_json(stage1_generated)
-            stage1_topk_valid, stage1_validation_error = validate_topk_intents(stage1_parsed, intent_candidates, gold_intent)
+            stage1_topk_valid, stage1_validation_error = validate_stage1_output(
+                parsed=stage1_parsed,
+                intent_candidates=intent_candidates,
+                reference_intent=gold_intent,
+                slot_candidates=slot_candidates,
+                reference_slot_types=gold_slot_types,
+            )
             if stage1_topk_valid:
                 break
 
         stage1_topk_intents = extract_topk_intents(stage1_parsed)
-        if not stage1_topk_valid or len(stage1_topk_intents) != 5 or len(set(stage1_topk_intents)) != 5:
+        stage1_topk_slot_types = extract_topk_slot_types(stage1_parsed)
+        if (
+            not stage1_topk_valid
+            or len(stage1_topk_intents) != 5
+            or len(set(stage1_topk_intents)) != 5
+            or len(stage1_topk_slot_types) != 5
+            or len(set(stage1_topk_slot_types)) != 5
+        ):
             stage1_topk_intents = select_candidates_topk(
                 gold=gold_intent,
                 candidates=intent_candidates,
                 k=5,
                 rng=rng,
             )
+            stage1_topk_slot_types = select_slot_types_topk(
+                gold_types=gold_slot_types,
+                slot_types=slot_candidates,
+                k=5,
+                rng=rng,
+            )
             stage1_parsed = {
                 "topk_intents": to_topk_dicts(stage1_topk_intents),
+                "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
                 "fallback_used": True,
                 "fallback_reason": stage1_validation_error or "stage1 format violation",
             }
@@ -1045,7 +1234,8 @@ def main():
                 nbest_texts=nbest_texts,
                 stable_tokens=stable_unstable["stable"],
                 unstable_tokens=stable_unstable["unstable"],
-                stage1_topk=stage1_topk_intents,
+                stage1_topk_intents=stage1_topk_intents,
+                stage1_topk_slot_types=stage1_topk_slot_types,
                 use_fewshot=args.use_fewshot,
             )
         else:
@@ -1053,7 +1243,8 @@ def main():
                 gold_intent=gold_intent,
                 gold_slot_types=gold_slot_types,
                 slot_candidates=slot_candidates,
-                stage1_topk=stage1_topk_intents,
+                stage1_topk_intents=stage1_topk_intents,
+                stage1_topk_slot_types=stage1_topk_slot_types,
                 use_fewshot=args.use_fewshot,
             )
 
@@ -1079,7 +1270,12 @@ def main():
                 sampling_rate=sr,
             )
             stage2_parsed = extract_json(stage2_generated)
-            stage2_valid, stage2_validation_error = validate_stage2_output(stage2_parsed, stage1_topk_intents, gold_intent)
+            stage2_valid, stage2_validation_error = validate_stage2_output(
+                parsed=stage2_parsed,
+                stage1_topk_intents=stage1_topk_intents,
+                stage1_topk_slot_types=stage1_topk_slot_types,
+                reference_intent=gold_intent,
+            )
             if stage2_valid:
                 break
 
@@ -1091,6 +1287,7 @@ def main():
                     "decision_pivots": stable_unstable["stable"][:3] if args.mode == "nbest" else [],
                 },
                 "topk_intents": to_topk_dicts(stage1_topk_intents),
+                "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
                 "intent_elimination": [
                     {"intent": intent, "reason": "less consistent with utterance evidence than reference_intent"}
                     for intent in stage1_topk_intents
@@ -1117,12 +1314,14 @@ def main():
 
         stage2_parsed = postprocess_rationale_output(stage2_parsed, fallback_intent=gold_intent)
         stage2_parsed["topk_intents"] = to_topk_dicts(stage1_topk_intents)
+        stage2_parsed["topk_slot_types"] = to_topk_slot_type_dicts(stage1_topk_slot_types)
 
         combined_rationale = {
             "candidate_generation": stage1_parsed,
             "candidate_pruning": stage2_parsed,
             "interpretation_uncertainty_analysis": stage2_parsed.get("interpretation_uncertainty_analysis", {}),
             "topk_intents": to_topk_dicts(stage1_topk_intents),
+            "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
             "intent_elimination": stage2_parsed.get("intent_elimination", []),
             "final_prediction": stage2_parsed.get("final_prediction", {}),
             "slot_grounding": stage2_parsed.get("slot_grounding", []),
@@ -1152,6 +1351,7 @@ def main():
             "topk_validation_error": "" if stage1_topk_valid else stage1_validation_error,
             "stage2_valid": stage2_valid,
             "stage2_validation_error": "" if stage2_valid else stage2_validation_error,
+            "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
             "raw_output": combined_raw_output,
         }
         if args.save_raw:
@@ -1170,6 +1370,8 @@ def main():
             "topk_validation_error": "" if stage1_topk_valid else stage1_validation_error,
             "stage2_valid": stage2_valid,
             "stage2_validation_error": "" if stage2_valid else stage2_validation_error,
+            "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
+            "slot_candidates": slot_candidates,
         }
         raw_outputs.append(raw_record)
         if args.output_mode == "full":

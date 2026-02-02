@@ -237,6 +237,19 @@ def select_slot_candidates_topk(
 ) -> List[str]:
     return select_slot_types_topk(gold_types, slot_types, k, rng)
 
+def build_full_slot_candidates(
+    reference_slot_types: List[str],
+    slot_inventory: List[str],
+) -> List[str]:
+    ordered: List[str] = []
+    for slot_type in reference_slot_types:
+        if slot_type and slot_type not in ordered:
+            ordered.append(slot_type)
+    for slot_type in slot_inventory:
+        if slot_type and slot_type not in ordered:
+            ordered.append(slot_type)
+    return ordered
+
 def compose_intent(scenario: str, action: str) -> str:
     if not scenario or not action:
         return ""
@@ -661,7 +674,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
-    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for slot types.")
+    parser.add_argument("--num_candidates", type=int, default=5, help="(Compatibility) ignored: all slot types are always used as candidates.")
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -757,11 +770,9 @@ def main():
 
         intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
 
-        slot_candidates = select_slot_candidates_topk(
-            gold_types=gold_slot_types,
-            slot_types=metadata["slot_types"],
-            k=args.num_candidates,
-            rng=rng,
+        slot_candidates = build_full_slot_candidates(
+            reference_slot_types=gold_slot_types,
+            slot_inventory=metadata["slot_types"],
         )
 
         audio = None
@@ -862,6 +873,7 @@ def main():
             "slurp_id": slurp_id,
             "input_text": input_text,
             "gold_intent": gold_intent,
+            "slot_candidates": slot_candidates,
             "raw_output": generated,
             "topk_valid": topk_valid,
             "topk_validation_error": "" if topk_valid else validation_error,
@@ -884,6 +896,7 @@ def main():
                 "slurp_id": slurp_id,
                 "input_text": input_text,
                 "gold_intent": gold_intent,
+                "slot_candidates": slot_candidates,
                 "prompt": prompt,
                 "raw_output": generated,
             }

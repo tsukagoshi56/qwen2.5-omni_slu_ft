@@ -60,6 +60,7 @@ uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10 --li
 
 Note: The prompt includes a small few-shot example by default to encourage concise rejection reasons.
 Output JSONL defaults to raw model outputs; use `--output_mode full` for metadata JSON.
+`allowed_slot_types` is now passed as the full slot-type inventory (not sampled).
 
 ### Step 2-B: Generate Two-Stage Rationale (New)
 
@@ -67,7 +68,7 @@ Output JSONL defaults to raw model outputs; use `--output_mode full` for metadat
 
 - Stage 1 (candidate generation):  
   Input = `n-best`, `reference_intent`, `reference_slot_types`, `intent_candidates`, `allowed_slot_types`  
-  Output = exactly 5 intent candidates (`topk_intents`)
+  Output = exactly 5 intent candidates (`topk_intents`) and exactly 5 slot-type candidates (`topk_slot_types`)
 - Stage 2 (candidate pruning + final rationale):  
   Input = Stage-1 `topk_intents` + the same utterance evidence  
   Output = elimination reasons, final prediction, slot grounding, final rationale
@@ -75,6 +76,7 @@ Output JSONL defaults to raw model outputs; use `--output_mode full` for metadat
 The final JSON keeps the same top-level style as the original output and additionally stores both stage outputs under:
 - `rationale.candidate_generation`
 - `rationale.candidate_pruning`
+and includes `rationale.topk_slot_types`.
 
 **N-best mode (two-stage):**
 ```bash
@@ -104,4 +106,5 @@ uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --pre
 
 **Notes:**
 - Stage format checks and retry logic are applied to both stages.
+- `allowed_slot_types` uses the full slot-type inventory from metadata.
 - If Stage 1/2 output is invalid after retries, deterministic fallback JSON is produced so processing can continue.
