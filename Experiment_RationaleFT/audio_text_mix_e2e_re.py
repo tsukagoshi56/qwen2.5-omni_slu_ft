@@ -110,14 +110,35 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     if not filename:
         return None
 
+    filename = str(filename).strip()
+    if os.path.isabs(filename) and os.path.exists(filename):
+        return filename
+
+    basename = os.path.basename(filename)
     candidates = [
         os.path.join(audio_root, filename),
+        os.path.join(audio_root, basename),
         os.path.join(audio_root, "slurp_real", filename),
+        os.path.join(audio_root, "slurp_real", basename),
         os.path.join("slurp", "audio", "slurp_real", filename),
+        os.path.join("slurp", "audio", "slurp_real", basename),
     ]
     for path in candidates:
         if os.path.exists(path):
             return path
+
+    # Last-resort fallback: build one-time basename index under audio_root.
+    if audio_root and os.path.isdir(audio_root):
+        if not hasattr(resolve_audio_path, "_audio_index"):
+            index: Dict[str, str] = {}
+            for root, _, files in os.walk(audio_root):
+                for fn in files:
+                    if fn not in index:
+                        index[fn] = os.path.join(root, fn)
+            resolve_audio_path._audio_index = index
+        fallback = resolve_audio_path._audio_index.get(basename)
+        if fallback and os.path.exists(fallback):
+            return fallback
 
     if not hasattr(resolve_audio_path, "_debug_count"):
         resolve_audio_path._debug_count = 0
@@ -183,14 +204,20 @@ def build_items_from_rationale_jsonl(
     audio_dir: str,
     add_text_only: bool = False,
     max_samples: Optional[int] = None,
+    allow_text_fallback_when_audio_missing: bool = True,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
+    fallback_text_items: List[Dict[str, Any]] = []
     if not os.path.exists(jsonl_path):
         logger.warning("JSONL file not found: %s", jsonl_path)
         return items
 
     with open(jsonl_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
+
+    parsed_rows = 0
+    rows_with_filename = 0
+    rows_with_audio = 0
 
     for line in lines:
         if max_samples is not None and len(items) >= max_samples:
@@ -214,6 +241,7 @@ def build_items_from_rationale_jsonl(
         if not isinstance(data, dict):
             # Some rows can be a JSON string/array. Skip safely.
             continue
+        parsed_rows += 1
 
         sample_id = str(data.get("id", ""))
         filename = data.get("filename")
@@ -222,6 +250,8 @@ def build_items_from_rationale_jsonl(
             if isinstance(meta, dict):
                 filename = meta.get("filename")
         filename = str(filename or "").strip()
+        if filename:
+            rows_with_filename += 1
 
         candidates = data.get("candidates", [])
         if not isinstance(candidates, list):
@@ -247,14 +277,31 @@ def build_items_from_rationale_jsonl(
             "target": target_str,
             "target_obj": target_obj,
         }
+        fallback_text_items.append({**base_item, "audio_path": None})
 
         if add_text_only:
             items.append({**base_item, "audio_path": None})
 
         if audio_path:
             items.append(base_item)
+            rows_with_audio += 1
 
-    logger.info("Loaded %s -> %d items", jsonl_path, len(items))
+    if (not add_text_only) and len(items) == 0 and parsed_rows > 0 and allow_text_fallback_when_audio_missing:
+        logger.warning(
+            "No audio could be resolved from %s. Falling back to text-only items (%d rows).",
+            jsonl_path,
+            len(fallback_text_items),
+        )
+        items.extend(fallback_text_items)
+
+    logger.info(
+        "Loaded %s -> %d items (parsed_rows=%d, rows_with_filename=%d, rows_with_audio=%d)",
+        jsonl_path,
+        len(items),
+        parsed_rows,
+        rows_with_filename,
+        rows_with_audio,
+    )
     return items
 
 
@@ -1001,6 +1048,11 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
+    parser.add_argument(
+        "--no_text_fallback_when_audio_missing",
+        action="store_true",
+        help="Disable automatic text-only fallback when audio files cannot be resolved.",
+    )
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
@@ -1029,12 +1081,14 @@ def main():
         args.audio_dir,
         add_text_only=args.add_text_only,
         max_samples=args.max_samples,
+        allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
     )
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
         args.audio_dir,
         add_text_only=args.add_text_only,
         max_samples=(args.max_samples // 2) if args.max_samples else None,
+        allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
     )
 
     if rank == 0:
@@ -1114,6 +1168,7 @@ def main():
         args.audio_dir,
         add_text_only=False,
         max_samples=test_max_samples,
+        allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
     )
 
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
