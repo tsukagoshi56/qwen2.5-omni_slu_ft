@@ -43,6 +43,19 @@ def write_raw_jsonl(path: str, outputs: List[Any]):
         for output in outputs:
             f.write(json.dumps(output, ensure_ascii=False) + "\n")
 
+def append_worker_suffix(path: str, worker_rank: int, num_workers: int) -> str:
+    root, ext = os.path.splitext(path)
+    return f"{root}.w{worker_rank}of{num_workers}{ext or '.jsonl'}"
+
+def shard_items_by_worker(
+    items: List[Dict[str, Any]],
+    num_workers: int,
+    worker_rank: int,
+) -> List[Dict[str, Any]]:
+    if num_workers <= 1:
+        return items
+    return [item for idx, item in enumerate(items) if idx % num_workers == worker_rank]
+
 def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     if not filename:
         return None
@@ -206,11 +219,13 @@ def build_full_intent_candidates(
     intent_inventory: List[str],
 ) -> List[str]:
     ordered: List[str] = []
-    if reference_intent:
-        ordered.append(reference_intent)
+    normalized_reference = normalize_intent_label(reference_intent)
+    if normalized_reference:
+        ordered.append(normalized_reference)
     for intent in intent_inventory:
-        if intent and intent not in ordered:
-            ordered.append(intent)
+        normalized_intent = normalize_intent_label(intent)
+        if normalized_intent and normalized_intent not in ordered:
+            ordered.append(normalized_intent)
     return ordered
 
 def select_slot_types_topk(
@@ -250,10 +265,13 @@ def build_full_slot_candidates(
             ordered.append(slot_type)
     return ordered
 
+def normalize_intent_label(intent: str) -> str:
+    return str(intent or "").strip().replace(":", "_")
+
 def compose_intent(scenario: str, action: str) -> str:
     if not scenario or not action:
         return ""
-    return f"{scenario}:{action}"
+    return f"{scenario}_{action}"
 
 def load_intents_from_slurp_splits(paths: List[str]) -> List[str]:
     intents = set()
@@ -281,9 +299,14 @@ def load_slurp_map(paths: List[str]) -> Dict[str, Dict[str, Any]]:
     return mapping
 
 def split_intent(intent: str) -> Tuple[str, str]:
-    if not intent or ":" not in intent:
+    if not intent:
         return "", ""
-    scenario, action = intent.split(":", 1)
+    if "_" in intent:
+        scenario, action = intent.split("_", 1)
+    elif ":" in intent:
+        scenario, action = intent.split(":", 1)
+    else:
+        return "", ""
     return scenario.strip(), action.strip()
 
 def postprocess_rationale_output(
@@ -297,16 +320,16 @@ def postprocess_rationale_output(
     if not isinstance(final_prediction, dict):
         final_prediction = {}
 
-    intent = str(final_prediction.get("intent", "")).strip()
+    intent = normalize_intent_label(final_prediction.get("intent", ""))
     if not intent:
         topk_intents = parsed.get("topk_intents", [])
         if isinstance(topk_intents, list):
             for cand in topk_intents:
                 if isinstance(cand, dict) and cand.get("intent"):
-                    intent = str(cand["intent"]).strip()
+                    intent = normalize_intent_label(cand["intent"])
                     break
     if not intent:
-        intent = fallback_intent
+        intent = normalize_intent_label(fallback_intent)
 
     scenario_from_intent, action_from_intent = split_intent(intent)
     if intent:
@@ -336,17 +359,19 @@ def validate_topk_intents(
     for idx, item in enumerate(topk_intents):
         if not isinstance(item, dict):
             return False, f"topk_intents[{idx}] is not an object"
-        intent = str(item.get("intent", "")).strip()
+        intent = normalize_intent_label(item.get("intent", ""))
         if not intent:
             return False, f"topk_intents[{idx}].intent is empty"
         normalized.append(intent)
 
     if len(set(normalized)) != 5:
         return False, "topk_intents must contain 5 unique intents"
-    invalid = [intent for intent in normalized if intent not in intent_candidates]
+    normalized_candidates = {normalize_intent_label(intent) for intent in intent_candidates}
+    invalid = [intent for intent in normalized if intent not in normalized_candidates]
     if invalid:
         return False, f"topk_intents contains intents outside candidates: {invalid}"
-    if reference_intent and normalized.count(reference_intent) != 1:
+    normalized_reference = normalize_intent_label(reference_intent)
+    if normalized_reference and normalized.count(normalized_reference) != 1:
         return False, "topk_intents must include reference_intent exactly once"
     return True, ""
 
@@ -400,9 +425,9 @@ def build_prompt_nbest(
     if use_fewshot:
         fewshot = (
             "EXAMPLE INPUT:\n"
-            "reference_intent: play:music\n"
+            "reference_intent: play_music\n"
             "reference_slot_types: [\"song_name\"]\n"
-            "intent_candidates (5): [\"play:music\",\"music:query\",\"alarm:set\",\"weather:query\",\"qa:factoid\"]\n"
+            "intent_candidates (5): [\"play_music\",\"music_query\",\"alarm_set\",\"weather_query\",\"qa_factoid\"]\n"
             "allowed_slot_types (5): [\"song_name\",\"artist_name\",\"time\",\"date\",\"place_name\"]\n"
             "interpretations:\n"
             "interpretation_1: play yesterday\n"
@@ -419,20 +444,20 @@ def build_prompt_nbest(
             "    \"decision_pivots\": [\"play\",\"yesterday\"]\n"
             "  },\n"
             "  \"topk_intents\": [\n"
-            "    {\"intent\": \"play:music\"},\n"
-            "    {\"intent\": \"music:query\"},\n"
-            "    {\"intent\": \"alarm:set\"},\n"
-            "    {\"intent\": \"weather:query\"},\n"
-            "    {\"intent\": \"qa:factoid\"}\n"
+            "    {\"intent\": \"play_music\"},\n"
+            "    {\"intent\": \"music_query\"},\n"
+            "    {\"intent\": \"alarm_set\"},\n"
+            "    {\"intent\": \"weather_query\"},\n"
+            "    {\"intent\": \"qa_factoid\"}\n"
             "  ],\n"
             "  \"intent_elimination\": [\n"
-            "    {\"intent\": \"music:query\", \"reason\": \"utterance is command style; no interrogative pattern for retrieval\"},\n"
-            "    {\"intent\": \"alarm:set\", \"reason\": \"lexical focus is media playback, not alarm scheduling parameters\"},\n"
-            "    {\"intent\": \"weather:query\", \"reason\": \"content refers to a track name, not meteorological information request\"},\n"
-            "    {\"intent\": \"qa:factoid\", \"reason\": \"intent asks execution of playback action, not fact-seeking answer\"}\n"
+            "    {\"intent\": \"music_query\", \"reason\": \"utterance is command style; no interrogative pattern for retrieval\"},\n"
+            "    {\"intent\": \"alarm_set\", \"reason\": \"lexical focus is media playback, not alarm scheduling parameters\"},\n"
+            "    {\"intent\": \"weather_query\", \"reason\": \"content refers to a track name, not meteorological information request\"},\n"
+            "    {\"intent\": \"qa_factoid\", \"reason\": \"intent asks execution of playback action, not fact-seeking answer\"}\n"
             "  ],\n"
             "  \"final_prediction\": {\n"
-            "    \"intent\": \"play:music\",\n"
+            "    \"intent\": \"play_music\",\n"
             "    \"scenario\": \"play\",\n"
             "    \"action\": \"music\"\n"
             "  },\n"
@@ -482,7 +507,7 @@ def build_prompt_nbest(
         "- Each reason must be specific and non-repetitive.\n"
         "- Prefer different evidence dimensions across reasons (speech-act mismatch, domain mismatch, argument/slot mismatch, target mismatch).\n"
         "Step 4: FINAL INTENT RESOLUTION\n"
-        "- Select one intent from topk_intents and split it into scenario/action by the first ':'.\n"
+        "- Select one intent from topk_intents and split it into scenario/action by the first '_'.\n"
         "Step 5: SLOT GROUNDING\n"
         "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
         "- source_hypothesis must be interpretation_1..interpretation_5 or \"none\".\n"
@@ -534,9 +559,9 @@ def build_prompt_audio(
     if use_fewshot:
         fewshot = (
             "EXAMPLE INPUT:\n"
-            "reference_intent: alarm:set\n"
+            "reference_intent: alarm_set\n"
             "reference_slot_types: [\"time\"]\n"
-            "intent_candidates (5): [\"alarm:set\",\"alarm:query\",\"calendar:set\",\"datetime:query\",\"general:greet\"]\n"
+            "intent_candidates (5): [\"alarm_set\",\"alarm_query\",\"calendar_set\",\"datetime_query\",\"general_greet\"]\n"
             "allowed_slot_types (5): [\"time\",\"date\",\"location\",\"song_name\",\"person\"]\n"
             "interpretations:\n"
             "interpretation_1: (audio only)\n"
@@ -551,20 +576,20 @@ def build_prompt_audio(
             "    \"decision_pivots\": [\"time\"]\n"
             "  },\n"
             "  \"topk_intents\": [\n"
-            "    {\"intent\": \"alarm:set\"},\n"
-            "    {\"intent\": \"alarm:query\"},\n"
-            "    {\"intent\": \"calendar:set\"},\n"
-            "    {\"intent\": \"datetime:query\"},\n"
-            "    {\"intent\": \"general:greet\"}\n"
+            "    {\"intent\": \"alarm_set\"},\n"
+            "    {\"intent\": \"alarm_query\"},\n"
+            "    {\"intent\": \"calendar_set\"},\n"
+            "    {\"intent\": \"datetime_query\"},\n"
+            "    {\"intent\": \"general_greet\"}\n"
             "  ],\n"
             "  \"intent_elimination\": [\n"
-            "    {\"intent\": \"alarm:query\", \"reason\": \"prosodic and command framing indicate execution request, not information retrieval\"},\n"
-            "    {\"intent\": \"calendar:set\", \"reason\": \"requested parameter is wake-up time, missing event-specific arguments\"},\n"
-            "    {\"intent\": \"datetime:query\", \"reason\": \"user is assigning a time target rather than asking current date/time\"},\n"
-            "    {\"intent\": \"general:greet\", \"reason\": \"utterance carries task intent and parameters instead of social salutation\"}\n"
+            "    {\"intent\": \"alarm_query\", \"reason\": \"prosodic and command framing indicate execution request, not information retrieval\"},\n"
+            "    {\"intent\": \"calendar_set\", \"reason\": \"requested parameter is wake-up time, missing event-specific arguments\"},\n"
+            "    {\"intent\": \"datetime_query\", \"reason\": \"user is assigning a time target rather than asking current date/time\"},\n"
+            "    {\"intent\": \"general_greet\", \"reason\": \"utterance carries task intent and parameters instead of social salutation\"}\n"
             "  ],\n"
             "  \"final_prediction\": {\n"
-            "    \"intent\": \"alarm:set\",\n"
+            "    \"intent\": \"alarm_set\",\n"
             "    \"scenario\": \"alarm\",\n"
             "    \"action\": \"set\"\n"
             "  },\n"
@@ -614,7 +639,7 @@ def build_prompt_audio(
         "- Each reason must be specific and non-repetitive.\n"
         "- Prefer different evidence dimensions across reasons (speech-act mismatch, domain mismatch, argument/slot mismatch, target mismatch).\n"
         "Step 4: FINAL INTENT RESOLUTION\n"
-        "- Select one intent from topk_intents and split it into scenario/action by the first ':'.\n"
+        "- Select one intent from topk_intents and split it into scenario/action by the first '_'.\n"
         "Step 5: SLOT GROUNDING\n"
         "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
         "- source_hypothesis must be interpretation_1 or \"none\".\n"
@@ -681,12 +706,21 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--num_workers", type=int, default=1, help="Number of data-parallel workers (processes).")
+    parser.add_argument("--worker_rank", type=int, default=0, help="Rank of this worker in [0, num_workers).")
+    parser.add_argument("--append_worker_suffix", action="store_true", help="Append .w{rank}of{num_workers} to output filename.")
     parser.add_argument("--preview", type=int, default=0, help="Print prompt and output for first N samples.")
     parser.add_argument("--limitmode", action="store_true", help="Print pretty JSON results to stdout.")
     parser.add_argument("--save_raw", action="store_true")
     parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     args = parser.parse_args()
+    if args.num_workers < 1:
+        print(f"[ERROR] num_workers must be >= 1, got {args.num_workers}")
+        return
+    if args.worker_rank < 0 or args.worker_rank >= args.num_workers:
+        print(f"[ERROR] worker_rank must be in [0, {args.num_workers}), got {args.worker_rank}")
+        return
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_path = os.path.join(base_dir, args.input_file) if not os.path.isabs(args.input_file) else args.input_file
@@ -699,6 +733,8 @@ def main():
     clusters_path = os.path.join(base_dir, args.clusters_file) if not os.path.isabs(args.clusters_file) else args.clusters_file
     confusing_path = os.path.join(base_dir, args.confusing_pairs_file) if not os.path.isabs(args.confusing_pairs_file) else args.confusing_pairs_file
     output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
+    if args.num_workers > 1 and args.append_worker_suffix:
+        output_path = append_worker_suffix(output_path, args.worker_rank, args.num_workers)
 
     rng = random.Random(args.seed)
 
@@ -710,7 +746,7 @@ def main():
     if intent_inventory:
         print(f"[INFO] Loaded {len(intent_inventory)} intents from train/devel/test splits.")
     else:
-        intent_inventory = metadata["intents"]
+        intent_inventory = [normalize_intent_label(intent) for intent in metadata["intents"] if normalize_intent_label(intent)]
         print(f"[WARN] Could not build intents from splits. Falling back to metadata intents ({len(intent_inventory)}).")
 
     slurp_map = load_slurp_map(split_paths + [slurp_path])
@@ -718,9 +754,18 @@ def main():
     items = read_jsonl(input_path)
     if args.limit:
         items = items[: args.limit]
+    total_items = len(items)
+    items = shard_items_by_worker(items, args.num_workers, args.worker_rank)
+    if args.num_workers > 1:
+        print(
+            f"[INFO] Worker {args.worker_rank}/{args.num_workers} processing "
+            f"{len(items)} / {total_items} items."
+        )
+        if not args.append_worker_suffix:
+            print("[WARN] append_worker_suffix is off. Make sure each worker uses a different output_file.")
 
     if not items:
-        print(f"[ERROR] No input items found: {input_path}")
+        print(f"[ERROR] No input items found for this worker: {input_path}")
         return
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)

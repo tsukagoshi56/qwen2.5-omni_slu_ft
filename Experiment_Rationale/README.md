@@ -58,9 +58,26 @@ uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --preview 10
 uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10 --limitmode
 ```
 
+**2GPU parallel run (2 workers):**
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest --device cuda --num_workers 2 --worker_rank 0 --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_parallel.jsonl &
+
+CUDA_VISIBLE_DEVICES=1 uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest --device cuda --num_workers 2 --worker_rank 1 --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_parallel.jsonl &
+
+wait
+cat Experiment_Rationale/rationale_output_parallel.w0of2.jsonl \
+    Experiment_Rationale/rationale_output_parallel.w1of2.jsonl \
+    > Experiment_Rationale/rationale_output_parallel_merged.jsonl
+```
+
 Note: The prompt includes a small few-shot example by default to encourage concise rejection reasons.
 Output JSONL defaults to raw model outputs; use `--output_mode full` for metadata JSON.
 `allowed_slot_types` is now passed as the full slot-type inventory (not sampled).
+Intent labels are represented as `scenario_action` (underscore), e.g. `play_music`.
 
 ### Step 2-B: Generate Two-Stage Rationale (New)
 
@@ -110,7 +127,25 @@ uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --lim
 uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --preview 3
 ```
 
+**2GPU parallel run (two-stage, 2 workers):**
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run Experiment_Rationale/3_generate_rationale_two_stage.py \
+  --mode nbest --device cuda --num_workers 2 --worker_rank 0 --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_two_stage_parallel.jsonl &
+
+CUDA_VISIBLE_DEVICES=1 uv run Experiment_Rationale/3_generate_rationale_two_stage.py \
+  --mode nbest --device cuda --num_workers 2 --worker_rank 1 --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_two_stage_parallel.jsonl &
+
+wait
+cat Experiment_Rationale/rationale_output_two_stage_parallel.w0of2.jsonl \
+    Experiment_Rationale/rationale_output_two_stage_parallel.w1of2.jsonl \
+    > Experiment_Rationale/rationale_output_two_stage_parallel_merged.jsonl
+```
+
 **Notes:**
 - Stage format checks and retry logic are applied independently to intent/slot stages.
+- Parallel options are available in both scripts: `--num_workers`, `--worker_rank`, `--append_worker_suffix`.
+- If `--append_worker_suffix` is not used, give each worker a different `--output_file`.
 - `allowed_slot_types` uses the full slot-type inventory from metadata.
 - If any sub-stage output is invalid after retries, deterministic fallback JSON is produced so processing can continue.
