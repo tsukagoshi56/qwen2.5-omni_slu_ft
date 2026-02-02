@@ -224,6 +224,50 @@ def select_slot_candidates_topk(
 ) -> List[str]:
     return select_slot_types_topk(gold_types, slot_types, k, rng)
 
+def compose_intent(scenario: str, action: str) -> str:
+    if not scenario or not action:
+        return ""
+    return f"{scenario}:{action}"
+
+def split_intent(intent: str) -> Tuple[str, str]:
+    if not intent or ":" not in intent:
+        return "", ""
+    scenario, action = intent.split(":", 1)
+    return scenario.strip(), action.strip()
+
+def postprocess_rationale_output(
+    parsed: Optional[Dict[str, Any]],
+    fallback_intent: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(parsed, dict):
+        return parsed
+
+    final_prediction = parsed.get("final_prediction")
+    if not isinstance(final_prediction, dict):
+        final_prediction = {}
+
+    intent = str(final_prediction.get("intent", "")).strip()
+    if not intent:
+        topk_intents = parsed.get("topk_intents", [])
+        if isinstance(topk_intents, list):
+            for cand in topk_intents:
+                if isinstance(cand, dict) and cand.get("intent"):
+                    intent = str(cand["intent"]).strip()
+                    break
+    if not intent:
+        intent = fallback_intent
+
+    scenario_from_intent, action_from_intent = split_intent(intent)
+    if intent:
+        final_prediction["intent"] = intent
+    if scenario_from_intent:
+        final_prediction["scenario"] = scenario_from_intent
+    if action_from_intent:
+        final_prediction["action"] = action_from_intent
+
+    parsed["final_prediction"] = final_prediction
+    return parsed
+
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
@@ -241,30 +285,25 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 def build_prompt_nbest(
-    gold_scenario: str,
-    gold_action: str,
+    gold_intent: str,
     gold_slot_types: List[str],
-    scenario_candidates: List[str],
-    action_candidates: List[str],
+    intent_candidates: List[str],
     slot_candidates: List[str],
     nbest_texts: List[str],
     stable_tokens: List[str],
     unstable_tokens: List[str],
     use_fewshot: bool = True,
 ) -> str:
-    scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
-    action_note = f"action_candidates ({len(action_candidates)}):"
+    intent_note = f"intent_candidates ({len(intent_candidates)}):"
     slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
     interpretations_text = format_interpretations(nbest_texts)
     fewshot = ""
     if use_fewshot:
         fewshot = (
             "EXAMPLE INPUT:\n"
-            "reference_scenario: music\n"
-            "reference_action: play\n"
+            "reference_intent: music:play\n"
             "reference_slot_types: [\"song_name\"]\n"
-            "scenario_candidates (5): [\"music\",\"alarm\",\"weather\",\"general\",\"qa\"]\n"
-            "action_candidates (5): [\"play\",\"query\",\"set\",\"remove\",\"greet\"]\n"
+            "intent_candidates (5): [\"music:play\",\"music:query\",\"alarm:set\",\"weather:query\",\"qa:factoid\"]\n"
             "allowed_slot_types (5): [\"song_name\",\"artist_name\",\"time\",\"date\",\"place_name\"]\n"
             "interpretations:\n"
             "interpretation_1: play yesterday\n"
@@ -281,38 +320,29 @@ def build_prompt_nbest(
             "    \"decision_pivots\": [\"play\",\"yesterday\"]\n"
             "  },\n"
             "  \"semantic_core\": \"user asks to play the song yesterday\",\n"
-            "  \"topk_scenarios\": [\n"
-            "    {\"scenario\": \"music\"},\n"
-            "    {\"scenario\": \"alarm\"},\n"
-            "    {\"scenario\": \"weather\"},\n"
-            "    {\"scenario\": \"general\"},\n"
-            "    {\"scenario\": \"qa\"}\n"
+            "  \"topk_intents\": [\n"
+            "    {\"intent\": \"music:play\"},\n"
+            "    {\"intent\": \"music:query\"},\n"
+            "    {\"intent\": \"alarm:set\"},\n"
+            "    {\"intent\": \"weather:query\"},\n"
+            "    {\"intent\": \"qa:factoid\"}\n"
             "  ],\n"
-            "  \"scenario_elimination\": [\n"
-            "    {\"scenario\": \"alarm\", \"reason\": \"no alarm cue in play,yesterday\"},\n"
-            "    {\"scenario\": \"weather\", \"reason\": \"no weather cue in play,yesterday\"},\n"
-            "    {\"scenario\": \"general\", \"reason\": \"no greeting or joke cue\"},\n"
-            "    {\"scenario\": \"qa\", \"reason\": \"no factual question cue\"}\n"
+            "  \"intent_elimination\": [\n"
+            "    {\"intent\": \"music:query\", \"reason\": \"request is imperative, not an information question\"},\n"
+            "    {\"intent\": \"alarm:set\", \"reason\": \"no alarm or wake-up cue\"},\n"
+            "    {\"intent\": \"weather:query\", \"reason\": \"no weather-related cue\"},\n"
+            "    {\"intent\": \"qa:factoid\", \"reason\": \"no factual Q&A pattern\"}\n"
             "  ],\n"
-            "  \"topk_actions\": [\n"
-            "    {\"action\": \"play\"},\n"
-            "    {\"action\": \"query\"},\n"
-            "    {\"action\": \"set\"},\n"
-            "    {\"action\": \"remove\"},\n"
-            "    {\"action\": \"greet\"}\n"
-            "  ],\n"
-            "  \"action_elimination\": [\n"
-            "    {\"action\": \"query\", \"reason\": \"no question cue in play,yesterday\"},\n"
-            "    {\"action\": \"set\", \"reason\": \"no setting cue in play,yesterday\"},\n"
-            "    {\"action\": \"remove\", \"reason\": \"no removal cue in play,yesterday\"},\n"
-            "    {\"action\": \"greet\", \"reason\": \"no greeting cue\"}\n"
-            "  ],\n"
+            "  \"final_prediction\": {\n"
+            "    \"intent\": \"music:play\",\n"
+            "    \"scenario\": \"music\",\n"
+            "    \"action\": \"play\"\n"
+            "  },\n"
             "  \"slot_grounding\": [\n"
             "    {\"slot_type\": \"song_name\", \"supported\": true, \"best_span\": \"yesterday\", \"source_hypothesis\": \"interpretation_1\"}\n"
             "  ],\n"
             "  \"final_rationalization\": \"stable play,yesterday supports music-play with song_name despite minor uncertainty\"\n"
-            "}\n"
-            "\n"
+            "}\n\n"
         )
     return (
         "You are a teacher model whose role is NOT to predict labels, but to rationalize GIVEN reference labels.\n"
@@ -320,18 +350,16 @@ def build_prompt_nbest(
         "==================================================\n"
         "GENERAL RULES\n"
         "==================================================\n"
-        "- Do NOT invent scenarios, actions, or slot types outside the provided candidates.\n"
+        "- Do NOT invent intents or slot types outside the provided candidates.\n"
         "- Do NOT hallucinate slot values not supported by the utterance.\n"
         "- Do NOT output the reference labels in the JSON.\n"
-        "- The maximum TOP-K for scenario/action is fixed to 5.\n\n"
+        "- The maximum TOP-K for intents is fixed to 5.\n\n"
         "==================================================\n"
         "INPUT (REFERENCE + CANDIDATES + INTERPRETATIONS)\n"
         "==================================================\n"
-        f"reference_scenario: {gold_scenario}\n"
-        f"reference_action: {gold_action}\n"
+        f"reference_intent: {gold_intent}\n"
         f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
-        f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
-        f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
+        f"{intent_note} {json.dumps(intent_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
         "interpretations:\n"
         f"{interpretations_text}\n"
@@ -343,21 +371,19 @@ def build_prompt_nbest(
         "==================================================\n"
         "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
         "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
-        "- Do NOT reference scenario/action/slot names.\n"
+        "- Do NOT reference intent/slot labels.\n"
         "Step 2: SEMANTIC CORE DERIVATION\n"
         "- One short sentence, no labels.\n"
-        "Step 3: TOP-5 SCENARIO CANDIDATES\n"
-        "- Use ONLY scenario_candidates; include reference_scenario.\n"
-        "Step 4: SCENARIO ELIMINATION\n"
-        "- Eliminate non-reference scenarios with one-sentence reasons citing cues.\n"
-        "Step 5: TOP-5 ACTION CANDIDATES\n"
-        "- Use ONLY action_candidates; include reference_action.\n"
-        "Step 6: ACTION ELIMINATION\n"
-        "- Eliminate non-reference actions with one-sentence reasons citing cues.\n"
-        "Step 7: SLOT GROUNDING\n"
+        "Step 3: TOP-5 INTENT CANDIDATES\n"
+        "- Use ONLY intent_candidates; include reference_intent.\n"
+        "Step 4: INTENT ELIMINATION\n"
+        "- Eliminate non-reference intents with one-sentence reasons citing cues.\n"
+        "Step 5: FINAL INTENT RESOLUTION\n"
+        "- Select one intent from topk_intents and split it into scenario/action by the first ':'.\n"
+        "Step 6: SLOT GROUNDING\n"
         "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
         "- source_hypothesis must be interpretation_1..interpretation_5 or \"none\".\n"
-        "Step 8: FINAL RATIONALIZATION\n"
+        "Step 7: FINAL RATIONALIZATION\n"
         "- One concise sentence linking cues to reference labels.\n\n"
         "==================================================\n"
         "OUTPUT FORMAT (STRICT JSON)\n"
@@ -369,10 +395,9 @@ def build_prompt_nbest(
         "    \"decision_pivots\": []\n"
         "  },\n"
         "  \"semantic_core\": \"\",\n"
-        "  \"topk_scenarios\": [{\"scenario\": \"\"}],\n"
-        "  \"scenario_elimination\": [{\"scenario\": \"\", \"reason\": \"\"}],\n"
-        "  \"topk_actions\": [{\"action\": \"\"}],\n"
-        "  \"action_elimination\": [{\"action\": \"\", \"reason\": \"\"}],\n"
+        "  \"topk_intents\": [{\"intent\": \"\"}],\n"
+        "  \"intent_elimination\": [{\"intent\": \"\", \"reason\": \"\"}],\n"
+        "  \"final_prediction\": {\"intent\": \"\", \"scenario\": \"\", \"action\": \"\"},\n"
         "  \"slot_grounding\": [\n"
         "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
         "  ],\n"
@@ -382,27 +407,23 @@ def build_prompt_nbest(
         "Now produce the JSON for the given INPUT."
     )
 
+
 def build_prompt_audio(
-    gold_scenario: str,
-    gold_action: str,
+    gold_intent: str,
     gold_slot_types: List[str],
-    scenario_candidates: List[str],
-    action_candidates: List[str],
+    intent_candidates: List[str],
     slot_candidates: List[str],
     use_fewshot: bool = True,
 ) -> str:
-    scenario_note = f"scenario_candidates ({len(scenario_candidates)}):"
-    action_note = f"action_candidates ({len(action_candidates)}):"
+    intent_note = f"intent_candidates ({len(intent_candidates)}):"
     slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
     fewshot = ""
     if use_fewshot:
         fewshot = (
             "EXAMPLE INPUT:\n"
-            "reference_scenario: alarm\n"
-            "reference_action: set\n"
+            "reference_intent: alarm:set\n"
             "reference_slot_types: [\"time\"]\n"
-            "scenario_candidates (5): [\"alarm\",\"music\",\"weather\",\"general\",\"qa\"]\n"
-            "action_candidates (5): [\"set\",\"query\",\"remove\",\"play\",\"greet\"]\n"
+            "intent_candidates (5): [\"alarm:set\",\"alarm:query\",\"calendar:set\",\"datetime:query\",\"general:greet\"]\n"
             "allowed_slot_types (5): [\"time\",\"date\",\"location\",\"song_name\",\"person\"]\n"
             "interpretations:\n"
             "interpretation_1: (audio only)\n"
@@ -417,38 +438,29 @@ def build_prompt_audio(
             "    \"decision_pivots\": [\"time\"]\n"
             "  },\n"
             "  \"semantic_core\": \"user wants an alarm time set\",\n"
-            "  \"topk_scenarios\": [\n"
-            "    {\"scenario\": \"alarm\"},\n"
-            "    {\"scenario\": \"music\"},\n"
-            "    {\"scenario\": \"weather\"},\n"
-            "    {\"scenario\": \"general\"},\n"
-            "    {\"scenario\": \"qa\"}\n"
+            "  \"topk_intents\": [\n"
+            "    {\"intent\": \"alarm:set\"},\n"
+            "    {\"intent\": \"alarm:query\"},\n"
+            "    {\"intent\": \"calendar:set\"},\n"
+            "    {\"intent\": \"datetime:query\"},\n"
+            "    {\"intent\": \"general:greet\"}\n"
             "  ],\n"
-            "  \"scenario_elimination\": [\n"
-            "    {\"scenario\": \"music\", \"reason\": \"no music cue in time\"},\n"
-            "    {\"scenario\": \"weather\", \"reason\": \"no weather cue in time\"},\n"
-            "    {\"scenario\": \"general\", \"reason\": \"no greeting or joke cue\"},\n"
-            "    {\"scenario\": \"qa\", \"reason\": \"no factual question cue\"}\n"
+            "  \"intent_elimination\": [\n"
+            "    {\"intent\": \"alarm:query\", \"reason\": \"command style indicates setting, not querying\"},\n"
+            "    {\"intent\": \"calendar:set\", \"reason\": \"no meeting/event cue\"},\n"
+            "    {\"intent\": \"datetime:query\", \"reason\": \"not asking current time/date\"},\n"
+            "    {\"intent\": \"general:greet\", \"reason\": \"no greeting cue\"}\n"
             "  ],\n"
-            "  \"topk_actions\": [\n"
-            "    {\"action\": \"set\"},\n"
-            "    {\"action\": \"query\"},\n"
-            "    {\"action\": \"remove\"},\n"
-            "    {\"action\": \"play\"},\n"
-            "    {\"action\": \"greet\"}\n"
-            "  ],\n"
-            "  \"action_elimination\": [\n"
-            "    {\"action\": \"query\", \"reason\": \"not a question cue\"},\n"
-            "    {\"action\": \"remove\", \"reason\": \"no removal cue\"},\n"
-            "    {\"action\": \"play\", \"reason\": \"no play cue\"},\n"
-            "    {\"action\": \"greet\", \"reason\": \"no greeting cue\"}\n"
-            "  ],\n"
+            "  \"final_prediction\": {\n"
+            "    \"intent\": \"alarm:set\",\n"
+            "    \"scenario\": \"alarm\",\n"
+            "    \"action\": \"set\"\n"
+            "  },\n"
             "  \"slot_grounding\": [\n"
             "    {\"slot_type\": \"time\", \"supported\": true, \"best_span\": \"time\", \"source_hypothesis\": \"interpretation_1\"}\n"
             "  ],\n"
             "  \"final_rationalization\": \"audio cues about time align with alarm set and time slot\"\n"
-            "}\n"
-            "\n"
+            "}\n\n"
         )
     return (
         "You are a teacher model whose role is NOT to predict labels, but to rationalize GIVEN reference labels.\n"
@@ -456,18 +468,16 @@ def build_prompt_audio(
         "==================================================\n"
         "GENERAL RULES\n"
         "==================================================\n"
-        "- Do NOT invent scenarios, actions, or slot types outside the provided candidates.\n"
+        "- Do NOT invent intents or slot types outside the provided candidates.\n"
         "- Do NOT hallucinate slot values not supported by the utterance.\n"
         "- Do NOT output the reference labels in the JSON.\n"
-        "- The maximum TOP-K for scenario/action is fixed to 5.\n\n"
+        "- The maximum TOP-K for intents is fixed to 5.\n\n"
         "==================================================\n"
         "INPUT (REFERENCE + CANDIDATES)\n"
         "==================================================\n"
-        f"reference_scenario: {gold_scenario}\n"
-        f"reference_action: {gold_action}\n"
+        f"reference_intent: {gold_intent}\n"
         f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
-        f"{scenario_note} {json.dumps(scenario_candidates, ensure_ascii=False)}\n"
-        f"{action_note} {json.dumps(action_candidates, ensure_ascii=False)}\n"
+        f"{intent_note} {json.dumps(intent_candidates, ensure_ascii=False)}\n"
         f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
         "interpretations:\n"
         "interpretation_1: (audio only)\n"
@@ -479,21 +489,19 @@ def build_prompt_audio(
         "==================================================\n"
         "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
         "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
-        "- Do NOT reference scenario/action/slot names.\n"
+        "- Do NOT reference intent/slot labels.\n"
         "Step 2: SEMANTIC CORE DERIVATION\n"
         "- One short sentence, no labels.\n"
-        "Step 3: TOP-5 SCENARIO CANDIDATES\n"
-        "- Use ONLY scenario_candidates; include reference_scenario.\n"
-        "Step 4: SCENARIO ELIMINATION\n"
-        "- Eliminate non-reference scenarios with one-sentence reasons citing cues.\n"
-        "Step 5: TOP-5 ACTION CANDIDATES\n"
-        "- Use ONLY action_candidates; include reference_action.\n"
-        "Step 6: ACTION ELIMINATION\n"
-        "- Eliminate non-reference actions with one-sentence reasons citing cues.\n"
-        "Step 7: SLOT GROUNDING\n"
+        "Step 3: TOP-5 INTENT CANDIDATES\n"
+        "- Use ONLY intent_candidates; include reference_intent.\n"
+        "Step 4: INTENT ELIMINATION\n"
+        "- Eliminate non-reference intents with one-sentence reasons citing cues.\n"
+        "Step 5: FINAL INTENT RESOLUTION\n"
+        "- Select one intent from topk_intents and split it into scenario/action by the first ':'.\n"
+        "Step 6: SLOT GROUNDING\n"
         "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
         "- source_hypothesis must be interpretation_1 or \"none\".\n"
-        "Step 8: FINAL RATIONALIZATION\n"
+        "Step 7: FINAL RATIONALIZATION\n"
         "- One concise sentence linking cues to reference labels.\n\n"
         "==================================================\n"
         "OUTPUT FORMAT (STRICT JSON)\n"
@@ -505,10 +513,9 @@ def build_prompt_audio(
         "    \"decision_pivots\": []\n"
         "  },\n"
         "  \"semantic_core\": \"\",\n"
-        "  \"topk_scenarios\": [{\"scenario\": \"\"}],\n"
-        "  \"scenario_elimination\": [{\"scenario\": \"\", \"reason\": \"\"}],\n"
-        "  \"topk_actions\": [{\"action\": \"\"}],\n"
-        "  \"action_elimination\": [{\"action\": \"\", \"reason\": \"\"}],\n"
+        "  \"topk_intents\": [{\"intent\": \"\"}],\n"
+        "  \"intent_elimination\": [{\"intent\": \"\", \"reason\": \"\"}],\n"
+        "  \"final_prediction\": {\"intent\": \"\", \"scenario\": \"\", \"action\": \"\"},\n"
         "  \"slot_grounding\": [\n"
         "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
         "  ],\n"
@@ -537,7 +544,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
-    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for scenario/action/slot types.")
+    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for intent/slot types.")
     parser.add_argument("--max_new_tokens", type=int, default=160)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -603,6 +610,7 @@ def main():
 
         scenario = item.get("scenario", "")
         action = item.get("action", "")
+        gold_intent = compose_intent(scenario, action)
         gold_entities = build_entities(item)
         gold_slot_types = extract_slot_types(gold_entities)
 
@@ -618,15 +626,9 @@ def main():
                     nbest_texts.append(txt.strip())
         stable_unstable = summarize_nbest(nbest_texts)
 
-        scenario_candidates = select_candidates_topk(
-            gold=scenario,
-            candidates=metadata["scenarios"],
-            k=args.num_candidates,
-            rng=rng,
-        )
-        action_candidates = select_candidates_topk(
-            gold=action,
-            candidates=metadata["actions"],
+        intent_candidates = select_candidates_topk(
+            gold=gold_intent,
+            candidates=metadata["intents"],
             k=args.num_candidates,
             rng=rng,
         )
@@ -640,11 +642,9 @@ def main():
 
         if args.mode == "nbest":
             prompt = build_prompt_nbest(
-                gold_scenario=scenario,
-                gold_action=action,
+                gold_intent=gold_intent,
                 gold_slot_types=gold_slot_types,
-                scenario_candidates=scenario_candidates,
-                action_candidates=action_candidates,
+                intent_candidates=intent_candidates,
                 slot_candidates=slot_candidates,
                 nbest_texts=nbest_texts,
                 stable_tokens=stable_unstable["stable"],
@@ -664,11 +664,9 @@ def main():
             if audio is None:
                 continue
             prompt = build_prompt_audio(
-                gold_scenario=scenario,
-                gold_action=action,
+                gold_intent=gold_intent,
                 gold_slot_types=gold_slot_types,
-                scenario_candidates=scenario_candidates,
-                action_candidates=action_candidates,
+                intent_candidates=intent_candidates,
                 slot_candidates=slot_candidates,
             )
             user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt}]
@@ -696,13 +694,12 @@ def main():
             output_ids = model.generate(**inputs, **gen_kwargs)
         input_len = inputs["input_ids"].shape[1]
         generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-        parsed = extract_json(generated)
+        parsed = postprocess_rationale_output(extract_json(generated), fallback_intent=gold_intent)
 
         result = {
             "slurp_id": slurp_id,
             "mode": args.mode,
-            "scenario_candidates": scenario_candidates,
-            "action_candidates": action_candidates,
+            "intent_candidates": intent_candidates,
             "slot_candidates": slot_candidates,
             "nbest": nbest_texts if args.mode == "nbest" else [],
             "nbest_summary": stable_unstable if args.mode == "nbest" else {},
