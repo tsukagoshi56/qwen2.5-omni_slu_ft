@@ -1325,6 +1325,8 @@ def run_distributed_inference(
                         max_new_tokens=max_new_tokens,
                     )
                 )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             except Exception as exc:
                 logger.error("Rank %d failed on audio batch %d: %s", rank, i, exc)
 
@@ -1351,6 +1353,8 @@ def run_distributed_inference(
                         max_new_tokens=max_new_tokens,
                     )
                 )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             except Exception as exc:
                 logger.error("Rank %d failed on text batch %d: %s", rank, i, exc)
 
@@ -1523,9 +1527,9 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
     parser.add_argument("--num_train_epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
         "--export_label_eval",
