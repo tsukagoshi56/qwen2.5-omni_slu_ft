@@ -254,6 +254,26 @@ def pick_first_nonempty(*values: Any) -> str:
     return ""
 
 
+def extract_filename_from_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if not text.strip():
+        return ""
+
+    patterns = [
+        r'"filename"\s*:\s*"([^"]+)"',
+        r"'filename'\s*:\s*'([^']+)'",
+        r'filename\s*[:=]\s*["\']([^"\']+)["\']',
+        r"(audio-[A-Za-z0-9_-]+\.(?:flac|wav|mp3|m4a|ogg))",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return str(m.group(1)).strip()
+    return ""
+
+
 def extract_sample_id(record: Dict[str, Any], fallback_index: int) -> str:
     meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
     rationale_obj = parse_json_like(record.get("rationale_text"))
@@ -293,7 +313,7 @@ def extract_filename(record: Dict[str, Any]) -> str:
     if isinstance(recordings, list) and recordings and isinstance(recordings[0], dict):
         rec_file = recordings[0].get("file")
 
-    return pick_first_nonempty(
+    filename = pick_first_nonempty(
         record.get("filename"),
         record.get("file"),
         record.get("audio_filename"),
@@ -305,6 +325,15 @@ def extract_filename(record: Dict[str, Any]) -> str:
         rationale_meta.get("filename"),
         rationale_meta.get("file"),
         rec_file,
+    )
+    if filename:
+        return filename
+
+    # Last fallback for non-JSON rationale text containing filename snippets.
+    return pick_first_nonempty(
+        extract_filename_from_text(record.get("rationale_text")),
+        extract_filename_from_text(record.get("rationale")),
+        extract_filename_from_text(record.get("meta")),
     )
 
 
@@ -448,7 +477,10 @@ def build_items_from_rationale_jsonl(
         else:
             rows_missing_audio += 1
             if rows_missing_audio <= audio_search_print_limit:
-                print(f"[AUDIO_NG] id={sample_id} file={filename} (not found)")
+                if not filename:
+                    print(f"[AUDIO_NG] id={sample_id} file=<empty> (filename parse failed)")
+                else:
+                    print(f"[AUDIO_NG] id={sample_id} file={filename} (not found)")
                 for p in searched_paths:
                     print(f"  searched: {p}")
             if strict_audio_missing:
