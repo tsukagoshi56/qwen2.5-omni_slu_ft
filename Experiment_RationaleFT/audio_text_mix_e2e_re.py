@@ -218,6 +218,96 @@ def extract_target_obj(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def parse_json_like(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    for _ in range(2):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(obj, str):
+            text = obj.strip()
+            continue
+        return obj
+    return None
+
+
+def pick_first_nonempty(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def extract_sample_id(record: Dict[str, Any], fallback_index: int) -> str:
+    meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+    rationale_obj = parse_json_like(record.get("rationale_text"))
+    rationale_meta = (
+        rationale_obj.get("meta", {})
+        if isinstance(rationale_obj, dict) and isinstance(rationale_obj.get("meta"), dict)
+        else {}
+    )
+
+    sample_id = pick_first_nonempty(
+        record.get("id"),
+        record.get("slurp_id"),
+        record.get("uid"),
+        record.get("uuid"),
+        meta.get("id"),
+        meta.get("slurp_id"),
+        rationale_obj.get("id") if isinstance(rationale_obj, dict) else None,
+        rationale_meta.get("id"),
+        rationale_meta.get("slurp_id"),
+    )
+    if sample_id:
+        return sample_id
+    return f"row_{fallback_index}"
+
+
+def extract_filename(record: Dict[str, Any]) -> str:
+    meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+    rationale_obj = parse_json_like(record.get("rationale_text"))
+    rationale_meta = (
+        rationale_obj.get("meta", {})
+        if isinstance(rationale_obj, dict) and isinstance(rationale_obj.get("meta"), dict)
+        else {}
+    )
+
+    recordings = record.get("recordings")
+    rec_file = None
+    if isinstance(recordings, list) and recordings and isinstance(recordings[0], dict):
+        rec_file = recordings[0].get("file")
+
+    return pick_first_nonempty(
+        record.get("filename"),
+        record.get("file"),
+        record.get("audio_filename"),
+        record.get("audio_file"),
+        meta.get("filename"),
+        meta.get("file"),
+        rationale_obj.get("filename") if isinstance(rationale_obj, dict) else None,
+        rationale_obj.get("file") if isinstance(rationale_obj, dict) else None,
+        rationale_meta.get("filename"),
+        rationale_meta.get("file"),
+        rec_file,
+    )
+
+
 def _normalize_loaded_obj_to_records(obj: Any) -> List[Dict[str, Any]]:
     if isinstance(obj, str):
         try:
@@ -308,13 +398,8 @@ def build_items_from_rationale_jsonl(
             continue
         parsed_rows += 1
 
-        sample_id = str(data.get("id", ""))
-        filename = data.get("filename")
-        if not filename:
-            meta = data.get("meta")
-            if isinstance(meta, dict):
-                filename = meta.get("filename")
-        filename = str(filename or "").strip()
+        sample_id = extract_sample_id(data, fallback_index=parsed_rows)
+        filename = extract_filename(data)
         if filename:
             rows_with_filename += 1
 
