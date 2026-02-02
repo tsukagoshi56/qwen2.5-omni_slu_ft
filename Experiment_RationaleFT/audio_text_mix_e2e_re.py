@@ -447,75 +447,91 @@ def build_items_from_rationale_jsonl(
     rows_with_filename = 0
     rows_with_audio = 0
     rows_missing_audio = 0
+    row_parse_errors = 0
 
-    for data in records:
+    for idx, data in enumerate(records):
         if max_samples is not None and len(items) >= max_samples:
             break
-        if not isinstance(data, dict):
-            continue
-        parsed_rows += 1
+        try:
+            if not isinstance(data, dict):
+                continue
+            parsed_rows += 1
 
-        sample_id = extract_sample_id(data, fallback_index=parsed_rows)
-        filename = extract_filename(data)
-        if filename:
-            rows_with_filename += 1
+            sample_id = extract_sample_id(data, fallback_index=parsed_rows)
+            filename = extract_filename(data)
+            if filename:
+                rows_with_filename += 1
 
-        candidates = data.get("candidates", [])
-        if not isinstance(candidates, list):
-            candidates = []
-        candidates = [candidate_to_text(c) for c in candidates]
-        candidates = [c for c in candidates if c]
+            candidates = data.get("candidates", [])
+            if not isinstance(candidates, list):
+                candidates = []
+            candidates = [candidate_to_text(c) for c in candidates]
+            candidates = [c for c in candidates if c]
 
-        transcript = candidates[0] if candidates else ""
-        rationale_text = normalize_rationale_text(data.get("rationale_text"))
-        target_obj = extract_target_obj(data)
-        target_str = json.dumps(target_obj, ensure_ascii=False)
+            transcript = candidates[0] if candidates else ""
+            rationale_text = normalize_rationale_text(data.get("rationale_text"))
+            target_obj = extract_target_obj(data)
+            target_str = json.dumps(target_obj, ensure_ascii=False)
 
-        if filename:
-            audio_path, searched_paths = resolve_audio_path(
-                audio_dir,
-                filename,
-                return_searched_paths=True,
-            )
-        else:
-            audio_path, searched_paths = None, []
-
-        base_item = {
-            "id": sample_id,
-            "slurp_id": sample_id,
-            "file": filename,
-            "audio_path": audio_path,
-            "transcript": transcript,
-            "candidates": candidates,
-            "rationale_text": rationale_text,
-            "target": target_str,
-            "target_obj": target_obj,
-        }
-        fallback_text_items.append({**base_item, "audio_path": None})
-
-        if add_text_only:
-            items.append({**base_item, "audio_path": None})
-
-        if audio_path:
-            items.append(base_item)
-            rows_with_audio += 1
-            if print_audio_search_paths and rows_with_audio <= audio_search_print_limit:
-                print(f"[AUDIO_OK] id={sample_id} file={filename}")
-                print(f"  resolved={audio_path}")
-        else:
-            rows_missing_audio += 1
-            if rows_missing_audio <= audio_search_print_limit:
-                if not filename:
-                    print(f"[AUDIO_NG] id={sample_id} file=<empty> (filename parse failed)")
-                else:
-                    print(f"[AUDIO_NG] id={sample_id} file={filename} (not found)")
-                for p in searched_paths:
-                    print(f"  searched: {p}")
-            if strict_audio_missing:
-                raise RuntimeError(
-                    f"Audio not found for id={sample_id}, file={filename}. "
-                    f"Searched paths: {searched_paths}"
+            if filename:
+                audio_path, searched_paths = resolve_audio_path(
+                    audio_dir,
+                    filename,
+                    return_searched_paths=True,
                 )
+            else:
+                audio_path, searched_paths = None, []
+
+            base_item = {
+                "id": sample_id,
+                "slurp_id": sample_id,
+                "file": filename,
+                "audio_path": audio_path,
+                "transcript": transcript,
+                "candidates": candidates,
+                "rationale_text": rationale_text,
+                "target": target_str,
+                "target_obj": target_obj,
+            }
+            fallback_text_items.append({**base_item, "audio_path": None})
+
+            if add_text_only:
+                items.append({**base_item, "audio_path": None})
+
+            if audio_path:
+                items.append(base_item)
+                rows_with_audio += 1
+                if print_audio_search_paths and rows_with_audio <= audio_search_print_limit:
+                    print(f"[AUDIO_OK] id={sample_id} file={filename}")
+                    print(f"  resolved={audio_path}")
+            else:
+                rows_missing_audio += 1
+                if rows_missing_audio <= audio_search_print_limit:
+                    if not filename:
+                        print(f"[AUDIO_NG] id={sample_id} file=<empty> (filename parse failed)")
+                    else:
+                        print(f"[AUDIO_NG] id={sample_id} file={filename} (not found)")
+                    for p in searched_paths:
+                        print(f"  searched: {p}")
+                if strict_audio_missing:
+                    raise RuntimeError(
+                        f"Audio not found for id={sample_id}, file={filename}. "
+                        f"Searched paths: {searched_paths}"
+                    )
+        except Exception as exc:
+            row_parse_errors += 1
+            if row_parse_errors <= 20:
+                head = str(data)
+                if len(head) > 300:
+                    head = head[:300] + "...(truncated)"
+                logger.error(
+                    "Row parse error at index=%d type=%s error=%s record_head=%s",
+                    idx,
+                    type(data).__name__,
+                    exc,
+                    head,
+                )
+            continue
 
     if (not add_text_only) and len(items) == 0 and parsed_rows > 0 and allow_text_fallback_when_audio_missing:
         logger.warning(
@@ -528,7 +544,7 @@ def build_items_from_rationale_jsonl(
     logger.info(
         (
             "Loaded %s -> %d items "
-            "(parsed_rows=%d, rows_with_filename=%d, rows_with_audio=%d, rows_missing_audio=%d)"
+            "(parsed_rows=%d, rows_with_filename=%d, rows_with_audio=%d, rows_missing_audio=%d, row_parse_errors=%d)"
         ),
         jsonl_path,
         len(items),
@@ -536,6 +552,7 @@ def build_items_from_rationale_jsonl(
         rows_with_filename,
         rows_with_audio,
         rows_missing_audio,
+        row_parse_errors,
     )
     return items
 
