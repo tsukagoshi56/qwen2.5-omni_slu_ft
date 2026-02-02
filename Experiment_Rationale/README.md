@@ -74,9 +74,9 @@ cat Experiment_Rationale/rationale_output_parallel.w0of2.jsonl \
     > Experiment_Rationale/rationale_output_parallel_merged.jsonl
 ```
 
-**2GPU parallel run with torchrun:**
+**2GPU parallel run with `uv run torchrun`:**
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
   Experiment_Rationale/3_generate_rationale.py \
   --mode nbest --device cuda --append_worker_suffix \
   --output_file Experiment_Rationale/rationale_output_parallel.jsonl
@@ -155,9 +155,9 @@ cat Experiment_Rationale/rationale_output_two_stage_parallel.w0of2.jsonl \
     > Experiment_Rationale/rationale_output_two_stage_parallel_merged.jsonl
 ```
 
-**2GPU parallel run with torchrun (two-stage):**
+**2GPU parallel run with `uv run torchrun` (two-stage):**
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
   Experiment_Rationale/3_generate_rationale_two_stage.py \
   --mode nbest --device cuda --append_worker_suffix \
   --output_file Experiment_Rationale/rationale_output_two_stage_parallel.jsonl
