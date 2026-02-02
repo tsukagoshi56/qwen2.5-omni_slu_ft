@@ -74,6 +74,18 @@ cat Experiment_Rationale/rationale_output_parallel.w0of2.jsonl \
     > Experiment_Rationale/rationale_output_parallel_merged.jsonl
 ```
 
+**2GPU parallel run with torchrun:**
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+  Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest --device cuda --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_parallel.jsonl
+
+cat Experiment_Rationale/rationale_output_parallel.w0of2.jsonl \
+    Experiment_Rationale/rationale_output_parallel.w1of2.jsonl \
+    > Experiment_Rationale/rationale_output_parallel_merged.jsonl
+```
+
 Note: The prompt includes a small few-shot example by default to encourage concise rejection reasons.
 Output JSONL defaults to raw model outputs; use `--output_mode full` for metadata JSON.
 `allowed_slot_types` is now passed as the full slot-type inventory (not sampled).
@@ -138,6 +150,18 @@ CUDA_VISIBLE_DEVICES=1 uv run Experiment_Rationale/3_generate_rationale_two_stag
   --output_file Experiment_Rationale/rationale_output_two_stage_parallel.jsonl &
 
 wait
+cat Experiment_Rationale/rationale_output_two_stage_parallel.w0of2.jsonl \
+    Experiment_Rationale/rationale_output_two_stage_parallel.w1of2.jsonl \
+    > Experiment_Rationale/rationale_output_two_stage_parallel_merged.jsonl
+```
+
+**2GPU parallel run with torchrun (two-stage):**
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+  Experiment_Rationale/3_generate_rationale_two_stage.py \
+  --mode nbest --device cuda --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_two_stage_parallel.jsonl
+
 cat Experiment_Rationale/rationale_output_two_stage_parallel.w0of2.jsonl \
     Experiment_Rationale/rationale_output_two_stage_parallel.w1of2.jsonl \
     > Experiment_Rationale/rationale_output_two_stage_parallel_merged.jsonl

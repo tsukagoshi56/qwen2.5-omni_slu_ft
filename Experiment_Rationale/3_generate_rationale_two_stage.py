@@ -1445,6 +1445,19 @@ def main():
     parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     args = parser.parse_args()
+
+    # torchrun compatibility: auto-map worker/device from distributed env vars.
+    env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    env_rank = int(os.environ.get("RANK", "0"))
+    env_local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if env_world_size > 1 and args.num_workers == 1 and args.worker_rank == 0:
+        args.num_workers = env_world_size
+        args.worker_rank = env_rank
+    if args.device == "cuda" and env_world_size > 1:
+        args.device = f"cuda:{env_local_rank}"
+        if torch.cuda.is_available():
+            torch.cuda.set_device(env_local_rank)
+
     if args.num_workers < 1:
         print(f"[ERROR] num_workers must be >= 1, got {args.num_workers}")
         return
