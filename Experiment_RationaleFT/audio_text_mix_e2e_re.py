@@ -44,7 +44,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 PROMPT_HEADER = (
-    "Predict the final SLU label from speech, ASR n-best, and rationale.\n"
+    "Predict the final SLU label from ASR n-best and rationale.\n"
     "Output JSON only with keys: scenario, action, entities."
 )
 
@@ -91,16 +91,15 @@ def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) ->
 
     candidates = item.get("candidates", []) or []
     rationale_text = item.get("rationale_text", "") or ""
-    transcript = item.get("transcript", "") or ""
 
-    blocks = [PROMPT_HEADER]
-    if include_transcript and transcript:
-        blocks.append(f"Transcript:\n{transcript}")
+    blocks = []
+    # n-best
     blocks.append("ASR n-best hypotheses:\n" + format_nbest(candidates))
+    # Rationale
     blocks.append("Rationale:\n" + (rationale_text if rationale_text else "(none)"))
-    blocks.append(
-        "Return only: {\"scenario\":\"...\",\"action\":\"...\",\"entities\":[{\"type\":\"...\",\"filler\":\"...\"}]}"
-    )
+    # SLU marker
+    blocks.append("SLU:")
+    
     return "\n\n".join(blocks)
 
 
@@ -1572,17 +1571,22 @@ def main():
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
 
+    train_max_samples = args.max_samples
+    eval_max_samples = (args.max_samples // 2) if args.max_samples else None
+
     if args.smoke:
         if rank == 0:
             logger.info("SMOKE MODE ON")
-        args.max_samples = 32
+        # Increase smoke learn data to 200, reduce eval to 10
+        train_max_samples = 200
+        eval_max_samples = 10
         args.num_train_epochs = 1
 
     train_items = build_items_from_rationale_jsonl(
         args.train_file,
         args.audio_dir,
         add_text_only=args.add_text_only,
-        max_samples=args.max_samples,
+        max_samples=train_max_samples,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
@@ -1592,7 +1596,7 @@ def main():
         args.eval_file,
         args.audio_dir,
         add_text_only=args.add_text_only,
-        max_samples=(args.max_samples // 2) if args.max_samples else None,
+        max_samples=eval_max_samples,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
