@@ -27,8 +27,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
     AutoProcessor,
-    AutoTokenizer,
-    AutoModelForCausalLM,
+    Qwen2AudioForConditionalGeneration,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -862,14 +861,6 @@ class SmartCollator:
     processor: Any
     max_length: int = 512
     ignore_index: int = -100
-    smoke_mode: bool = False
-    _has_printed_debug: bool = False
-
-    def __post_init__(self):
-        # dataclass does not automatically handle non-init fields if we just declare them,
-        # but here we can use __post_init__ or just rely on default values in __init__ if we weren't using dataclass decorator
-        # cleanly. Since it is a dataclass, we can add fields.
-        pass
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0:
@@ -917,12 +908,6 @@ class SmartCollator:
 
             text_input = self._build_audio_chat(item)
             full_text = text_input + item["target"] + eos_token
-
-            if self.smoke_mode and not self._has_printed_debug:
-                print(f"\n[SMOKE] Audio Sample ID: {item.get('id')}")
-                print(f"[SMOKE] Input Prompt:\n{text_input}")
-                print(f"[SMOKE] Target:\n{item['target']}")
-                self._has_printed_debug = True
 
             inputs = self.processor(
                 text=full_text,
@@ -993,12 +978,6 @@ class SmartCollator:
                 continue
             text_input = self._build_text_chat(item)
             full_text = text_input + item["target"] + eos_token
-
-            if self.smoke_mode and not self._has_printed_debug:
-                print(f"\n[SMOKE] Text Sample ID: {item.get('id')}")
-                print(f"[SMOKE] Input Prompt:\n{text_input}")
-                print(f"[SMOKE] Target:\n{item['target']}")
-                self._has_printed_debug = True
 
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
             prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
@@ -1581,7 +1560,7 @@ def main():
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model = Qwen2AudioForConditionalGeneration.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -1614,7 +1593,7 @@ def main():
         args=training_args,
         train_dataset=MixedDataset(train_items),
         eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor, smoke_mode=args.smoke),
+        data_collator=SmartCollator(processor),
         tokenizer=processor.tokenizer,
     )
 
