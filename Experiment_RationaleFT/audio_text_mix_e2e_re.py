@@ -199,6 +199,66 @@ def extract_target_obj(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_loaded_obj_to_records(obj: Any) -> List[Dict[str, Any]]:
+    if isinstance(obj, str):
+        try:
+            return _normalize_loaded_obj_to_records(json.loads(obj))
+        except json.JSONDecodeError:
+            return []
+    if isinstance(obj, dict):
+        for key in ("data", "items", "records", "examples"):
+            maybe_list = obj.get(key)
+            if isinstance(maybe_list, list):
+                return [x for x in maybe_list if isinstance(x, dict)]
+        return [obj]
+    if isinstance(obj, list):
+        results: List[Dict[str, Any]] = []
+        for x in obj:
+            if isinstance(x, dict):
+                results.append(x)
+            elif isinstance(x, str):
+                try:
+                    parsed = json.loads(x)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    results.append(parsed)
+        return results
+    return []
+
+
+def load_rationale_records(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+
+    if not raw.strip():
+        return []
+
+    # 1) Try full-file JSON (supports JSON array/object files).
+    try:
+        obj = json.loads(raw)
+        records = _normalize_loaded_obj_to_records(obj)
+        if records:
+            logger.info("Loaded %s as full JSON (%d records).", path, len(records))
+            return records
+    except json.JSONDecodeError:
+        pass
+
+    # 2) Fallback: parse as JSONL.
+    records: List[Dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        records.extend(_normalize_loaded_obj_to_records(obj))
+    logger.info("Loaded %s as JSONL (%d records).", path, len(records))
+    return records
+
+
 def build_items_from_rationale_jsonl(
     jsonl_path: str,
     audio_dir: str,
@@ -212,34 +272,16 @@ def build_items_from_rationale_jsonl(
         logger.warning("JSONL file not found: %s", jsonl_path)
         return items
 
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    records = load_rationale_records(jsonl_path)
 
     parsed_rows = 0
     rows_with_filename = 0
     rows_with_audio = 0
 
-    for line in lines:
+    for data in records:
         if max_samples is not None and len(items) >= max_samples:
             break
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, str):
-            # Some files contain JSON-encoded JSON strings.
-            try:
-                data = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-        if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict):
-            data = data[0]
         if not isinstance(data, dict):
-            # Some rows can be a JSON string/array. Skip safely.
             continue
         parsed_rows += 1
 
