@@ -650,7 +650,7 @@ def main():
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
     parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for intent/slot types.")
-    parser.add_argument("--max_new_tokens", type=int, default=4096)
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.9)
