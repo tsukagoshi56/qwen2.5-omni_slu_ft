@@ -263,6 +263,7 @@ def extract_filename_from_text(value: Any) -> str:
 
     patterns = [
         r'"filename"\s*:\s*"([^"]+)"',
+        r'\\"filename\\"\s*:\s*\\"([^\\"]+)\\"',
         r"'filename'\s*:\s*'([^']+)'",
         r'filename\s*[:=]\s*["\']([^"\']+)["\']',
         r"(audio-[A-Za-z0-9_-]+\.(?:flac|wav|mp3|m4a|ogg))",
@@ -348,6 +349,13 @@ def _normalize_loaded_obj_to_records(obj: Any) -> List[Dict[str, Any]]:
             maybe_list = obj.get(key)
             if isinstance(maybe_list, list):
                 return [x for x in maybe_list if isinstance(x, dict)]
+        # Handle map-style datasets: {"1234": {...}, "1235": {...}, ...}
+        dict_values = [v for v in obj.values() if isinstance(v, dict)]
+        if dict_values and (
+            (len(obj) >= 3 and len(dict_values) >= int(0.8 * len(obj)))
+            or all(str(k).isdigit() for k in obj.keys())
+        ):
+            return dict_values
         return [obj]
     if isinstance(obj, list):
         results: List[Dict[str, Any]] = []
