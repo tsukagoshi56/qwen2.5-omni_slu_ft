@@ -11,6 +11,25 @@ This folder implements the pipeline for:
 
 Run from repository root: `qwen2 2.5-omni_slu_ft`.
 
+### 0) Standalone test (sample.wav + single-file inference)
+
+Generate a LibriSpeech sample:
+
+```bash
+python -c "import librosa; import soundfile; path = librosa.ex('libri1'); y, sr = librosa.load(path); soundfile.write('sample.wav', y, sr); print('Created sample.wav')"
+```
+
+Then run:
+
+```bash
+python standalone_inference.py \
+  --model Qwen/Qwen2-Audio-7B-Instruct \
+  --audio_file sample.wav \
+  --prompt "Transcribe this audio."
+```
+
+If your base `python` environment has `librosa/numba` conflicts, run the same commands with `uv run`.
+
 ### 1) Qwen3-Omni (vLLM) inference check with beam-search n-best
 
 ```bash
