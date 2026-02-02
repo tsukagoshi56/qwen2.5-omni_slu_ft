@@ -201,6 +201,18 @@ def select_candidates_topk(
     ordered.extend(pool[: max(0, k - len(ordered))])
     return ordered[:k]
 
+def build_full_intent_candidates(
+    reference_intent: str,
+    intent_inventory: List[str],
+) -> List[str]:
+    ordered: List[str] = []
+    if reference_intent:
+        ordered.append(reference_intent)
+    for intent in intent_inventory:
+        if intent and intent not in ordered:
+            ordered.append(intent)
+    return ordered
+
 def select_slot_types_topk(
     gold_types: List[str],
     slot_types: List[str],
@@ -649,7 +661,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
-    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for intent/slot types.")
+    parser.add_argument("--num_candidates", type=int, default=5, help="Number of candidates for slot types.")
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -743,12 +755,7 @@ def main():
                     nbest_texts.append(txt.strip())
         stable_unstable = summarize_nbest(nbest_texts)
 
-        intent_candidates = select_candidates_topk(
-            gold=gold_intent,
-            candidates=intent_inventory,
-            k=args.num_candidates,
-            rng=rng,
-        )
+        intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
 
         slot_candidates = select_slot_candidates_topk(
             gold_types=gold_slot_types,
