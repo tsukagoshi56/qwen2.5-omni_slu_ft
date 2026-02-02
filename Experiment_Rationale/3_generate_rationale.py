@@ -230,6 +230,31 @@ def compose_intent(scenario: str, action: str) -> str:
         return ""
     return f"{scenario}:{action}"
 
+def load_intents_from_slurp_splits(paths: List[str]) -> List[str]:
+    intents = set()
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        for record in read_jsonl(path):
+            intent = compose_intent(
+                str(record.get("scenario", "")).strip(),
+                str(record.get("action", "")).strip(),
+            )
+            if intent:
+                intents.add(intent)
+    return sorted(intents)
+
+def load_slurp_map(paths: List[str]) -> Dict[str, Dict[str, Any]]:
+    mapping: Dict[str, Dict[str, Any]] = {}
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        for record in read_jsonl(path):
+            slurp_id = str(record.get("slurp_id", "")).strip()
+            if slurp_id and slurp_id not in mapping:
+                mapping[slurp_id] = record
+    return mapping
+
 def split_intent(intent: str) -> Tuple[str, str]:
     if not intent or ":" not in intent:
         return "", ""
@@ -350,9 +375,9 @@ def build_prompt_nbest(
     if use_fewshot:
         fewshot = (
             "EXAMPLE INPUT:\n"
-            "reference_intent: music:play\n"
+            "reference_intent: play:music\n"
             "reference_slot_types: [\"song_name\"]\n"
-            "intent_candidates (5): [\"music:play\",\"music:query\",\"alarm:set\",\"weather:query\",\"qa:factoid\"]\n"
+            "intent_candidates (5): [\"play:music\",\"music:query\",\"alarm:set\",\"weather:query\",\"qa:factoid\"]\n"
             "allowed_slot_types (5): [\"song_name\",\"artist_name\",\"time\",\"date\",\"place_name\"]\n"
             "interpretations:\n"
             "interpretation_1: play yesterday\n"
@@ -369,7 +394,7 @@ def build_prompt_nbest(
             "    \"decision_pivots\": [\"play\",\"yesterday\"]\n"
             "  },\n"
             "  \"topk_intents\": [\n"
-            "    {\"intent\": \"music:play\"},\n"
+            "    {\"intent\": \"play:music\"},\n"
             "    {\"intent\": \"music:query\"},\n"
             "    {\"intent\": \"alarm:set\"},\n"
             "    {\"intent\": \"weather:query\"},\n"
@@ -382,14 +407,14 @@ def build_prompt_nbest(
             "    {\"intent\": \"qa:factoid\", \"reason\": \"intent asks execution of playback action, not fact-seeking answer\"}\n"
             "  ],\n"
             "  \"final_prediction\": {\n"
-            "    \"intent\": \"music:play\",\n"
-            "    \"scenario\": \"music\",\n"
-            "    \"action\": \"play\"\n"
+            "    \"intent\": \"play:music\",\n"
+            "    \"scenario\": \"play\",\n"
+            "    \"action\": \"music\"\n"
             "  },\n"
             "  \"slot_grounding\": [\n"
             "    {\"slot_type\": \"song_name\", \"supported\": true, \"best_span\": \"yesterday\", \"source_hypothesis\": \"interpretation_1\"}\n"
             "  ],\n"
-            "  \"final_rationalization\": \"stable play,yesterday supports music-play with song_name despite minor uncertainty\"\n"
+            "  \"final_rationalization\": \"stable play,yesterday supports play-music with song_name despite minor uncertainty\"\n"
             "}\n\n"
         )
     return (
@@ -610,7 +635,10 @@ def main():
     parser = argparse.ArgumentParser(description="Generate rationale with Qwen2-Audio (nbest or audio mode).")
     parser.add_argument("--mode", type=str, choices=["nbest", "audio"], default="nbest")
     parser.add_argument("--input_file", type=str, default="Experiment_Rationale/real_asr_sampling_data.jsonl")
-    parser.add_argument("--slurp_file", type=str, default="slurp/dataset/slurp/test.jsonl")
+    parser.add_argument("--slurp_file", type=str, default="slurp/dataset/slurp/test.jsonl", help="Additional fallback SLURP file for missing fields.")
+    parser.add_argument("--slurp_train_file", type=str, default="slurp/dataset/slurp/train.jsonl", help="SLURP train split used to build intent inventory.")
+    parser.add_argument("--slurp_devel_file", type=str, default="slurp/dataset/slurp/devel.jsonl", help="SLURP devel split used to build intent inventory.")
+    parser.add_argument("--slurp_test_file", type=str, default="slurp/dataset/slurp/test.jsonl", help="SLURP test split used to build intent inventory.")
     parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
     parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
     parser.add_argument("--clusters_file", type=str, default="Experiment_3/slurp_clusters.json")
@@ -637,6 +665,9 @@ def main():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_path = os.path.join(base_dir, args.input_file) if not os.path.isabs(args.input_file) else args.input_file
     slurp_path = os.path.join(base_dir, args.slurp_file) if not os.path.isabs(args.slurp_file) else args.slurp_file
+    slurp_train_path = os.path.join(base_dir, args.slurp_train_file) if not os.path.isabs(args.slurp_train_file) else args.slurp_train_file
+    slurp_devel_path = os.path.join(base_dir, args.slurp_devel_file) if not os.path.isabs(args.slurp_devel_file) else args.slurp_devel_file
+    slurp_test_path = os.path.join(base_dir, args.slurp_test_file) if not os.path.isabs(args.slurp_test_file) else args.slurp_test_file
     audio_root = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     metadata_path = os.path.join(base_dir, args.metadata_file) if not os.path.isabs(args.metadata_file) else args.metadata_file
     clusters_path = os.path.join(base_dir, args.clusters_file) if not os.path.isabs(args.clusters_file) else args.clusters_file
@@ -648,9 +679,15 @@ def main():
     metadata = load_metadata(metadata_path)
     # clusters/confusing_pairs args are kept for compatibility (currently unused)
 
-    slurp_map = {}
-    if os.path.exists(slurp_path):
-        slurp_map = {str(d.get("slurp_id")): d for d in read_jsonl(slurp_path)}
+    split_paths = [slurp_train_path, slurp_devel_path, slurp_test_path]
+    intent_inventory = load_intents_from_slurp_splits(split_paths)
+    if intent_inventory:
+        print(f"[INFO] Loaded {len(intent_inventory)} intents from train/devel/test splits.")
+    else:
+        intent_inventory = metadata["intents"]
+        print(f"[WARN] Could not build intents from splits. Falling back to metadata intents ({len(intent_inventory)}).")
+
+    slurp_map = load_slurp_map(split_paths + [slurp_path])
 
     items = read_jsonl(input_path)
     if args.limit:
@@ -707,7 +744,7 @@ def main():
 
         intent_candidates = select_candidates_topk(
             gold=gold_intent,
-            candidates=metadata["intents"],
+            candidates=intent_inventory,
             k=args.num_candidates,
             rng=rng,
         )
