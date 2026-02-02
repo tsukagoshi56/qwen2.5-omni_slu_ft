@@ -72,6 +72,19 @@ def normalize_rationale_text(value: Any) -> str:
     return str(value)
 
 
+def candidate_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("text", "transcript", "hypothesis", "value"):
+            text = value.get(key)
+            if text is not None:
+                return str(text).strip()
+    return str(value).strip()
+
+
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     candidates = item.get("candidates", []) or []
     rationale_text = item.get("rationale_text", "") or ""
@@ -190,6 +203,17 @@ def build_items_from_rationale_jsonl(
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(data, str):
+            # Some files contain JSON-encoded JSON strings.
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict):
+            data = data[0]
+        if not isinstance(data, dict):
+            # Some rows can be a JSON string/array. Skip safely.
+            continue
 
         sample_id = str(data.get("id", ""))
         filename = data.get("filename")
@@ -202,7 +226,8 @@ def build_items_from_rationale_jsonl(
         candidates = data.get("candidates", [])
         if not isinstance(candidates, list):
             candidates = []
-        candidates = [str(c).strip() for c in candidates if str(c).strip()]
+        candidates = [candidate_to_text(c) for c in candidates]
+        candidates = [c for c in candidates if c]
 
         transcript = candidates[0] if candidates else ""
         rationale_text = normalize_rationale_text(data.get("rationale_text"))
@@ -837,6 +862,8 @@ def save_label_only_predictions(full_prediction_path: str, label_only_path: str)
             if not line.strip():
                 continue
             row = json.loads(line)
+            if not isinstance(row, dict):
+                continue
             rows.append(
                 {
                     "id": row.get("id"),
@@ -854,6 +881,8 @@ def save_label_only_predictions(full_prediction_path: str, label_only_path: str)
 
 
 def _normalize_entity(entity: Dict[str, Any]) -> Tuple[str, str]:
+    if not isinstance(entity, dict):
+        return "", ""
     ent_type = str(entity.get("type", "")).strip().lower()
     filler = str(entity.get("filler", "")).strip().lower()
     filler = re.sub(r"\s+", " ", filler)
@@ -875,6 +904,8 @@ def evaluate_prediction_file(prediction_path: str) -> Dict[str, float]:
             if not line.strip():
                 continue
             row = json.loads(line)
+            if not isinstance(row, dict):
+                continue
 
             target_label = row.get("target_label")
             if not isinstance(target_label, dict):
