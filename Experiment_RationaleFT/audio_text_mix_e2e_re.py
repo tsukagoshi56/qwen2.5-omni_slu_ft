@@ -27,7 +27,8 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
     AutoProcessor,
-    Qwen2AudioForConditionalGeneration,
+    AutoTokenizer,
+    AutoModelForCausalLM,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -861,6 +862,14 @@ class SmartCollator:
     processor: Any
     max_length: int = 512
     ignore_index: int = -100
+    smoke_mode: bool = False
+    _has_printed_debug: bool = False
+
+    def __post_init__(self):
+        # dataclass does not automatically handle non-init fields if we just declare them,
+        # but here we can use __post_init__ or just rely on default values in __init__ if we weren't using dataclass decorator
+        # cleanly. Since it is a dataclass, we can add fields.
+        pass
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0:
@@ -908,6 +917,12 @@ class SmartCollator:
 
             text_input = self._build_audio_chat(item)
             full_text = text_input + item["target"] + eos_token
+
+            if self.smoke_mode and not self._has_printed_debug:
+                print(f"\n[SMOKE] Audio Sample ID: {item.get('id')}")
+                print(f"[SMOKE] Input Prompt:\n{text_input}")
+                print(f"[SMOKE] Target:\n{item['target']}")
+                self._has_printed_debug = True
 
             inputs = self.processor(
                 text=full_text,
@@ -978,6 +993,12 @@ class SmartCollator:
                 continue
             text_input = self._build_text_chat(item)
             full_text = text_input + item["target"] + eos_token
+
+            if self.smoke_mode and not self._has_printed_debug:
+                print(f"\n[SMOKE] Text Sample ID: {item.get('id')}")
+                print(f"[SMOKE] Input Prompt:\n{text_input}")
+                print(f"[SMOKE] Target:\n{item['target']}")
+                self._has_printed_debug = True
 
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
             prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
@@ -1445,6 +1466,43 @@ def evaluate_prediction_file(prediction_path: str) -> Dict[str, float]:
 # ==============================================================================
 
 
+class Qwen2AudioProcessorWrapper:
+    def __init__(self, feature_extractor, tokenizer):
+        self.feature_extractor = feature_extractor
+        self.tokenizer = tokenizer
+
+    @property
+    def chat_template(self):
+        return self.tokenizer.chat_template
+
+    def apply_chat_template(self, *args, **kwargs):
+        return self.tokenizer.apply_chat_template(*args, **kwargs)
+
+    def __call__(self, text=None, audio=None, sampling_rate=None, return_tensors="pt", **kwargs):
+        res = {}
+        if audio is not None:
+            # WhisperFE expects raw audio
+            # format: feature_extractor(raw_speech, sampling_rate=...)
+            # It returns {'input_features': ...}
+            audio_out = self.feature_extractor(
+                audio, sampling_rate=sampling_rate, return_tensors=return_tensors, **kwargs
+            )
+            res.update(audio_out)
+
+        if text is not None:
+            # tokenizer(text, ...)
+            text_out = self.tokenizer(text, return_tensors=return_tensors, **kwargs)
+            res.update(text_out)
+
+        return res
+
+    def batch_decode(self, *args, **kwargs):
+        return self.tokenizer.batch_decode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self.tokenizer.decode(*args, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -1556,11 +1614,16 @@ def main():
         raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    if not hasattr(processor, "tokenizer"):
+        logger.warning("AutoProcessor returned a feature extractor. Manually loading tokenizer and wrapping.")
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        processor = Qwen2AudioProcessorWrapper(processor, tokenizer)
+
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
 
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -1593,7 +1656,7 @@ def main():
         args=training_args,
         train_dataset=MixedDataset(train_items),
         eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor),
+        data_collator=SmartCollator(processor, smoke_mode=args.smoke),
         tokenizer=processor.tokenizer,
     )
 
