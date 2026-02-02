@@ -11,7 +11,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import librosa
 from tqdm import tqdm
-from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+from transformers import (
+    AutoModelForCausalLM,
+    AutoProcessor,
+    AutoTokenizer,
+    Qwen2AudioForConditionalGeneration,
+)
 
 # ----------------------------
 # Small helpers
@@ -996,8 +1001,9 @@ def build_stage2_prompt_audio(
     )
 
 def run_model_once(
-    processor: AutoProcessor,
-    model: Qwen2AudioForConditionalGeneration,
+    processor: Optional[AutoProcessor],
+    tokenizer: Optional[AutoTokenizer],
+    model: Any,
     mode: str,
     prompt: str,
     device: str,
@@ -1006,14 +1012,21 @@ def run_model_once(
     sampling_rate: int,
 ) -> str:
     if mode == "nbest":
-        user_content = [{"type": "text", "text": prompt}]
-        text_input = processor.apply_chat_template(
-            [{"role": "user", "content": user_content}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = processor(text=text_input, return_tensors="pt")
+        if tokenizer is None:
+            raise ValueError("tokenizer is required for nbest mode")
+        messages = [{"role": "user", "content": prompt}]
+        if hasattr(tokenizer, "apply_chat_template"):
+            text_input = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            text_input = prompt
+        inputs = tokenizer(text_input, return_tensors="pt")
     else:
+        if processor is None:
+            raise ValueError("processor is required for audio mode")
         user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt}]
         text_input = processor.apply_chat_template(
             [{"role": "user", "content": user_content}],
@@ -1372,8 +1385,9 @@ def validate_stage2_slot_output(
 
 def run_stage_with_retries(
     *,
-    processor: AutoProcessor,
-    model: Qwen2AudioForConditionalGeneration,
+    processor: Optional[AutoProcessor],
+    tokenizer: Optional[AutoTokenizer],
+    model: Any,
     mode: str,
     prompt: str,
     device: str,
@@ -1393,6 +1407,7 @@ def run_stage_with_retries(
         current_prompt = prompt if attempt == 0 else build_retry_prompt(prompt, generated, error_reason, stage_name)
         generated = run_model_once(
             processor=processor,
+            tokenizer=tokenizer,
             model=model,
             mode=mode,
             prompt=current_prompt,
@@ -1426,6 +1441,7 @@ def main():
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/rationale_output_two_stage.jsonl")
     parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write compact records with raw outputs; full: write full metadata JSON.")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
+    parser.add_argument("--text_model_name_or_path", type=str, default="Qwen/Qwen3-8B-Thinking-2507")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
@@ -1511,20 +1527,30 @@ def main():
         print(f"[ERROR] No input items found for this worker: {input_path}")
         return
 
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
-
     torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
-        args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
-    ).to(args.device)
+    processor: Optional[AutoProcessor] = None
+    tokenizer: Optional[AutoTokenizer] = None
+    if args.mode == "audio":
+        processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        if processor.tokenizer.pad_token is None:
+            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+            processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+        model = Qwen2AudioForConditionalGeneration.from_pretrained(
+            args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
+        ).to(args.device)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.text_model_name_or_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        model = AutoModelForCausalLM.from_pretrained(
+            args.text_model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
+        ).to(args.device)
     model.eval()
 
     results: List[Dict[str, Any]] = []
     raw_outputs: List[Any] = []
-    sr = processor.feature_extractor.sampling_rate
+    sr = processor.feature_extractor.sampling_rate if processor is not None else 16000
 
     for idx, item in enumerate(tqdm(items, desc="Generating two-stage rationale", unit="sample")):
         slurp_id = str(item.get("slurp_id", ""))
@@ -1593,6 +1619,7 @@ def main():
         )
         stage1_intent_generated, stage1_intent_parsed, stage1_intent_valid, stage1_intent_error = run_stage_with_retries(
             processor=processor,
+            tokenizer=tokenizer,
             model=model,
             mode=args.mode,
             prompt=stage1_intent_prompt,
@@ -1629,6 +1656,7 @@ def main():
         )
         stage1_slot_generated, stage1_slot_parsed, stage1_slot_valid, stage1_slot_error = run_stage_with_retries(
             processor=processor,
+            tokenizer=tokenizer,
             model=model,
             mode=args.mode,
             prompt=stage1_slot_prompt,
@@ -1665,6 +1693,7 @@ def main():
         )
         stage2_intent_generated, stage2_intent_parsed, stage2_intent_valid, stage2_intent_error = run_stage_with_retries(
             processor=processor,
+            tokenizer=tokenizer,
             model=model,
             mode=args.mode,
             prompt=stage2_intent_prompt,
@@ -1712,6 +1741,7 @@ def main():
         )
         stage2_slot_generated, stage2_slot_parsed, stage2_slot_valid, stage2_slot_error = run_stage_with_retries(
             processor=processor,
+            tokenizer=tokenizer,
             model=model,
             mode=args.mode,
             prompt=stage2_slot_prompt,
