@@ -86,6 +86,9 @@ def candidate_to_text(value: Any) -> str:
 
 
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
+    if item.get("prompt_text"):
+        return str(item["prompt_text"])
+
     candidates = item.get("candidates", []) or []
     rationale_text = item.get("rationale_text", "") or ""
     transcript = item.get("transcript", "") or ""
@@ -254,6 +257,66 @@ def pick_first_nonempty(*values: Any) -> str:
     return ""
 
 
+def content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif "text" in item:
+                    parts.append(str(item.get("text", "")))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join([p for p in parts if p])
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content.get("text", ""))
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except Exception:
+            return str(content)
+    return str(content)
+
+
+def extract_messages_texts(record: Dict[str, Any]) -> Tuple[str, str]:
+    messages = record.get("messages")
+    if not isinstance(messages, list):
+        return "", ""
+    user_text = ""
+    assistant_text = ""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "")).strip().lower()
+        text = content_to_text(msg.get("content"))
+        if role == "user" and not user_text:
+            user_text = text
+        elif role == "assistant" and not assistant_text:
+            assistant_text = text
+    return user_text, assistant_text
+
+
+def extract_candidates_from_user_text(user_text: str) -> List[str]:
+    if not user_text:
+        return []
+    results: List[str] = []
+    for raw_line in user_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(?:[-*]|\d+[.)])\s*(.+)$", line)
+        if m:
+            cand = m.group(1).strip()
+            if cand and len(cand.split()) >= 2:
+                results.append(cand)
+    return results[:10]
+
+
 def extract_filename_from_text(value: Any) -> str:
     if value is None:
         return ""
@@ -317,6 +380,12 @@ def extract_filename(record: Dict[str, Any]) -> str:
     rec_file = None
     if isinstance(recordings, list) and recordings and isinstance(recordings[0], dict):
         rec_file = recordings[0].get("file")
+    audios = record.get("audios")
+    audio0 = None
+    if isinstance(audios, list) and audios:
+        audio0 = audios[0]
+
+    user_text, _ = extract_messages_texts(record)
 
     filename = pick_first_nonempty(
         record.get("filename"),
@@ -330,6 +399,7 @@ def extract_filename(record: Dict[str, Any]) -> str:
         rationale_meta.get("filename"),
         rationale_meta.get("file"),
         rec_file,
+        audio0,
     )
     if filename:
         return filename
@@ -339,6 +409,7 @@ def extract_filename(record: Dict[str, Any]) -> str:
         extract_filename_from_text(record.get("rationale_text")),
         extract_filename_from_text(record.get("rationale")),
         extract_filename_from_text(record.get("meta")),
+        extract_filename_from_text(user_text),
         extract_filename_from_text(json.dumps(record, ensure_ascii=False)),
     )
 
@@ -368,6 +439,8 @@ def _normalize_loaded_obj_to_records(obj: Any) -> List[Dict[str, Any]]:
             "rationale_text",
             "meta",
             "recordings",
+            "messages",
+            "audios",
         }
         if any(k in obj for k in record_like_keys):
             return [obj]
@@ -414,6 +487,8 @@ def is_record_like_dict(record: Dict[str, Any]) -> bool:
         "rationale_text",
         "meta",
         "recordings",
+        "messages",
+        "audios",
     }
     if any(k in record for k in record_like_keys):
         return True
@@ -422,6 +497,28 @@ def is_record_like_dict(record: Dict[str, Any]) -> bool:
     if extract_filename(record):
         return True
     return False
+
+
+def extract_target_obj_from_assistant(record: Dict[str, Any]) -> Dict[str, Any]:
+    _, assistant_text = extract_messages_texts(record)
+    parsed = parse_json_like(assistant_text)
+    if isinstance(parsed, dict):
+        if "scenario" in parsed or "action" in parsed or "entities" in parsed:
+            return {
+                "scenario": str(parsed.get("scenario", "")).strip(),
+                "action": str(parsed.get("action", "")).strip(),
+                "entities": parse_entities(parsed.get("entities", [])),
+            }
+        if "final" in parsed:
+            return extract_target_obj(parsed)
+        if "intent" in parsed:
+            scenario, action = intent_to_scenario_action(str(parsed.get("intent", "")))
+            return {
+                "scenario": scenario,
+                "action": action,
+                "entities": parse_entities(parsed.get("entities", [])),
+            }
+    return {"scenario": "", "action": "", "entities": []}
 
 
 def load_rationale_records(path: str) -> List[Dict[str, Any]]:
@@ -525,10 +622,19 @@ def build_items_from_rationale_jsonl(
             candidates = [candidate_to_text(c) for c in candidates]
             candidates = [c for c in candidates if c]
 
+            user_text, assistant_text = extract_messages_texts(data)
+            if not candidates:
+                candidates = extract_candidates_from_user_text(user_text)
+
             transcript = candidates[0] if candidates else ""
             rationale_text = normalize_rationale_text(data.get("rationale_text"))
+            if not rationale_text and user_text:
+                rationale_text = user_text
+
             target_obj = extract_target_obj(data)
-            target_str = json.dumps(target_obj, ensure_ascii=False)
+            if not target_obj.get("scenario") and not target_obj.get("action") and not target_obj.get("entities"):
+                target_obj = extract_target_obj_from_assistant(data)
+            target_str = assistant_text.strip() if assistant_text else json.dumps(target_obj, ensure_ascii=False)
 
             if filename:
                 audio_path, searched_paths = resolve_audio_path(
@@ -549,6 +655,7 @@ def build_items_from_rationale_jsonl(
                 "rationale_text": rationale_text,
                 "target": target_str,
                 "target_obj": target_obj,
+                "prompt_text": user_text.strip() if user_text else "",
             }
             fallback_text_items.append({**base_item, "audio_path": None})
 
