@@ -64,14 +64,20 @@ Output JSONL defaults to raw model outputs; use `--output_mode full` for metadat
 
 ### Step 2-B: Generate Two-Stage Rationale (New)
 
-`3_generate_rationale_two_stage.py` keeps the original script untouched and adds a two-stage pipeline:
+`3_generate_rationale_two_stage.py` keeps the original script untouched and uses separated intent/slot processing:
 
-- Stage 1 (candidate generation):  
-  Input = `n-best`, `reference_intent`, `reference_slot_types`, `intent_candidates`, `allowed_slot_types`  
-  Output = exactly 5 intent candidates (`topk_intents`) and exactly 5 slot-type candidates (`topk_slot_types`)
-- Stage 2 (candidate pruning + final rationale):  
-  Input = Stage-1 `topk_intents` + the same utterance evidence  
-  Output = elimination reasons, final prediction, slot grounding, final rationale
+- Stage 1-Intent (candidate generation):  
+  Input = `n-best`/audio evidence + `reference_intent` + `intent_candidates`  
+  Output = exactly 5 intent candidates (`topk_intents`)
+- Stage 1-Slot (candidate generation):  
+  Input = `n-best`/audio evidence + `reference_slot_types` + `allowed_slot_types`  
+  Output = exactly 5 slot-type candidates (`topk_slot_types`)
+- Stage 2-Intent (pruning):  
+  Input = Stage1 `topk_intents` + evidence  
+  Output = `intent_elimination`, `final_prediction`, `intent_rationalization`
+- Stage 2-Slot (grounding):  
+  Input = Stage1 `topk_slot_types` + evidence  
+  Output = `slot_grounding`, `slot_rationalization`
 
 The final JSON keeps the same top-level style as the original output and additionally stores both stage outputs under:
 - `rationale.candidate_generation`
@@ -99,12 +105,12 @@ uv run Experiment_Rationale/3_generate_rationale_two_stage.py \
 uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --limit 10
 ```
 
-**Preview prompts/outputs for both stages:**
+**Preview prompts/outputs for all sub-stages:**
 ```bash
 uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --preview 3
 ```
 
 **Notes:**
-- Stage format checks and retry logic are applied to both stages.
+- Stage format checks and retry logic are applied independently to intent/slot stages.
 - `allowed_slot_types` uses the full slot-type inventory from metadata.
-- If Stage 1/2 output is invalid after retries, deterministic fallback JSON is produced so processing can continue.
+- If any sub-stage output is invalid after retries, deterministic fallback JSON is produced so processing can continue.

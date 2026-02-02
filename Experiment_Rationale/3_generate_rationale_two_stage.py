@@ -6,7 +6,7 @@ import os
 import random
 import re
 from collections import Counter, defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import librosa
@@ -1003,6 +1003,385 @@ def run_model_once(
     input_len = inputs["input_ids"].shape[1]
     return processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
 
+def build_interpretations_for_mode(mode: str, nbest_texts: List[str]) -> str:
+    if mode == "nbest":
+        return format_interpretations(nbest_texts)
+    return "interpretation_1: (audio only)"
+
+def build_stage1_intent_prompt(
+    mode: str,
+    gold_intent: str,
+    intent_candidates: List[str],
+    nbest_texts: List[str],
+    stable_tokens: List[str],
+    unstable_tokens: List[str],
+    use_fewshot: bool = False,
+) -> str:
+    interpretations_text = build_interpretations_for_mode(mode, nbest_texts)
+    fewshot = ""
+    if use_fewshot:
+        fewshot = (
+            "EXAMPLE OUTPUT:\n"
+            "{\n"
+            "  \"topk_intents\": [\n"
+            "    {\"intent\": \"play:music\"},\n"
+            "    {\"intent\": \"music:query\"},\n"
+            "    {\"intent\": \"alarm:set\"},\n"
+            "    {\"intent\": \"weather:query\"},\n"
+            "    {\"intent\": \"qa:factoid\"}\n"
+            "  ]\n"
+            "}\n\n"
+        )
+    return (
+        "You are STAGE-1 intent candidate generator.\n"
+        "Output ENGLISH JSON ONLY.\n"
+        "Rules:\n"
+        "- topk_intents must contain exactly 5 unique intents.\n"
+        "- use only intent_candidates.\n"
+        "- include reference_intent exactly once.\n\n"
+        f"reference_intent: {gold_intent}\n"
+        f"intent_candidates ({len(intent_candidates)}): {json.dumps(intent_candidates, ensure_ascii=False)}\n"
+        "interpretations:\n"
+        f"{interpretations_text}\n"
+        f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
+        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n\n"
+        "Output format:\n"
+        "{\n"
+        "  \"topk_intents\": [\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"}\n"
+        "  ]\n"
+        "}\n\n"
+        f"{fewshot}"
+        "Now output JSON."
+    )
+
+def build_stage1_slot_prompt(
+    mode: str,
+    gold_slot_types: List[str],
+    slot_candidates: List[str],
+    nbest_texts: List[str],
+    stable_tokens: List[str],
+    unstable_tokens: List[str],
+    use_fewshot: bool = False,
+) -> str:
+    interpretations_text = build_interpretations_for_mode(mode, nbest_texts)
+    fewshot = ""
+    if use_fewshot:
+        fewshot = (
+            "EXAMPLE OUTPUT:\n"
+            "{\n"
+            "  \"topk_slot_types\": [\n"
+            "    {\"slot_type\": \"song_name\"},\n"
+            "    {\"slot_type\": \"artist_name\"},\n"
+            "    {\"slot_type\": \"time\"},\n"
+            "    {\"slot_type\": \"date\"},\n"
+            "    {\"slot_type\": \"place_name\"}\n"
+            "  ]\n"
+            "}\n\n"
+        )
+    return (
+        "You are STAGE-1 slot-type candidate generator.\n"
+        "Output ENGLISH JSON ONLY.\n"
+        "Rules:\n"
+        "- topk_slot_types must contain exactly 5 unique slot types.\n"
+        "- use only allowed_slot_types.\n"
+        "- include all reference_slot_types when possible.\n\n"
+        f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
+        f"allowed_slot_types ({len(slot_candidates)}): {json.dumps(slot_candidates, ensure_ascii=False)}\n"
+        "interpretations:\n"
+        f"{interpretations_text}\n"
+        f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
+        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n\n"
+        "Output format:\n"
+        "{\n"
+        "  \"topk_slot_types\": [\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"}\n"
+        "  ]\n"
+        "}\n\n"
+        f"{fewshot}"
+        "Now output JSON."
+    )
+
+def build_stage2_intent_prompt(
+    mode: str,
+    gold_intent: str,
+    stage1_topk_intents: List[str],
+    nbest_texts: List[str],
+    stable_tokens: List[str],
+    unstable_tokens: List[str],
+    use_fewshot: bool = False,
+) -> str:
+    interpretations_text = build_interpretations_for_mode(mode, nbest_texts)
+    fewshot = ""
+    if use_fewshot:
+        fewshot = (
+            "EXAMPLE OUTPUT:\n"
+            "{\n"
+            "  \"interpretation_uncertainty_analysis\": {\n"
+            "    \"stable_cues\": [\"play\"],\n"
+            "    \"unstable_cues\": [],\n"
+            "    \"decision_pivots\": [\"play\"]\n"
+            "  },\n"
+            "  \"topk_intents\": [\n"
+            "    {\"intent\": \"play:music\"},\n"
+            "    {\"intent\": \"music:query\"},\n"
+            "    {\"intent\": \"alarm:set\"},\n"
+            "    {\"intent\": \"weather:query\"},\n"
+            "    {\"intent\": \"qa:factoid\"}\n"
+            "  ],\n"
+            "  \"intent_elimination\": [\n"
+            "    {\"intent\": \"music:query\", \"reason\": \"command style\"},\n"
+            "    {\"intent\": \"alarm:set\", \"reason\": \"domain mismatch\"},\n"
+            "    {\"intent\": \"weather:query\", \"reason\": \"target mismatch\"},\n"
+            "    {\"intent\": \"qa:factoid\", \"reason\": \"speech-act mismatch\"}\n"
+            "  ],\n"
+            "  \"final_prediction\": {\"intent\": \"play:music\", \"scenario\": \"play\", \"action\": \"music\"},\n"
+            "  \"intent_rationalization\": \"playback command cues support play:music\"\n"
+            "}\n\n"
+        )
+    return (
+        "You are STAGE-2 intent pruning model.\n"
+        "Output ENGLISH JSON ONLY.\n"
+        "Rules:\n"
+        "- Use stage1_topk_intents as fixed candidates.\n"
+        "- topk_intents in output must contain the same 5 intents.\n"
+        "- intent_elimination must contain exactly 4 non-reference intents.\n"
+        "- final_prediction.intent must be one of stage1_topk_intents.\n\n"
+        f"reference_intent: {gold_intent}\n"
+        f"stage1_topk_intents: {json.dumps(to_topk_dicts(stage1_topk_intents), ensure_ascii=False)}\n"
+        "interpretations:\n"
+        f"{interpretations_text}\n"
+        f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
+        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n\n"
+        "Output format:\n"
+        "{\n"
+        "  \"interpretation_uncertainty_analysis\": {\n"
+        "    \"stable_cues\": [],\n"
+        "    \"unstable_cues\": [],\n"
+        "    \"decision_pivots\": []\n"
+        "  },\n"
+        "  \"topk_intents\": [\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"},\n"
+        "    {\"intent\": \"\"}\n"
+        "  ],\n"
+        "  \"intent_elimination\": [\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"},\n"
+        "    {\"intent\": \"\", \"reason\": \"\"}\n"
+        "  ],\n"
+        "  \"final_prediction\": {\"intent\": \"\", \"scenario\": \"\", \"action\": \"\"},\n"
+        "  \"intent_rationalization\": \"\"\n"
+        "}\n\n"
+        f"{fewshot}"
+        "Now output JSON."
+    )
+
+def build_stage2_slot_prompt(
+    mode: str,
+    gold_slot_types: List[str],
+    stage1_topk_slot_types: List[str],
+    nbest_texts: List[str],
+    stable_tokens: List[str],
+    unstable_tokens: List[str],
+    use_fewshot: bool = False,
+) -> str:
+    interpretations_text = build_interpretations_for_mode(mode, nbest_texts)
+    source_note = "interpretation_1..interpretation_5 or \"none\"" if mode == "nbest" else "interpretation_1 or \"none\""
+    fewshot = ""
+    if use_fewshot:
+        fewshot = (
+            "EXAMPLE OUTPUT:\n"
+            "{\n"
+            "  \"topk_slot_types\": [\n"
+            "    {\"slot_type\": \"song_name\"},\n"
+            "    {\"slot_type\": \"artist_name\"},\n"
+            "    {\"slot_type\": \"time\"},\n"
+            "    {\"slot_type\": \"date\"},\n"
+            "    {\"slot_type\": \"place_name\"}\n"
+            "  ],\n"
+            "  \"slot_grounding\": [\n"
+            "    {\"slot_type\": \"song_name\", \"supported\": true, \"best_span\": \"yesterday\", \"source_hypothesis\": \"interpretation_1\"}\n"
+            "  ],\n"
+            "  \"slot_rationalization\": \"slot evidence aligns with song_name\"\n"
+            "}\n\n"
+        )
+    return (
+        "You are STAGE-2 slot grounding model.\n"
+        "Output ENGLISH JSON ONLY.\n"
+        "Rules:\n"
+        "- Use stage1_topk_slot_types as fixed candidates.\n"
+        "- topk_slot_types in output must contain the same 5 slot types.\n"
+        "- For each reference_slot_type, provide one slot_grounding item.\n"
+        f"- source_hypothesis must be {source_note}.\n\n"
+        f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
+        f"stage1_topk_slot_types: {json.dumps(to_topk_slot_type_dicts(stage1_topk_slot_types), ensure_ascii=False)}\n"
+        "interpretations:\n"
+        f"{interpretations_text}\n"
+        f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
+        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n\n"
+        "Output format:\n"
+        "{\n"
+        "  \"topk_slot_types\": [\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"},\n"
+        "    {\"slot_type\": \"\"}\n"
+        "  ],\n"
+        "  \"slot_grounding\": [\n"
+        "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
+        "  ],\n"
+        "  \"slot_rationalization\": \"\"\n"
+        "}\n\n"
+        f"{fewshot}"
+        "Now output JSON."
+    )
+
+def validate_stage2_intent_output(
+    parsed: Optional[Dict[str, Any]],
+    stage1_topk_intents: List[str],
+    reference_intent: str,
+) -> Tuple[bool, str]:
+    if not isinstance(parsed, dict):
+        return False, "output is not valid JSON object"
+    expected_topk = stage1_topk_intents[:5]
+    expected_set = set(expected_topk)
+    if len(expected_topk) != 5:
+        return False, "stage1 intent topk does not contain 5 intents"
+
+    topk_now = extract_topk_intents(parsed)
+    if len(topk_now) != 5:
+        return False, "topk_intents must contain exactly 5 items"
+    if set(topk_now) != expected_set:
+        return False, "stage2 topk_intents must match stage1 candidates"
+
+    intent_elimination = parsed.get("intent_elimination")
+    if not isinstance(intent_elimination, list):
+        return False, "intent_elimination is not a list"
+    if len(intent_elimination) != 4:
+        return False, f"intent_elimination must contain exactly 4 items, got {len(intent_elimination)}"
+
+    non_reference = [intent for intent in expected_topk if intent != reference_intent]
+    seen = set()
+    for idx, item in enumerate(intent_elimination):
+        if not isinstance(item, dict):
+            return False, f"intent_elimination[{idx}] is not an object"
+        intent = str(item.get("intent", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        if not intent:
+            return False, f"intent_elimination[{idx}].intent is empty"
+        if intent not in non_reference:
+            return False, f"intent_elimination[{idx}].intent must be one of non-reference topk intents"
+        if intent in seen:
+            return False, "intent_elimination contains duplicated intents"
+        seen.add(intent)
+        if not reason:
+            return False, f"intent_elimination[{idx}].reason is empty"
+
+    final_prediction = parsed.get("final_prediction")
+    if not isinstance(final_prediction, dict):
+        return False, "final_prediction is not an object"
+    final_intent = str(final_prediction.get("intent", "")).strip()
+    if not final_intent:
+        return False, "final_prediction.intent is empty"
+    if final_intent not in expected_set:
+        return False, "final_prediction.intent must be included in stage1 topk"
+    return True, ""
+
+def validate_stage2_slot_output(
+    parsed: Optional[Dict[str, Any]],
+    stage1_topk_slot_types: List[str],
+    reference_slot_types: List[str],
+) -> Tuple[bool, str]:
+    if not isinstance(parsed, dict):
+        return False, "output is not valid JSON object"
+    expected_topk = stage1_topk_slot_types[:5]
+    expected_set = set(expected_topk)
+    if len(expected_topk) != 5:
+        return False, "stage1 slot topk does not contain 5 slot types"
+
+    topk_now = extract_topk_slot_types(parsed)
+    if len(topk_now) != 5:
+        return False, "topk_slot_types must contain exactly 5 items"
+    if set(topk_now) != expected_set:
+        return False, "stage2 topk_slot_types must match stage1 candidates"
+
+    slot_grounding = parsed.get("slot_grounding")
+    if not isinstance(slot_grounding, list):
+        return False, "slot_grounding is not a list"
+    grounded_types = []
+    for idx, item in enumerate(slot_grounding):
+        if not isinstance(item, dict):
+            return False, f"slot_grounding[{idx}] is not an object"
+        slot_type = str(item.get("slot_type", "")).strip()
+        source = str(item.get("source_hypothesis", "")).strip()
+        if not slot_type:
+            return False, f"slot_grounding[{idx}].slot_type is empty"
+        if slot_type not in expected_set:
+            return False, f"slot_grounding[{idx}].slot_type must be in stage1 topk slot types"
+        if not source:
+            return False, f"slot_grounding[{idx}].source_hypothesis is empty"
+        grounded_types.append(slot_type)
+
+    unique_reference = []
+    for slot_type in reference_slot_types:
+        if slot_type and slot_type not in unique_reference:
+            unique_reference.append(slot_type)
+    if len(unique_reference) <= len(expected_topk):
+        missing_reference = [slot_type for slot_type in unique_reference if slot_type not in grounded_types]
+        if missing_reference:
+            return False, f"slot_grounding must include all reference_slot_types when possible: {missing_reference}"
+    return True, ""
+
+def run_stage_with_retries(
+    *,
+    processor: AutoProcessor,
+    model: Qwen2AudioForConditionalGeneration,
+    mode: str,
+    prompt: str,
+    device: str,
+    gen_kwargs: Dict[str, Any],
+    audio: Optional[List[float]],
+    sampling_rate: int,
+    stage_name: str,
+    format_retries: int,
+    validator: Callable[[Optional[Dict[str, Any]]], Tuple[bool, str]],
+) -> Tuple[str, Optional[Dict[str, Any]], bool, str]:
+    generated = ""
+    parsed: Optional[Dict[str, Any]] = None
+    valid = False
+    error_reason = ""
+    max_attempts = max(1, format_retries + 1)
+    for attempt in range(max_attempts):
+        current_prompt = prompt if attempt == 0 else build_retry_prompt(prompt, generated, error_reason, stage_name)
+        generated = run_model_once(
+            processor=processor,
+            model=model,
+            mode=mode,
+            prompt=current_prompt,
+            device=device,
+            gen_kwargs=gen_kwargs,
+            audio=audio,
+            sampling_rate=sampling_rate,
+        )
+        parsed = extract_json(generated)
+        valid, error_reason = validator(parsed)
+        if valid:
+            break
+    return generated, parsed, valid, error_reason
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -1145,149 +1524,108 @@ def main():
                 "top_p": args.top_p,
             })
 
-        if args.mode == "nbest":
-            stage1_prompt = build_stage1_prompt_nbest(
-                gold_intent=gold_intent,
-                gold_slot_types=gold_slot_types,
-                intent_candidates=intent_candidates,
-                slot_candidates=slot_candidates,
-                nbest_texts=nbest_texts,
-                stable_tokens=stable_unstable["stable"],
-                unstable_tokens=stable_unstable["unstable"],
-                use_fewshot=args.use_fewshot,
-            )
-        else:
-            stage1_prompt = build_stage1_prompt_audio(
-                gold_intent=gold_intent,
-                gold_slot_types=gold_slot_types,
-                intent_candidates=intent_candidates,
-                slot_candidates=slot_candidates,
-                use_fewshot=args.use_fewshot,
-            )
-
-        stage1_generated = ""
-        stage1_parsed: Optional[Dict[str, Any]] = None
-        stage1_topk_valid = False
-        stage1_validation_error = ""
-        max_attempts = max(1, args.format_retries + 1)
-        for attempt in range(max_attempts):
-            current_prompt = stage1_prompt if attempt == 0 else build_retry_prompt(
-                stage1_prompt,
-                stage1_generated,
-                stage1_validation_error,
-                stage_name="stage1",
-            )
-            stage1_generated = run_model_once(
-                processor=processor,
-                model=model,
-                mode=args.mode,
-                prompt=current_prompt,
-                device=args.device,
-                gen_kwargs=gen_kwargs,
-                audio=audio,
-                sampling_rate=sr,
-            )
-            stage1_parsed = extract_json(stage1_generated)
-            stage1_topk_valid, stage1_validation_error = validate_stage1_output(
-                parsed=stage1_parsed,
-                intent_candidates=intent_candidates,
-                reference_intent=gold_intent,
-                slot_candidates=slot_candidates,
-                reference_slot_types=gold_slot_types,
-            )
-            if stage1_topk_valid:
-                break
-
-        stage1_topk_intents = extract_topk_intents(stage1_parsed)
-        stage1_topk_slot_types = extract_topk_slot_types(stage1_parsed)
-        if (
-            not stage1_topk_valid
-            or len(stage1_topk_intents) != 5
-            or len(set(stage1_topk_intents)) != 5
-            or len(stage1_topk_slot_types) != 5
-            or len(set(stage1_topk_slot_types)) != 5
-        ):
+        stage1_intent_prompt = build_stage1_intent_prompt(
+            mode=args.mode,
+            gold_intent=gold_intent,
+            intent_candidates=intent_candidates,
+            nbest_texts=nbest_texts,
+            stable_tokens=stable_unstable["stable"],
+            unstable_tokens=stable_unstable["unstable"],
+            use_fewshot=args.use_fewshot,
+        )
+        stage1_intent_generated, stage1_intent_parsed, stage1_intent_valid, stage1_intent_error = run_stage_with_retries(
+            processor=processor,
+            model=model,
+            mode=args.mode,
+            prompt=stage1_intent_prompt,
+            device=args.device,
+            gen_kwargs=gen_kwargs,
+            audio=audio,
+            sampling_rate=sr,
+            stage_name="stage1_intent",
+            format_retries=args.format_retries,
+            validator=lambda parsed: validate_topk_intents(parsed, intent_candidates, gold_intent),
+        )
+        stage1_topk_intents = extract_topk_intents(stage1_intent_parsed)
+        if not stage1_intent_valid or len(stage1_topk_intents) != 5 or len(set(stage1_topk_intents)) != 5:
             stage1_topk_intents = select_candidates_topk(
                 gold=gold_intent,
                 candidates=intent_candidates,
                 k=5,
                 rng=rng,
             )
+            stage1_intent_parsed = {
+                "topk_intents": to_topk_dicts(stage1_topk_intents),
+                "fallback_used": True,
+                "fallback_reason": stage1_intent_error or "stage1 intent format violation",
+            }
+
+        stage1_slot_prompt = build_stage1_slot_prompt(
+            mode=args.mode,
+            gold_slot_types=gold_slot_types,
+            slot_candidates=slot_candidates,
+            nbest_texts=nbest_texts,
+            stable_tokens=stable_unstable["stable"],
+            unstable_tokens=stable_unstable["unstable"],
+            use_fewshot=args.use_fewshot,
+        )
+        stage1_slot_generated, stage1_slot_parsed, stage1_slot_valid, stage1_slot_error = run_stage_with_retries(
+            processor=processor,
+            model=model,
+            mode=args.mode,
+            prompt=stage1_slot_prompt,
+            device=args.device,
+            gen_kwargs=gen_kwargs,
+            audio=audio,
+            sampling_rate=sr,
+            stage_name="stage1_slot",
+            format_retries=args.format_retries,
+            validator=lambda parsed: validate_topk_slot_types(parsed, slot_candidates, gold_slot_types),
+        )
+        stage1_topk_slot_types = extract_topk_slot_types(stage1_slot_parsed)
+        if not stage1_slot_valid or len(stage1_topk_slot_types) != 5 or len(set(stage1_topk_slot_types)) != 5:
             stage1_topk_slot_types = select_slot_types_topk(
                 gold_types=gold_slot_types,
                 slot_types=slot_candidates,
                 k=5,
                 rng=rng,
             )
-            stage1_parsed = {
-                "topk_intents": to_topk_dicts(stage1_topk_intents),
+            stage1_slot_parsed = {
                 "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
                 "fallback_used": True,
-                "fallback_reason": stage1_validation_error or "stage1 format violation",
+                "fallback_reason": stage1_slot_error or "stage1 slot format violation",
             }
 
-        if args.mode == "nbest":
-            stage2_prompt = build_stage2_prompt_nbest(
-                gold_intent=gold_intent,
-                gold_slot_types=gold_slot_types,
-                slot_candidates=slot_candidates,
-                nbest_texts=nbest_texts,
-                stable_tokens=stable_unstable["stable"],
-                unstable_tokens=stable_unstable["unstable"],
-                stage1_topk_intents=stage1_topk_intents,
-                stage1_topk_slot_types=stage1_topk_slot_types,
-                use_fewshot=args.use_fewshot,
-            )
-        else:
-            stage2_prompt = build_stage2_prompt_audio(
-                gold_intent=gold_intent,
-                gold_slot_types=gold_slot_types,
-                slot_candidates=slot_candidates,
-                stage1_topk_intents=stage1_topk_intents,
-                stage1_topk_slot_types=stage1_topk_slot_types,
-                use_fewshot=args.use_fewshot,
-            )
-
-        stage2_generated = ""
-        stage2_parsed: Optional[Dict[str, Any]] = None
-        stage2_valid = False
-        stage2_validation_error = ""
-        for attempt in range(max_attempts):
-            current_prompt = stage2_prompt if attempt == 0 else build_retry_prompt(
-                stage2_prompt,
-                stage2_generated,
-                stage2_validation_error,
-                stage_name="stage2",
-            )
-            stage2_generated = run_model_once(
-                processor=processor,
-                model=model,
-                mode=args.mode,
-                prompt=current_prompt,
-                device=args.device,
-                gen_kwargs=gen_kwargs,
-                audio=audio,
-                sampling_rate=sr,
-            )
-            stage2_parsed = extract_json(stage2_generated)
-            stage2_valid, stage2_validation_error = validate_stage2_output(
-                parsed=stage2_parsed,
-                stage1_topk_intents=stage1_topk_intents,
-                stage1_topk_slot_types=stage1_topk_slot_types,
-                reference_intent=gold_intent,
-            )
-            if stage2_valid:
-                break
-
-        if not stage2_valid:
-            stage2_parsed = {
+        stage2_intent_prompt = build_stage2_intent_prompt(
+            mode=args.mode,
+            gold_intent=gold_intent,
+            stage1_topk_intents=stage1_topk_intents,
+            nbest_texts=nbest_texts,
+            stable_tokens=stable_unstable["stable"],
+            unstable_tokens=stable_unstable["unstable"],
+            use_fewshot=args.use_fewshot,
+        )
+        stage2_intent_generated, stage2_intent_parsed, stage2_intent_valid, stage2_intent_error = run_stage_with_retries(
+            processor=processor,
+            model=model,
+            mode=args.mode,
+            prompt=stage2_intent_prompt,
+            device=args.device,
+            gen_kwargs=gen_kwargs,
+            audio=audio,
+            sampling_rate=sr,
+            stage_name="stage2_intent",
+            format_retries=args.format_retries,
+            validator=lambda parsed: validate_stage2_intent_output(parsed, stage1_topk_intents, gold_intent),
+        )
+        if not stage2_intent_valid:
+            stage2_intent_parsed = {
                 "interpretation_uncertainty_analysis": {
                     "stable_cues": stable_unstable["stable"][:5] if args.mode == "nbest" else [],
                     "unstable_cues": stable_unstable["unstable"][:5] if args.mode == "nbest" else [],
                     "decision_pivots": stable_unstable["stable"][:3] if args.mode == "nbest" else [],
                 },
                 "topk_intents": to_topk_dicts(stage1_topk_intents),
-                "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
                 "intent_elimination": [
                     {"intent": intent, "reason": "less consistent with utterance evidence than reference_intent"}
                     for intent in stage1_topk_intents
@@ -1298,6 +1636,38 @@ def main():
                     "scenario": scenario,
                     "action": action,
                 },
+                "intent_rationalization": "fallback intent rationale generated because stage2 intent output was invalid",
+                "fallback_used": True,
+                "fallback_reason": stage2_intent_error or "stage2 intent format violation",
+            }
+        stage2_intent_parsed = postprocess_rationale_output(stage2_intent_parsed, fallback_intent=gold_intent)
+        stage2_intent_parsed["topk_intents"] = to_topk_dicts(stage1_topk_intents)
+
+        stage2_slot_prompt = build_stage2_slot_prompt(
+            mode=args.mode,
+            gold_slot_types=gold_slot_types,
+            stage1_topk_slot_types=stage1_topk_slot_types,
+            nbest_texts=nbest_texts,
+            stable_tokens=stable_unstable["stable"],
+            unstable_tokens=stable_unstable["unstable"],
+            use_fewshot=args.use_fewshot,
+        )
+        stage2_slot_generated, stage2_slot_parsed, stage2_slot_valid, stage2_slot_error = run_stage_with_retries(
+            processor=processor,
+            model=model,
+            mode=args.mode,
+            prompt=stage2_slot_prompt,
+            device=args.device,
+            gen_kwargs=gen_kwargs,
+            audio=audio,
+            sampling_rate=sr,
+            stage_name="stage2_slot",
+            format_retries=args.format_retries,
+            validator=lambda parsed: validate_stage2_slot_output(parsed, stage1_topk_slot_types, gold_slot_types),
+        )
+        if not stage2_slot_valid:
+            stage2_slot_parsed = {
+                "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
                 "slot_grounding": [
                     {
                         "slot_type": slot_type,
@@ -1307,30 +1677,55 @@ def main():
                     }
                     for slot_type in gold_slot_types
                 ],
-                "final_rationalization": "fallback rationale generated because stage2 output was invalid",
+                "slot_rationalization": "fallback slot rationale generated because stage2 slot output was invalid",
                 "fallback_used": True,
-                "fallback_reason": stage2_validation_error or "stage2 format violation",
+                "fallback_reason": stage2_slot_error or "stage2 slot format violation",
             }
+        stage2_slot_parsed["topk_slot_types"] = to_topk_slot_type_dicts(stage1_topk_slot_types)
 
-        stage2_parsed = postprocess_rationale_output(stage2_parsed, fallback_intent=gold_intent)
-        stage2_parsed["topk_intents"] = to_topk_dicts(stage1_topk_intents)
-        stage2_parsed["topk_slot_types"] = to_topk_slot_type_dicts(stage1_topk_slot_types)
+        stage1_valid = stage1_intent_valid and stage1_slot_valid
+        stage1_validation_error = ""
+        if not stage1_intent_valid:
+            stage1_validation_error = stage1_intent_error
+        elif not stage1_slot_valid:
+            stage1_validation_error = stage1_slot_error
+
+        stage2_valid = stage2_intent_valid and stage2_slot_valid
+        stage2_validation_error = ""
+        if not stage2_intent_valid:
+            stage2_validation_error = stage2_intent_error
+        elif not stage2_slot_valid:
+            stage2_validation_error = stage2_slot_error
+
+        intent_rationalization = str(stage2_intent_parsed.get("intent_rationalization", "")).strip()
+        slot_rationalization = str(stage2_slot_parsed.get("slot_rationalization", "")).strip()
+        final_rationalization = " ".join([part for part in [intent_rationalization, slot_rationalization] if part]).strip()
 
         combined_rationale = {
-            "candidate_generation": stage1_parsed,
-            "candidate_pruning": stage2_parsed,
-            "interpretation_uncertainty_analysis": stage2_parsed.get("interpretation_uncertainty_analysis", {}),
+            "candidate_generation": {
+                "intent": stage1_intent_parsed,
+                "slot": stage1_slot_parsed,
+            },
+            "candidate_pruning": {
+                "intent": stage2_intent_parsed,
+                "slot": stage2_slot_parsed,
+            },
+            "interpretation_uncertainty_analysis": stage2_intent_parsed.get("interpretation_uncertainty_analysis", {}),
             "topk_intents": to_topk_dicts(stage1_topk_intents),
             "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
-            "intent_elimination": stage2_parsed.get("intent_elimination", []),
-            "final_prediction": stage2_parsed.get("final_prediction", {}),
-            "slot_grounding": stage2_parsed.get("slot_grounding", []),
-            "final_rationalization": stage2_parsed.get("final_rationalization", ""),
+            "intent_elimination": stage2_intent_parsed.get("intent_elimination", []),
+            "final_prediction": stage2_intent_parsed.get("final_prediction", {}),
+            "slot_grounding": stage2_slot_parsed.get("slot_grounding", []),
+            "intent_rationalization": intent_rationalization,
+            "slot_rationalization": slot_rationalization,
+            "final_rationalization": final_rationalization,
         }
         combined_raw_output = json.dumps(
             {
-                "stage1_raw_output": stage1_generated,
-                "stage2_raw_output": stage2_generated,
+                "stage1_intent_raw_output": stage1_intent_generated,
+                "stage1_slot_raw_output": stage1_slot_generated,
+                "stage2_intent_raw_output": stage2_intent_generated,
+                "stage2_slot_raw_output": stage2_slot_generated,
             },
             ensure_ascii=False,
         )
@@ -1347,27 +1742,39 @@ def main():
             "nbest": nbest_texts if args.mode == "nbest" else [],
             "nbest_summary": stable_unstable if args.mode == "nbest" else {},
             "rationale": combined_rationale,
-            "topk_valid": stage1_topk_valid,
-            "topk_validation_error": "" if stage1_topk_valid else stage1_validation_error,
+            "topk_valid": stage1_valid,
+            "topk_validation_error": "" if stage1_valid else stage1_validation_error,
+            "stage1_intent_valid": stage1_intent_valid,
+            "stage1_slot_valid": stage1_slot_valid,
+            "stage1_intent_validation_error": "" if stage1_intent_valid else stage1_intent_error,
+            "stage1_slot_validation_error": "" if stage1_slot_valid else stage1_slot_error,
             "stage2_valid": stage2_valid,
             "stage2_validation_error": "" if stage2_valid else stage2_validation_error,
+            "stage2_intent_valid": stage2_intent_valid,
+            "stage2_slot_valid": stage2_slot_valid,
+            "stage2_intent_validation_error": "" if stage2_intent_valid else stage2_intent_error,
+            "stage2_slot_validation_error": "" if stage2_slot_valid else stage2_slot_error,
             "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
             "raw_output": combined_raw_output,
         }
         if args.save_raw:
             result["rationale_raw"] = {
-                "stage1_prompt": stage1_prompt,
-                "stage1_output": stage1_generated,
-                "stage2_prompt": stage2_prompt,
-                "stage2_output": stage2_generated,
+                "stage1_intent_prompt": stage1_intent_prompt,
+                "stage1_intent_output": stage1_intent_generated,
+                "stage1_slot_prompt": stage1_slot_prompt,
+                "stage1_slot_output": stage1_slot_generated,
+                "stage2_intent_prompt": stage2_intent_prompt,
+                "stage2_intent_output": stage2_intent_generated,
+                "stage2_slot_prompt": stage2_slot_prompt,
+                "stage2_slot_output": stage2_slot_generated,
             }
         raw_record = {
             "slurp_id": slurp_id,
             "input_text": input_text,
             "gold_intent": gold_intent,
             "raw_output": combined_raw_output,
-            "topk_valid": stage1_topk_valid,
-            "topk_validation_error": "" if stage1_topk_valid else stage1_validation_error,
+            "topk_valid": stage1_valid,
+            "topk_validation_error": "" if stage1_valid else stage1_validation_error,
             "stage2_valid": stage2_valid,
             "stage2_validation_error": "" if stage2_valid else stage2_validation_error,
             "topk_slot_types": to_topk_slot_type_dicts(stage1_topk_slot_types),
@@ -1381,26 +1788,42 @@ def main():
             print("=" * 80)
             print(f"[PREVIEW] {idx+1} / {args.preview} | slurp_id={slurp_id} | mode={args.mode}")
             print("-" * 80)
-            print("STAGE1 PROMPT:")
-            print(stage1_prompt)
+            print("STAGE1 INTENT PROMPT:")
+            print(stage1_intent_prompt)
             print("-" * 80)
-            print("STAGE1 OUTPUT:")
-            print(stage1_generated)
+            print("STAGE1 INTENT OUTPUT:")
+            print(stage1_intent_generated)
             print("-" * 80)
-            print("STAGE2 PROMPT:")
-            print(stage2_prompt)
+            print("STAGE1 SLOT PROMPT:")
+            print(stage1_slot_prompt)
             print("-" * 80)
-            print("STAGE2 OUTPUT:")
-            print(stage2_generated)
+            print("STAGE1 SLOT OUTPUT:")
+            print(stage1_slot_generated)
+            print("-" * 80)
+            print("STAGE2 INTENT PROMPT:")
+            print(stage2_intent_prompt)
+            print("-" * 80)
+            print("STAGE2 INTENT OUTPUT:")
+            print(stage2_intent_generated)
+            print("-" * 80)
+            print("STAGE2 SLOT PROMPT:")
+            print(stage2_slot_prompt)
+            print("-" * 80)
+            print("STAGE2 SLOT OUTPUT:")
+            print(stage2_slot_generated)
         if args.limitmode:
             limit_view = {
                 "slurp_id": slurp_id,
                 "input_text": input_text,
                 "gold_intent": gold_intent,
-                "stage1_prompt": stage1_prompt,
-                "stage1_raw_output": stage1_generated,
-                "stage2_prompt": stage2_prompt,
-                "stage2_raw_output": stage2_generated,
+                "stage1_intent_prompt": stage1_intent_prompt,
+                "stage1_intent_raw_output": stage1_intent_generated,
+                "stage1_slot_prompt": stage1_slot_prompt,
+                "stage1_slot_raw_output": stage1_slot_generated,
+                "stage2_intent_prompt": stage2_intent_prompt,
+                "stage2_intent_raw_output": stage2_intent_generated,
+                "stage2_slot_prompt": stage2_slot_prompt,
+                "stage2_slot_raw_output": stage2_slot_generated,
             }
             print(json.dumps(limit_view, ensure_ascii=False, indent=2))
             print("")
