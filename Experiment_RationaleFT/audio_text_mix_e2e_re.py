@@ -1173,65 +1173,86 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
     return 0.0 if reference.strip() == hypothesis.strip() else 1.0
 
 
-def _run_batch_inference(
+
+@dataclass
+class InferenceCollator:
+    processor: Any
+
+    def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
+        self.processor.tokenizer.padding_side = "left"
+        sr = self.processor.feature_extractor.sampling_rate
+
+        texts = []
+        audios = []
+        valid_items = []
+
+        for item in batch:
+            if item.get("audio_path"):
+                try:
+                    audio, _ = librosa.load(item["audio_path"], sr=sr)
+                    audios.append(audio)
+                    prompt_text = build_prompt_text(item)
+                    user_content = [
+                        {"type": "audio", "audio_url": "placeholder"},
+                        {"type": "text", "text": prompt_text},
+                    ]
+                except Exception as e:
+                    logger.warning(f"Failed to load audio for {item.get('id')}: {e}")
+                    continue
+            else:
+                prompt_text = build_prompt_text(item, include_transcript=True)
+                user_content = [{"type": "text", "text": prompt_text}]
+
+            text_input = self.processor.apply_chat_template(
+                [{"role": "user", "content": user_content}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            texts.append(text_input)
+            valid_items.append(item)
+
+        if not texts:
+            return {}
+
+        inputs = self.processor(
+            text=texts,
+            audio=audios if audios else None,
+            sampling_rate=sr,
+            padding=True,
+            return_tensors="pt",
+        )
+        return {"net_inputs": inputs, "items": valid_items}
+
+
+def _generate_batch(
     model,
     processor,
-    batch_items: List[Dict[str, Any]],
+    batch_data: Dict[str, Any],
     device,
-    sr: int,
-    is_audio: bool,
     max_new_tokens: int,
 ) -> List[Dict[str, Any]]:
-    texts: List[str] = []
-    audios: List[Any] = []
+    if not batch_data:
+        return []
 
-    for item in batch_items:
-        if is_audio:
-            audio, _ = librosa.load(item["audio_path"], sr=sr)
-            audios.append(audio)
-            prompt_text = build_prompt_text(item)
-            user_content = [
-                {"type": "audio", "audio_url": "placeholder"},
-                {"type": "text", "text": prompt_text},
-            ]
-        else:
-            prompt_text = build_prompt_text(item, include_transcript=True)
-            user_content = [{"type": "text", "text": prompt_text}]
+    net_inputs = batch_data["net_inputs"]
+    items = batch_data["items"]
 
-        text_input = processor.apply_chat_template(
-            [{"role": "user", "content": user_content}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        texts.append(text_input)
-
-    if is_audio:
-        inputs = processor(
-            text=texts,
-            audio=audios,
-            sampling_rate=sr,
-            return_tensors="pt",
-            padding=True,
-        )
-    else:
-        inputs = processor(text=texts, return_tensors="pt", padding=True)
-
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    net_inputs = {k: v.to(device) for k, v in net_inputs.items()}
 
     with torch.no_grad():
         output_ids = model.generate(
-            **inputs,
+            **net_inputs,
             max_new_tokens=max_new_tokens,
             use_cache=True,
             pad_token_id=processor.tokenizer.pad_token_id,
         )
 
-    input_len = inputs["input_ids"].shape[1]
+    input_len = net_inputs["input_ids"].shape[1]
     generated_ids = output_ids[:, input_len:]
     raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
     results: List[Dict[str, Any]] = []
-    for item, raw_output in zip(batch_items, raw_outputs):
+    for item, raw_output in zip(items, raw_outputs):
         pred_label = parse_prediction_label(raw_output)
         wer_score = calculate_wer(item.get("transcript", ""), raw_output)
 
@@ -1266,11 +1287,12 @@ def run_distributed_inference(
     rank,
     world_size,
     batch_size=1,
-    max_new_tokens: int = 4096,
+    max_new_tokens: int = 2048,
 ):
     model.eval()
 
     my_items = items[rank::world_size]
+    # Split audio/text to keep clean batches
     my_audio_items = [x for x in my_items if x.get("audio_path") is not None]
     my_text_items = [x for x in my_items if x.get("audio_path") is None]
 
@@ -1278,49 +1300,60 @@ def run_distributed_inference(
     processor.tokenizer.padding_side = "left"
 
     if rank == 0:
-        logger.info("Starting Inference. Items: %d, Batch size: %d", len(my_items), batch_size)
+        logger.info("Starting Inference. Items: %d (Audio: %d, Text: %d), Batch size: %d",
+                    len(my_items), len(my_audio_items), len(my_text_items), batch_size)
 
-    sr = processor.feature_extractor.sampling_rate
-
-    def iter_batches(data: List[Dict[str, Any]]) -> Iterator[List[Dict[str, Any]]]:
-        for i in range(0, len(data), batch_size):
-            yield data[i : i + batch_size]
-
-    for i, batch_items in enumerate(iter_batches(my_audio_items)):
-        if rank == 0 and i % 10 == 0:
-            logger.info("Audio batch %d/%d", i + 1, (len(my_audio_items) + batch_size - 1) // batch_size)
-        try:
-            local_results.extend(
-                _run_batch_inference(
-                    model=model,
-                    processor=processor,
-                    batch_items=batch_items,
-                    device=device,
-                    sr=sr,
-                    is_audio=True,
-                    max_new_tokens=max_new_tokens,
+    # Audio Loader
+    if my_audio_items:
+        audio_loader = DataLoader(
+            MixedDataset(my_audio_items),
+            batch_size=batch_size,
+            num_workers=4,
+            collate_fn=InferenceCollator(processor),
+            drop_last=False,
+            shuffle=False,
+        )
+        for i, batch_data in enumerate(audio_loader):
+            if rank == 0 and i % 10 == 0:
+                logger.info("Audio batch %d/%d", i + 1, len(audio_loader))
+            try:
+                local_results.extend(
+                    _generate_batch(
+                        model=model,
+                        processor=processor,
+                        batch_data=batch_data,
+                        device=device,
+                        max_new_tokens=max_new_tokens,
+                    )
                 )
-            )
-        except Exception as exc:
-            logger.error("Rank %d failed on audio batch %d: %s", rank, i, exc)
+            except Exception as exc:
+                logger.error("Rank %d failed on audio batch %d: %s", rank, i, exc)
 
-    for i, batch_items in enumerate(iter_batches(my_text_items)):
-        if rank == 0 and i % 10 == 0:
-            logger.info("Text batch %d/%d", i + 1, (len(my_text_items) + batch_size - 1) // batch_size)
-        try:
-            local_results.extend(
-                _run_batch_inference(
-                    model=model,
-                    processor=processor,
-                    batch_items=batch_items,
-                    device=device,
-                    sr=sr,
-                    is_audio=False,
-                    max_new_tokens=max_new_tokens,
+    # Text Loader
+    if my_text_items:
+        text_loader = DataLoader(
+            MixedDataset(my_text_items),
+            batch_size=batch_size,
+            num_workers=4,
+            collate_fn=InferenceCollator(processor),
+            drop_last=False,
+            shuffle=False,
+        )
+        for i, batch_data in enumerate(text_loader):
+            if rank == 0 and i % 10 == 0:
+                logger.info("Text batch %d/%d", i + 1, len(text_loader))
+            try:
+                local_results.extend(
+                    _generate_batch(
+                        model=model,
+                        processor=processor,
+                        batch_data=batch_data,
+                        device=device,
+                        max_new_tokens=max_new_tokens,
+                    )
                 )
-            )
-        except Exception as exc:
-            logger.error("Rank %d failed on text batch %d: %s", rank, i, exc)
+            except Exception as exc:
+                logger.error("Rank %d failed on text batch %d: %s", rank, i, exc)
 
     temp_output_path = f"{output_path}.rank{rank}"
     try:
@@ -1494,7 +1527,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
-    parser.add_argument("--max_new_tokens", type=int, default=4096)
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
         "--export_label_eval",
         action="store_true",
