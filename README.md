@@ -150,6 +150,35 @@ uv run train_qwen2_audio_slurp.py \
   --output_dir outputs/speech-massive
 ```
 
+## Rationale + Label Fine-tuning (ASR CoT)
+
+For rationale-conditioned SLU fine-tuning with audio input, use:
+
+`Experiment_RationaleFT/audio_text_mix_e2e_re.py`
+
+This trainer consumes JSONL files that include:
+- `candidates` (ASR n-best)
+- `rationale_text`
+- `final` (gold label: intent/entities)
+- `filename` (audio file)
+
+Default train/devel paths are set to:
+- `/lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_train.jsonl`
+- `/lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_devel.jsonl`
+
+Example:
+
+```bash
+uv run Experiment_RationaleFT/audio_text_mix_e2e_re.py \
+  --audio_dir /lustre/home/71200138/INTERSPEECH/experiment1/slurp/audio/slurp_real \
+  --output_dir outputs/qwen_rationale_label_ft
+```
+
+Outputs:
+- `prediction.jsonl`: full output (includes n-best/rationale/raw_output/target)
+- `prediction_labels_only.jsonl`: label-only view for evaluation
+- `metrics_label_only.json`: label-only metrics (scenario/action/intent acc + entity P/R/F1)
+
 ## Key Options
 
 | Option | Description |

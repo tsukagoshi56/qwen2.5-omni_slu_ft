@@ -176,3 +176,23 @@ cat Experiment_Rationale/rationale_output_two_stage_parallel.w0of2.jsonl \
 - In `--mode audio`, two-stage script uses `--model_name_or_path` (Qwen2-Audio family).
 - `allowed_slot_types` uses the full slot-type inventory from metadata.
 - If any sub-stage output is invalid after retries, deterministic fallback JSON is produced so processing can continue.
+
+### Step 3: Fine-tune with Audio + N-best + Rationale + Gold Label
+
+Use the rationale-conditioned trainer:
+
+```bash
+uv run Experiment_RationaleFT/audio_text_mix_e2e_re.py \
+  --train_file /lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_train.jsonl \
+  --eval_file /lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_devel.jsonl \
+  --audio_dir /lustre/home/71200138/INTERSPEECH/experiment1/slurp/audio/slurp_real \
+  --output_dir outputs/qwen_rationale_label_ft
+```
+
+This script:
+- uses audio input with prompt context from `candidates` + `rationale_text`
+- trains on final SLU labels (`scenario`, `action`, `entities`)
+- saves full predictions to `prediction.jsonl` (with n-best/rationale/raw output)
+- evaluates using label-only extraction and saves:
+  - `prediction_labels_only.jsonl`
+  - `metrics_label_only.json`
