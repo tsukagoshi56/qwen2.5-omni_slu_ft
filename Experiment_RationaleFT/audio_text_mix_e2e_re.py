@@ -401,7 +401,27 @@ def load_rationale_records(path: str) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         records.extend(_normalize_loaded_obj_to_records(obj))
-    logger.info("Loaded %s as JSONL (%d records).", path, len(records))
+    if records:
+        logger.info("Loaded %s as JSONL (%d records).", path, len(records))
+        return records
+
+    # 3) Last fallback: parse as a stream of concatenated JSON objects.
+    decoder = json.JSONDecoder()
+    i = 0
+    n = len(raw)
+    while i < n:
+        while i < n and raw[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, j = decoder.raw_decode(raw, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        records.extend(_normalize_loaded_obj_to_records(obj))
+        i = j
+    logger.info("Loaded %s as JSON stream fallback (%d records).", path, len(records))
     return records
 
 
