@@ -143,6 +143,93 @@ def format_interpretations(nbest_texts: List[str], max_items: int = 5) -> str:
         lines.append(f"interpretation_{i+1}: {text}")
     return "\n".join(lines)
 
+def parse_nbest_schedule(
+    nbest_values: str,
+    default_num_hypotheses: int,
+    ablation_1to5: bool,
+) -> List[int]:
+    if ablation_1to5:
+        return [1, 2, 3, 4, 5]
+    if not nbest_values:
+        return [max(1, int(default_num_hypotheses))]
+
+    schedule: List[int] = []
+    for token in nbest_values.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            k = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid n-best value: {token}") from exc
+        if k < 1:
+            raise ValueError(f"n-best value must be >= 1, got {k}")
+        if k not in schedule:
+            schedule.append(k)
+    if not schedule:
+        raise ValueError("No valid n-best values were provided.")
+    return schedule
+
+def resolve_output_path_for_k(output_path: str, k: int, schedule: List[int]) -> str:
+    if len(schedule) == 1:
+        return output_path
+    if "{k}" in output_path:
+        return output_path.format(k=k)
+    root, ext = os.path.splitext(output_path)
+    return f"{root}.k{k}{ext or '.jsonl'}"
+
+def build_smoke_rationale_output(
+    gold_intent: str,
+    gold_slot_types: List[str],
+    intent_candidates: List[str],
+    nbest_texts: List[str],
+) -> Dict[str, Any]:
+    ordered_intents: List[str] = []
+    if gold_intent:
+        ordered_intents.append(gold_intent)
+    for cand in intent_candidates:
+        if cand and cand not in ordered_intents:
+            ordered_intents.append(cand)
+        if len(ordered_intents) >= 5:
+            break
+    topk = ordered_intents[:5]
+    intent_elimination = [
+        {
+            "intent": intent,
+            "reason": "smoke mode placeholder rationale for I/O validation",
+        }
+        for intent in topk
+        if intent != gold_intent
+    ][:4]
+    source_hypothesis = "interpretation_1" if nbest_texts else "none"
+    slot_grounding = []
+    for slot_type in gold_slot_types:
+        slot_grounding.append(
+            {
+                "slot_type": slot_type,
+                "supported": bool(nbest_texts),
+                "best_span": nbest_texts[0] if nbest_texts else "",
+                "source_hypothesis": source_hypothesis,
+            }
+        )
+    scenario, action = split_intent(gold_intent)
+    return {
+        "interpretation_uncertainty_analysis": {
+            "stable_cues": [],
+            "unstable_cues": [],
+            "decision_pivots": [],
+        },
+        "topk_intents": [{"intent": intent} for intent in topk],
+        "intent_elimination": intent_elimination,
+        "final_prediction": {
+            "intent": gold_intent,
+            "scenario": scenario,
+            "action": action,
+        },
+        "slot_grounding": slot_grounding,
+        "final_rationalization": "smoke mode placeholder rationale",
+    }
+
 def load_metadata(path: str) -> Dict[str, List[str]]:
     if not os.path.exists(path):
         return {"scenarios": [], "actions": [], "intents": [], "slot_types": []}
@@ -706,6 +793,8 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--ablation_1to5", action="store_true", help="Run n-best ablation with k=1..5 (nbest mode only).")
+    parser.add_argument("--nbest_values", type=str, default="", help="Comma-separated n-best sizes, e.g. '1,2,3,4,5' (nbest mode only).")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of data-parallel workers (processes).")
     parser.add_argument("--worker_rank", type=int, default=0, help="Rank of this worker in [0, num_workers).")
     parser.add_argument("--append_worker_suffix", action="store_true", help="Append .w{rank}of{num_workers} to output filename.")
@@ -714,6 +803,8 @@ def main():
     parser.add_argument("--save_raw", action="store_true")
     parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
+    parser.add_argument("--smoke", action="store_true", help="Skip model inference and emit deterministic placeholder rationales.")
+    parser.add_argument("--smoke_limit", type=int, default=3, help="Number of samples processed in --smoke mode.")
     args = parser.parse_args()
 
     # torchrun compatibility: auto-map worker/device from distributed env vars.
@@ -734,6 +825,18 @@ def main():
     if args.worker_rank < 0 or args.worker_rank >= args.num_workers:
         print(f"[ERROR] worker_rank must be in [0, {args.num_workers}), got {args.worker_rank}")
         return
+    if args.smoke_limit < 1:
+        print(f"[ERROR] smoke_limit must be >= 1, got {args.smoke_limit}")
+        return
+    if args.mode != "nbest" and (args.ablation_1to5 or args.nbest_values):
+        print("[ERROR] --ablation_1to5 and --nbest_values are supported only in --mode nbest.")
+        return
+
+    try:
+        nbest_schedule = parse_nbest_schedule(args.nbest_values, args.num_hypotheses, args.ablation_1to5)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_path = os.path.join(base_dir, args.input_file) if not os.path.isabs(args.input_file) else args.input_file
@@ -748,8 +851,6 @@ def main():
     output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
     if args.num_workers > 1 and args.append_worker_suffix:
         output_path = append_worker_suffix(output_path, args.worker_rank, args.num_workers)
-
-    rng = random.Random(args.seed)
 
     metadata = load_metadata(metadata_path)
     # clusters/confusing_pairs args are kept for compatibility (currently unused)
@@ -767,6 +868,8 @@ def main():
     items = read_jsonl(input_path)
     if args.limit:
         items = items[: args.limit]
+    if args.smoke:
+        items = items[: args.smoke_limit]
     total_items = len(items)
     items = shard_items_by_worker(items, args.num_workers, args.worker_rank)
     if args.num_workers > 1:
@@ -781,191 +884,214 @@ def main():
         print(f"[ERROR] No input items found for this worker: {input_path}")
         return
 
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    processor = None
+    model = None
+    sr = 16000
+    if not args.smoke:
+        processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        if processor.tokenizer.pad_token is None:
+            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+            processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
 
-    torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
-        args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
-    ).to(args.device)
-    model.eval()
+        torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
+        model = Qwen2AudioForConditionalGeneration.from_pretrained(
+            args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
+        ).to(args.device)
+        model.eval()
+        sr = processor.feature_extractor.sampling_rate
+    else:
+        print(f"[SMOKE] Enabled. Model inference skipped (smoke_limit={args.smoke_limit}).")
 
-    results: List[Dict[str, Any]] = []
-    raw_outputs: List[Any] = []
-    sr = processor.feature_extractor.sampling_rate
+    if args.mode != "nbest":
+        nbest_schedule = [args.num_hypotheses]
+    print(f"[INFO] n-best schedule: {nbest_schedule}")
+    for nbest_k in nbest_schedule:
+        current_output_path = resolve_output_path_for_k(output_path, nbest_k, nbest_schedule)
+        print(f"[INFO] Start generation for nbest_k={nbest_k} -> {current_output_path}")
+        results: List[Dict[str, Any]] = []
+        raw_outputs: List[Any] = []
 
-    for idx, item in enumerate(tqdm(items, desc="Generating rationale", unit="sample")):
-        slurp_id = str(item.get("slurp_id", ""))
-        fallback = slurp_map.get(slurp_id)
-        if fallback:
-            for key in ["scenario", "action", "entities", "tokens", "recordings", "sentence"]:
-                if item.get(key) in (None, "", [], {}):
-                    item[key] = fallback.get(key)
+        for idx, item in enumerate(tqdm(items, desc=f"Generating rationale (k={nbest_k})", unit="sample")):
+            slurp_id = str(item.get("slurp_id", ""))
+            fallback = slurp_map.get(slurp_id)
+            if fallback:
+                for key in ["scenario", "action", "entities", "tokens", "recordings", "sentence"]:
+                    if item.get(key) in (None, "", [], {}):
+                        item[key] = fallback.get(key)
 
-        if args.mode == "nbest" and not item.get("asr_hypotheses"):
-            continue
-
-        scenario = item.get("scenario", "")
-        action = item.get("action", "")
-        gold_intent = compose_intent(scenario, action)
-        input_text = str(item.get("sentence", "") or "")
-        gold_entities = build_entities(item)
-        gold_slot_types = extract_slot_types(gold_entities)
-
-        # n-best texts
-        nbest_texts: List[str] = []
-        if args.mode == "nbest":
-            for h in item.get("asr_hypotheses", [])[: args.num_hypotheses]:
-                if isinstance(h, dict):
-                    txt = h.get("text", "")
-                else:
-                    txt = str(h)
-                if txt:
-                    nbest_texts.append(txt.strip())
-        stable_unstable = summarize_nbest(nbest_texts)
-
-        intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
-
-        slot_candidates = build_full_slot_candidates(
-            reference_slot_types=gold_slot_types,
-            slot_inventory=metadata["slot_types"],
-        )
-
-        audio = None
-        if args.mode == "audio":
-            filename = pick_recording(item.get("recordings", []), args.recording_index)
-            audio_path = resolve_audio_path(audio_root, filename) if filename else None
-            audio = load_audio(audio_path, target_sr=sr) if audio_path else None
-            if audio is None:
+            if args.mode == "nbest" and not item.get("asr_hypotheses"):
                 continue
 
-        if args.mode == "nbest":
-            prompt = build_prompt_nbest(
-                gold_intent=gold_intent,
-                gold_slot_types=gold_slot_types,
-                intent_candidates=intent_candidates,
-                slot_candidates=slot_candidates,
-                nbest_texts=nbest_texts,
-                stable_tokens=stable_unstable["stable"],
-                unstable_tokens=stable_unstable["unstable"],
-                use_fewshot=args.use_fewshot,
-            )
-        else:
-            prompt = build_prompt_audio(
-                gold_intent=gold_intent,
-                gold_slot_types=gold_slot_types,
-                intent_candidates=intent_candidates,
-                slot_candidates=slot_candidates,
-                use_fewshot=args.use_fewshot,
-            )
+            scenario = item.get("scenario", "")
+            action = item.get("action", "")
+            gold_intent = compose_intent(scenario, action)
+            input_text = str(item.get("sentence", "") or "")
+            gold_entities = build_entities(item)
+            gold_slot_types = extract_slot_types(gold_entities)
 
-        gen_kwargs = {
-            "max_new_tokens": args.max_new_tokens,
-            "pad_token_id": processor.tokenizer.pad_token_id,
-        }
-        if args.do_sample:
-            gen_kwargs.update({
-                "do_sample": True,
-                "temperature": args.temperature,
-                "top_p": args.top_p,
-            })
-
-        base_prompt = prompt
-        generated = ""
-        parsed: Optional[Dict[str, Any]] = None
-        topk_valid = False
-        validation_error = ""
-        max_attempts = max(1, args.format_retries + 1)
-        for attempt in range(max_attempts):
-            current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
+            nbest_texts: List[str] = []
             if args.mode == "nbest":
-                user_content = [{"type": "text", "text": current_prompt}]
-                text_input = processor.apply_chat_template(
-                    [{"role": "user", "content": user_content}],
-                    tokenize=False,
-                    add_generation_prompt=True,
+                for h in item.get("asr_hypotheses", [])[:nbest_k]:
+                    txt = h.get("text", "") if isinstance(h, dict) else str(h)
+                    if txt:
+                        nbest_texts.append(txt.strip())
+            stable_unstable = summarize_nbest(nbest_texts)
+
+            intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
+            slot_candidates = build_full_slot_candidates(
+                reference_slot_types=gold_slot_types,
+                slot_inventory=metadata["slot_types"],
+            )
+
+            audio = None
+            if args.mode == "audio":
+                filename = pick_recording(item.get("recordings", []), args.recording_index)
+                audio_path = resolve_audio_path(audio_root, filename) if filename else None
+                audio = load_audio(audio_path, target_sr=sr) if audio_path else None
+                if audio is None:
+                    continue
+
+            if args.mode == "nbest":
+                prompt = build_prompt_nbest(
+                    gold_intent=gold_intent,
+                    gold_slot_types=gold_slot_types,
+                    intent_candidates=intent_candidates,
+                    slot_candidates=slot_candidates,
+                    nbest_texts=nbest_texts,
+                    stable_tokens=stable_unstable["stable"],
+                    unstable_tokens=stable_unstable["unstable"],
+                    use_fewshot=args.use_fewshot,
                 )
-                inputs = processor(text=text_input, return_tensors="pt")
             else:
-                user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
-                text_input = processor.apply_chat_template(
-                    [{"role": "user", "content": user_content}],
-                    tokenize=False,
-                    add_generation_prompt=True,
+                prompt = build_prompt_audio(
+                    gold_intent=gold_intent,
+                    gold_slot_types=gold_slot_types,
+                    intent_candidates=intent_candidates,
+                    slot_candidates=slot_candidates,
+                    use_fewshot=args.use_fewshot,
                 )
-                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
 
-            inputs = {k: v.to(args.device) for k, v in inputs.items()}
-            with torch.no_grad():
-                output_ids = model.generate(**inputs, **gen_kwargs)
-            input_len = inputs["input_ids"].shape[1]
-            generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-            parsed = extract_json(generated)
-            topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
-            if topk_valid:
-                break
+            generated = ""
+            parsed: Optional[Dict[str, Any]] = None
+            topk_valid = False
+            validation_error = ""
 
-        parsed = postprocess_rationale_output(parsed, fallback_intent=gold_intent)
+            if args.smoke:
+                parsed = build_smoke_rationale_output(
+                    gold_intent=gold_intent,
+                    gold_slot_types=gold_slot_types,
+                    intent_candidates=intent_candidates,
+                    nbest_texts=nbest_texts,
+                )
+                generated = json.dumps(parsed, ensure_ascii=False)
+                topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
+            else:
+                gen_kwargs = {
+                    "max_new_tokens": args.max_new_tokens,
+                    "pad_token_id": processor.tokenizer.pad_token_id,
+                }
+                if args.do_sample:
+                    gen_kwargs.update({
+                        "do_sample": True,
+                        "temperature": args.temperature,
+                        "top_p": args.top_p,
+                    })
 
-        result = {
-            "slurp_id": slurp_id,
-            "mode": args.mode,
-            "input_text": input_text,
-            "gold_intent": gold_intent,
-            "gold_scenario": scenario,
-            "gold_action": action,
-            "intent_candidates": intent_candidates,
-            "slot_candidates": slot_candidates,
-            "nbest": nbest_texts if args.mode == "nbest" else [],
-            "nbest_summary": stable_unstable if args.mode == "nbest" else {},
-            "rationale": parsed,
-            "topk_valid": topk_valid,
-            "topk_validation_error": "" if topk_valid else validation_error,
-            "raw_output": generated,
-        }
-        if args.save_raw:
-            result["rationale_raw"] = generated
-        raw_record = {
-            "slurp_id": slurp_id,
-            "input_text": input_text,
-            "gold_intent": gold_intent,
-            "slot_candidates": slot_candidates,
-            "raw_output": generated,
-            "topk_valid": topk_valid,
-            "topk_validation_error": "" if topk_valid else validation_error,
-        }
-        raw_outputs.append(raw_record)
-        if args.output_mode == "full":
-            results.append(result)
+                base_prompt = prompt
+                max_attempts = max(1, args.format_retries + 1)
+                for attempt in range(max_attempts):
+                    current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
+                    if args.mode == "nbest":
+                        user_content = [{"type": "text", "text": current_prompt}]
+                        text_input = processor.apply_chat_template(
+                            [{"role": "user", "content": user_content}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                        inputs = processor(text=text_input, return_tensors="pt")
+                    else:
+                        user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
+                        text_input = processor.apply_chat_template(
+                            [{"role": "user", "content": user_content}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                        inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
 
-        if args.preview and idx < args.preview:
-            print("=" * 80)
-            print(f"[PREVIEW] {idx+1} / {args.preview} | slurp_id={slurp_id} | mode={args.mode}")
-            print("-" * 80)
-            print("PROMPT:")
-            print(prompt)
-            print("-" * 80)
-            print("OUTPUT:")
-            print(generated)
-        if args.limitmode:
-            limit_view = {
+                    inputs = {k: v.to(args.device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        output_ids = model.generate(**inputs, **gen_kwargs)
+                    input_len = inputs["input_ids"].shape[1]
+                    generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                    parsed = extract_json(generated)
+                    topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
+                    if topk_valid:
+                        break
+
+            parsed = postprocess_rationale_output(parsed, fallback_intent=gold_intent)
+
+            result = {
                 "slurp_id": slurp_id,
+                "mode": args.mode,
+                "nbest_k": nbest_k if args.mode == "nbest" else None,
+                "smoke_mode": args.smoke,
+                "input_text": input_text,
+                "gold_intent": gold_intent,
+                "gold_scenario": scenario,
+                "gold_action": action,
+                "intent_candidates": intent_candidates,
+                "slot_candidates": slot_candidates,
+                "nbest": nbest_texts if args.mode == "nbest" else [],
+                "nbest_summary": stable_unstable if args.mode == "nbest" else {},
+                "rationale": parsed,
+                "topk_valid": topk_valid,
+                "topk_validation_error": "" if topk_valid else validation_error,
+                "raw_output": generated,
+            }
+            if args.save_raw:
+                result["rationale_raw"] = generated
+            raw_record = {
+                "slurp_id": slurp_id,
+                "nbest_k": nbest_k if args.mode == "nbest" else None,
+                "smoke_mode": args.smoke,
                 "input_text": input_text,
                 "gold_intent": gold_intent,
                 "slot_candidates": slot_candidates,
-                "prompt": prompt,
                 "raw_output": generated,
+                "topk_valid": topk_valid,
+                "topk_validation_error": "" if topk_valid else validation_error,
             }
-            print(json.dumps(limit_view, ensure_ascii=False, indent=2))
-            print("")
+            raw_outputs.append(raw_record)
+            if args.output_mode == "full":
+                results.append(result)
 
-    if args.output_mode == "full":
-        write_jsonl(output_path, results)
-    else:
-        write_raw_jsonl(output_path, raw_outputs)
-    print(f"Done. Saved to {output_path}")
+            if args.preview and idx < args.preview:
+                print("=" * 80)
+                print(f"[PREVIEW] {idx+1} / {args.preview} | slurp_id={slurp_id} | mode={args.mode} | nbest_k={nbest_k}")
+                print("-" * 80)
+                print("PROMPT:")
+                print(prompt)
+                print("-" * 80)
+                print("OUTPUT:")
+                print(generated)
+            if args.limitmode:
+                limit_view = {
+                    "slurp_id": slurp_id,
+                    "nbest_k": nbest_k if args.mode == "nbest" else None,
+                    "input_text": input_text,
+                    "gold_intent": gold_intent,
+                    "slot_candidates": slot_candidates,
+                    "prompt": prompt,
+                    "raw_output": generated,
+                }
+                print(json.dumps(limit_view, ensure_ascii=False, indent=2))
+                print("")
+
+        if args.output_mode == "full":
+            write_jsonl(current_output_path, results)
+        else:
+            write_raw_jsonl(current_output_path, raw_outputs)
+        print(f"Done. Saved to {current_output_path}")
 
 if __name__ == "__main__":
     main()

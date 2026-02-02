@@ -22,6 +22,11 @@ uv run Experiment_Rationale/2_run_asr_on_audio.py
 uv run Experiment_Rationale/2_run_asr_on_audio.py --limit 10
 ```
 
+**Smoke test (skip Whisper inference, validate I/O path):**
+```bash
+uv run Experiment_Rationale/2_run_asr_on_audio.py --smoke --smoke_limit 3
+```
+
 ### Step 2: Generate Rationale with Qwen2-Audio
 
 Use the rationale generator to connect gold labels with evidence from either n-best text or audio.
@@ -46,6 +51,31 @@ uv run Experiment_Rationale/3_generate_rationale.py \
 **Quick test (limit 10):**
 ```bash
 uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10
+```
+
+**Smoke test (skip model inference, check end-to-end outputs):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --smoke --smoke_limit 3 --output_mode full
+```
+
+**N-best ablation (k=1..5):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest \
+  --ablation_1to5 \
+  --output_file Experiment_Rationale/rationale_output_ablation.jsonl
+```
+
+This writes:
+- `.../rationale_output_ablation.k1.jsonl`
+- `.../rationale_output_ablation.k2.jsonl`
+- `.../rationale_output_ablation.k3.jsonl`
+- `.../rationale_output_ablation.k4.jsonl`
+- `.../rationale_output_ablation.k5.jsonl`
+
+You can also pass custom values with:
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --nbest_values 1,3,5
 ```
 
 **Preview first 10 prompts/outputs:**
