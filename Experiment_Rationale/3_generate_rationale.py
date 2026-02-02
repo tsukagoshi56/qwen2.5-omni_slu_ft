@@ -366,7 +366,7 @@ def build_prompt_nbest(
     nbest_texts: List[str],
     stable_tokens: List[str],
     unstable_tokens: List[str],
-    use_fewshot: bool = True,
+    use_fewshot: bool = False,
 ) -> str:
     intent_note = f"intent_candidates ({len(intent_candidates)}):"
     slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
@@ -501,7 +501,7 @@ def build_prompt_audio(
     gold_slot_types: List[str],
     intent_candidates: List[str],
     slot_candidates: List[str],
-    use_fewshot: bool = True,
+    use_fewshot: bool = False,
 ) -> str:
     intent_note = f"intent_candidates ({len(intent_candidates)}):"
     slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
@@ -659,6 +659,7 @@ def main():
     parser.add_argument("--preview", type=int, default=0, help="Print prompt and output for first N samples.")
     parser.add_argument("--limitmode", action="store_true", help="Print pretty JSON results to stdout.")
     parser.add_argument("--save_raw", action="store_true")
+    parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     args = parser.parse_args()
 
@@ -773,6 +774,7 @@ def main():
                 nbest_texts=nbest_texts,
                 stable_tokens=stable_unstable["stable"],
                 unstable_tokens=stable_unstable["unstable"],
+                use_fewshot=args.use_fewshot,
             )
         else:
             prompt = build_prompt_audio(
@@ -780,6 +782,7 @@ def main():
                 gold_slot_types=gold_slot_types,
                 intent_candidates=intent_candidates,
                 slot_candidates=slot_candidates,
+                use_fewshot=args.use_fewshot,
             )
 
         gen_kwargs = {
