@@ -60,3 +60,48 @@ uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10 --li
 
 Note: The prompt includes a small few-shot example by default to encourage concise rejection reasons.
 Output JSONL defaults to raw model outputs; use `--output_mode full` for metadata JSON.
+
+### Step 2-B: Generate Two-Stage Rationale (New)
+
+`3_generate_rationale_two_stage.py` keeps the original script untouched and adds a two-stage pipeline:
+
+- Stage 1 (candidate generation):  
+  Input = `n-best`, `reference_intent`, `reference_slot_types`, `intent_candidates`, `allowed_slot_types`  
+  Output = exactly 5 intent candidates (`topk_intents`)
+- Stage 2 (candidate pruning + final rationale):  
+  Input = Stage-1 `topk_intents` + the same utterance evidence  
+  Output = elimination reasons, final prediction, slot grounding, final rationale
+
+The final JSON keeps the same top-level style as the original output and additionally stores both stage outputs under:
+- `rationale.candidate_generation`
+- `rationale.candidate_pruning`
+
+**N-best mode (two-stage):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale_two_stage.py \
+  --mode nbest \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output_two_stage.jsonl
+```
+
+**Audio mode (two-stage):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale_two_stage.py \
+  --mode audio \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output_two_stage_audio.jsonl
+```
+
+**Quick test (limit 10):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --limit 10
+```
+
+**Preview prompts/outputs for both stages:**
+```bash
+uv run Experiment_Rationale/3_generate_rationale_two_stage.py --mode nbest --preview 3
+```
+
+**Notes:**
+- Stage format checks and retry logic are applied to both stages.
+- If Stage 1/2 output is invalid after retries, deterministic fallback JSON is produced so processing can continue.
