@@ -189,6 +189,22 @@ uv run Experiment_RationaleFT/audio_text_mix_e2e_re.py \
   --output_dir outputs/qwen_rationale_label_ft
 ```
 
+2-GPU run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
+  Experiment_RationaleFT/audio_text_mix_e2e_re.py \
+  --train_file /lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_train.jsonl \
+  --eval_file /lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_devel.jsonl \
+  --audio_dir /lustre/home/71200138/INTERSPEECH/experiment1/slurp/audio/slurp_real \
+  --output_dir outputs/qwen_rationale_label_ft_2gpu \
+  --batch_size 8
+```
+
+Notes:
+- `--batch_size` is per GPU.
+- Distributed prediction files are merged automatically on rank 0.
+
 This script:
 - uses audio input with prompt context from `candidates` + `rationale_text`
 - trains on final SLU labels (`scenario`, `action`, `entities`)

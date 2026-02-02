@@ -1042,11 +1042,12 @@ class CustomTrainer(Trainer):
 
 
 class SampleGenerationCallback(TrainerCallback):
-    def __init__(self, eval_items, processor, model, num_samples: int = 3):
+    def __init__(self, eval_items, processor, model, num_samples: int = 3, max_new_tokens: int = 4096):
         self.eval_items = eval_items
         self.processor = processor
         self.model = model
         self.num_samples = num_samples
+        self.max_new_tokens = max_new_tokens
 
     def on_evaluate(self, args, state, control, **kwargs):
         if args.process_index != 0:
@@ -1086,7 +1087,7 @@ class SampleGenerationCallback(TrainerCallback):
                 inputs = {k: v.to(device) for k, v in inputs.items()}
 
                 with torch.no_grad():
-                    output_ids = self.model.generate(**inputs, max_new_tokens=128)
+                    output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
 
                 input_len = inputs["input_ids"].shape[1]
                 generated_text = self.processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
@@ -1162,6 +1163,7 @@ def _run_batch_inference(
     device,
     sr: int,
     is_audio: bool,
+    max_new_tokens: int,
 ) -> List[Dict[str, Any]]:
     texts: List[str] = []
     audios: List[Any] = []
@@ -1202,7 +1204,7 @@ def _run_batch_inference(
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=128,
+            max_new_tokens=max_new_tokens,
             use_cache=True,
             pad_token_id=processor.tokenizer.pad_token_id,
         )
@@ -1238,7 +1240,17 @@ def _run_batch_inference(
     return results
 
 
-def run_distributed_inference(model, processor, items, output_path, device, rank, world_size, batch_size=1):
+def run_distributed_inference(
+    model,
+    processor,
+    items,
+    output_path,
+    device,
+    rank,
+    world_size,
+    batch_size=1,
+    max_new_tokens: int = 4096,
+):
     model.eval()
 
     my_items = items[rank::world_size]
@@ -1269,6 +1281,7 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                     device=device,
                     sr=sr,
                     is_audio=True,
+                    max_new_tokens=max_new_tokens,
                 )
             )
         except Exception as exc:
@@ -1286,6 +1299,7 @@ def run_distributed_inference(model, processor, items, output_path, device, rank
                     device=device,
                     sr=sr,
                     is_audio=False,
+                    max_new_tokens=max_new_tokens,
                 )
             )
         except Exception as exc:
@@ -1447,8 +1461,8 @@ def main():
     parser.add_argument(
         "--test_file",
         type=str,
-        default=None,
-        help="If omitted, eval_file is used.",
+        default="slurp/dataset/slurp/test.jsonl",
+        help="Path to test jsonl.",
     )
     parser.add_argument(
         "--audio_dir",
@@ -1463,6 +1477,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--max_new_tokens", type=int, default=4096)
+    parser.add_argument(
+        "--export_label_eval",
+        action="store_true",
+        help="Also export label-only predictions and metrics after inference.",
+    )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
         "--no_text_fallback_when_audio_missing",
@@ -1488,8 +1508,6 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
-    if args.test_file is None:
-        args.test_file = args.eval_file
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if local_rank != -1:
@@ -1501,6 +1519,8 @@ def main():
         rank = 0
         world_size = 1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if rank == 0:
+        logger.info("Using test_file: %s", args.test_file)
 
     if args.smoke:
         if rank == 0:
@@ -1584,6 +1604,7 @@ def main():
                 processor=processor,
                 model=model,
                 num_samples=3,
+                max_new_tokens=args.max_new_tokens,
             )
         )
 
@@ -1606,7 +1627,8 @@ def main():
         args.audio_dir,
         add_text_only=False,
         max_samples=test_max_samples,
-        allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+        # Follow original script behavior for test: audio-only (no text fallback).
+        allow_text_fallback_when_audio_missing=False,
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
@@ -1622,12 +1644,13 @@ def main():
         rank=rank,
         world_size=world_size,
         batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
     )
 
     if world_size > 1:
         dist.barrier()
 
-    if rank == 0:
+    if rank == 0 and args.export_label_eval:
         label_only_path = os.path.join(args.output_dir, "prediction_labels_only.jsonl")
         save_label_only_predictions(output_jsonl, label_only_path)
 
@@ -1640,6 +1663,8 @@ def main():
         logger.info("Saved full predictions: %s", output_jsonl)
         logger.info("Saved label-only predictions: %s", label_only_path)
         logger.info("Saved metrics: %s", metrics_path)
+    elif rank == 0:
+        logger.info("Saved predictions: %s", output_jsonl)
 
     if world_size > 1:
         dist.barrier()
