@@ -349,13 +349,34 @@ def _normalize_loaded_obj_to_records(obj: Any) -> List[Dict[str, Any]]:
             maybe_list = obj.get(key)
             if isinstance(maybe_list, list):
                 return [x for x in maybe_list if isinstance(x, dict)]
+
+        # If this already looks like a single record, do not flatten dict values.
+        record_like_keys = {
+            "id",
+            "slurp_id",
+            "filename",
+            "file",
+            "audio_filename",
+            "audio_file",
+            "candidates",
+            "final",
+            "rationale_text",
+            "meta",
+            "recordings",
+        }
+        if any(k in obj for k in record_like_keys):
+            return [obj]
+
         # Handle map-style datasets: {"1234": {...}, "1235": {...}, ...}
-        dict_values = [v for v in obj.values() if isinstance(v, dict)]
-        if dict_values and (
-            (len(obj) >= 3 and len(dict_values) >= int(0.8 * len(obj)))
-            or all(str(k).isdigit() for k in obj.keys())
+        # Keep this strict to avoid breaking one-sample dict records.
+        keys = list(obj.keys())
+        values = list(obj.values())
+        if (
+            len(obj) >= 2
+            and all(isinstance(v, dict) for v in values)
+            and all(re.fullmatch(r"[0-9]{1,8}", str(k)) for k in keys)
         ):
-            return dict_values
+            return [v for v in values if isinstance(v, dict)]
         return [obj]
     if isinstance(obj, list):
         results: List[Dict[str, Any]] = []
