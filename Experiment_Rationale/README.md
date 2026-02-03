@@ -24,7 +24,7 @@ uv run Experiment_Rationale/2_run_asr_on_audio.py --limit 10
 
 **Smoke test (run full Whisper with reduced samples):**
 ```bash
-uv run Experiment_Rationale/2_run_asr_on_audio.py --smoke --smoke_limit 3
+uv run Experiment_Rationale/2_run_asr_on_audio.py --smoke
 ```
 
 ### Step 2: Generate Rationale with Qwen2-Audio
@@ -55,7 +55,7 @@ uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10
 
 **Smoke test (run full rationale generation with reduced samples):**
 ```bash
-uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --smoke --smoke_limit 3 --output_mode full
+uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --smoke --output_mode full
 ```
 
 **N-best ablation (k=1..5):**

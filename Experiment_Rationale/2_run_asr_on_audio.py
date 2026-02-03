@@ -155,7 +155,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--smoke", action="store_true", help="Run full ASR with a reduced number of samples for quick smoke checks.")
-    parser.add_argument("--smoke_limit", type=int, default=3, help="Number of samples to process in --smoke mode.")
+    parser.add_argument("--smoke_limit", type=int, default=100, help="Number of samples to process in --smoke mode.")
 
     args = parser.parse_args()
     set_reproducible(args.seed)

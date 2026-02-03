@@ -752,7 +752,7 @@ def main():
     parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     parser.add_argument("--smoke", action="store_true", help="Run full rationale generation with reduced sample count for smoke checks.")
-    parser.add_argument("--smoke_limit", type=int, default=3, help="Number of samples processed in --smoke mode.")
+    parser.add_argument("--smoke_limit", type=int, default=100, help="Number of samples processed in --smoke mode.")
     args = parser.parse_args()
 
     # torchrun compatibility: auto-map worker/device from distributed env vars.
