@@ -30,6 +30,11 @@ STOPWORDS = {
     "what","which","who","whom","when","where","why","how","with","as","about","up","down",
 }
 
+def debug_log(enabled: bool, message: str):
+    if enabled:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[DEBUG {ts}] {message}", flush=True)
+
 def read_jsonl(path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(path):
         return []
@@ -769,6 +774,8 @@ def main():
     parser.add_argument("--api_timeout", type=float, default=120.0, help="Timeout (seconds) per API request in API mode.")
     parser.add_argument("--api_retries", type=int, default=2, help="Retry count for API request failures/timeouts in API mode.")
     parser.add_argument("--api_retry_sleep", type=float, default=2.0, help="Sleep seconds between API retries in API mode.")
+    parser.add_argument("--debug", action="store_true", help="Print detailed progress logs for debugging.")
+    parser.add_argument("--debug_every", type=int, default=1, help="Log every N samples when --debug is enabled.")
     parser.add_argument("--local", action="store_true", help="Use local Qwen2-Audio model instead of DeepSeek API.")
     args = parser.parse_args()
 
@@ -795,6 +802,9 @@ def main():
         return
     if args.mode != "nbest" and (args.ablation_1to5 or args.nbest_values):
         print("[ERROR] --ablation_1to5 and --nbest_values are supported only in --mode nbest.")
+        return
+    if args.debug_every < 1:
+        print(f"[ERROR] debug_every must be >= 1, got {args.debug_every}")
         return
 
     try:
@@ -879,6 +889,14 @@ def main():
             args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
         ).to(args.device)
         model.eval()
+    debug_log(
+        args.debug,
+        (
+            f"setup_done use_api={use_api} mode={args.mode} items={len(items)} "
+            f"num_workers={args.num_workers} worker_rank={args.worker_rank} "
+            f"api_timeout={args.api_timeout} api_retries={args.api_retries}"
+        ),
+    )
 
     # Get sampling rate (if using local model with audio) or default
     sr = 16000
@@ -902,6 +920,11 @@ def main():
 
         for idx, item in enumerate(tqdm(items, desc=f"Generating rationale (k={nbest_k})", unit="sample")):
             slurp_id = str(item.get("slurp_id", ""))
+            should_debug_sample = args.debug and (idx % args.debug_every == 0)
+            debug_log(
+                should_debug_sample,
+                f"sample_start idx={idx} slurp_id={slurp_id} nbest_k={nbest_k}",
+            )
             fallback = slurp_map.get(slurp_id)
             if fallback:
                 for key in ["scenario", "action", "entities", "tokens", "recordings", "sentence"]:
@@ -909,6 +932,7 @@ def main():
                         item[key] = fallback.get(key)
 
             if args.mode == "nbest" and not item.get("asr_hypotheses"):
+                debug_log(should_debug_sample, "skip_sample reason=no_asr_hypotheses")
                 continue
 
             scenario = item.get("scenario", "")
@@ -938,7 +962,15 @@ def main():
                 audio_path = resolve_audio_path(audio_root, filename) if filename else None
                 audio = load_audio(audio_path, target_sr=sr) if audio_path else None
                 if audio is None:
+                    debug_log(
+                        should_debug_sample,
+                        f"skip_sample reason=audio_load_failed filename={filename} audio_path={audio_path}",
+                    )
                     continue
+                debug_log(
+                    should_debug_sample,
+                    f"audio_loaded filename={filename} audio_path={audio_path} samples={len(audio)} sr={sr}",
+                )
 
             if args.mode == "nbest":
                 prompt = build_prompt_nbest(
@@ -959,6 +991,14 @@ def main():
                     slot_candidates=slot_candidates,
                     use_fewshot=args.use_fewshot,
                 )
+            debug_log(
+                should_debug_sample,
+                (
+                    f"prompt_ready prompt_chars={len(prompt)} "
+                    f"nbest_count={len(nbest_texts)} intent_candidates={len(intent_candidates)} "
+                    f"slot_candidates={len(slot_candidates)}"
+                ),
+            )
 
             generated = ""
             parsed: Optional[Dict[str, Any]] = None
@@ -981,10 +1021,22 @@ def main():
             max_attempts = max(1, args.format_retries + 1)
             for attempt in range(max_attempts):
                 current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
+                debug_log(
+                    should_debug_sample,
+                    f"format_attempt {attempt+1}/{max_attempts} prompt_chars={len(current_prompt)}",
+                )
                 if use_api:
                     # API Generation
                     max_api_attempts = max(1, args.api_retries + 1)
                     for api_attempt in range(max_api_attempts):
+                        request_started_at = time.time()
+                        debug_log(
+                            should_debug_sample,
+                            (
+                                f"api_request_start format_attempt={attempt+1}/{max_attempts} "
+                                f"api_attempt={api_attempt+1}/{max_api_attempts} timeout={args.api_timeout}s"
+                            ),
+                        )
                         try:
                             response = client.chat.completions.create(
                                 model=args.model_name_or_path, # e.g. "deepseek-chat" or "deepseek-reasoner"
@@ -998,8 +1050,18 @@ def main():
                                 timeout=args.api_timeout,
                             )
                             generated = response.choices[0].message.content
+                            elapsed = time.time() - request_started_at
+                            debug_log(
+                                should_debug_sample,
+                                f"api_request_done elapsed={elapsed:.2f}s output_chars={len(generated or '')}",
+                            )
                             break
                         except Exception as e:
+                            elapsed = time.time() - request_started_at
+                            debug_log(
+                                should_debug_sample,
+                                f"api_request_error elapsed={elapsed:.2f}s error={type(e).__name__}: {e}",
+                            )
                             if api_attempt + 1 < max_api_attempts:
                                 print(
                                     f"[WARN] API call failed (attempt {api_attempt+1}/{max_api_attempts}): {e} "
@@ -1041,6 +1103,10 @@ def main():
 
                 parsed = extract_json(generated)
                 topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
+                debug_log(
+                    should_debug_sample,
+                    f"format_validation topk_valid={topk_valid} reason='{validation_error}'",
+                )
                 if topk_valid:
                     break
 
@@ -1113,11 +1179,22 @@ def main():
                 }
                 print(json.dumps(limit_view, ensure_ascii=False, indent=2))
                 print("")
+            debug_log(
+                should_debug_sample,
+                (
+                    f"sample_done slurp_id={slurp_id} topk_valid={topk_valid} "
+                    f"output_chars={len(generated or '')}"
+                ),
+            )
 
         if args.output_mode == "full":
             write_jsonl(current_output_path, results)
         else:
             write_raw_jsonl(current_output_path, raw_outputs)
+        debug_log(
+            args.debug,
+            f"write_done path={current_output_path} records={len(results) if args.output_mode == 'full' else len(raw_outputs)}",
+        )
         print(f"Done. Saved to {current_output_path}")
 
 if __name__ == "__main__":
