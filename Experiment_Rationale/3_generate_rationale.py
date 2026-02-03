@@ -5,6 +5,7 @@ import math
 import os
 import random
 import re
+import time
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -765,6 +766,9 @@ def main():
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     parser.add_argument("--smoke", action="store_true", help="Run full rationale generation with reduced sample count for smoke checks.")
     parser.add_argument("--smoke_limit", type=int, default=100, help="Number of samples processed in --smoke mode.")
+    parser.add_argument("--api_timeout", type=float, default=120.0, help="Timeout (seconds) per API request in API mode.")
+    parser.add_argument("--api_retries", type=int, default=2, help="Retry count for API request failures/timeouts in API mode.")
+    parser.add_argument("--api_retry_sleep", type=float, default=2.0, help="Sleep seconds between API retries in API mode.")
     parser.add_argument("--local", action="store_true", help="Use local Qwen2-Audio model instead of DeepSeek API.")
     args = parser.parse_args()
 
@@ -882,6 +886,10 @@ def main():
         sr = processor.feature_extractor.sampling_rate
     if args.smoke:
         print(f"[SMOKE] Enabled. Full model inference runs with reduced samples (smoke_limit={args.smoke_limit}).")
+        if args.preview == 0:
+            args.preview = min(5, len(items))
+            if args.preview > 0:
+                print(f"[SMOKE] Auto preview enabled: first {args.preview} samples (input/prompt/output).")
 
     if args.mode != "nbest":
         nbest_schedule = [args.num_hypotheses]
@@ -975,21 +983,36 @@ def main():
                 current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
                 if use_api:
                     # API Generation
-                    try:
-                        response = client.chat.completions.create(
-                            model=args.model_name_or_path, # e.g. "deepseek-chat" or "deepseek-reasoner"
-                            messages=[
-                                {"role": "system", "content": "You are a helpful assistant."},
-                                {"role": "user", "content": current_prompt}
-                            ],
-                            stream=False,
-                            temperature=args.temperature if args.do_sample else 0.0,
-                            max_tokens=args.max_new_tokens,
-                        )
-                        generated = response.choices[0].message.content
-                    except Exception as e:
-                        print(f"[ERROR] API call failed: {e}")
-                        generated = "{}"
+                    max_api_attempts = max(1, args.api_retries + 1)
+                    for api_attempt in range(max_api_attempts):
+                        try:
+                            response = client.chat.completions.create(
+                                model=args.model_name_or_path, # e.g. "deepseek-chat" or "deepseek-reasoner"
+                                messages=[
+                                    {"role": "system", "content": "You are a helpful assistant."},
+                                    {"role": "user", "content": current_prompt}
+                                ],
+                                stream=False,
+                                temperature=args.temperature if args.do_sample else 0.0,
+                                max_tokens=args.max_new_tokens,
+                                timeout=args.api_timeout,
+                            )
+                            generated = response.choices[0].message.content
+                            break
+                        except Exception as e:
+                            if api_attempt + 1 < max_api_attempts:
+                                print(
+                                    f"[WARN] API call failed (attempt {api_attempt+1}/{max_api_attempts}): {e} "
+                                    f"-> retry in {args.api_retry_sleep}s"
+                                )
+                                if args.api_retry_sleep > 0:
+                                    time.sleep(args.api_retry_sleep)
+                            else:
+                                print(
+                                    "[ERROR] API call failed after retries: "
+                                    f"{e}. Try increasing --api_timeout or lowering --max_new_tokens."
+                                )
+                                generated = "{}"
                 
                 else:
                     # Local Qwen2-Audio Generation
@@ -1059,8 +1082,19 @@ def main():
                 results.append(result)
 
             if args.preview and idx < args.preview:
+                preview_input = {
+                    "slurp_id": slurp_id,
+                    "mode": args.mode,
+                    "nbest_k": nbest_k if args.mode == "nbest" else None,
+                    "input_text": input_text,
+                    "gold_intent": gold_intent,
+                    "nbest": nbest_texts if args.mode == "nbest" else [],
+                }
                 print("=" * 80)
                 print(f"[PREVIEW] {idx+1} / {args.preview} | slurp_id={slurp_id} | mode={args.mode} | nbest_k={nbest_k}")
+                print("-" * 80)
+                print("INPUT:")
+                print(json.dumps(preview_input, ensure_ascii=False, indent=2))
                 print("-" * 80)
                 print("PROMPT:")
                 print(prompt)
