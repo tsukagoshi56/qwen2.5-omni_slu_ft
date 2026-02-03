@@ -9,8 +9,9 @@ Input:
   - One JSONL file path only.
 
 Output:
-  - A NEW JSON file (never overwrites input file).
-  - Auto path example: input.final_extracted.json
+  - A NEW JSONL file (never overwrites input file).
+  - Auto path example: input.final_extracted.jsonl
+  - Keeps each row format, and writes extracted labels into scenario/action/entities.
 """
 
 import argparse
@@ -211,12 +212,12 @@ def extract_label_from_text(raw_text: str) -> Tuple[Dict[str, Any], str]:
 
 def resolve_output_path(input_path: str) -> str:
     root, _ = os.path.splitext(input_path)
-    candidate = f"{root}.final_extracted.json"
+    candidate = f"{root}.final_extracted.jsonl"
     if not os.path.exists(candidate):
         return candidate
     idx = 1
     while True:
-        candidate = f"{root}.final_extracted.{idx}.json"
+        candidate = f"{root}.final_extracted.{idx}.jsonl"
         if not os.path.exists(candidate):
             return candidate
         idx += 1
@@ -247,79 +248,61 @@ def main() -> None:
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input JSONL not found: {input_path}")
 
-    extracted_rows: List[Dict[str, Any]] = []
     total = 0
     extracted = 0
+    updated = 0
+    output_path = resolve_output_path(input_path)
 
-    with open(input_path, "r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
+    with open(input_path, "r", encoding="utf-8") as fin, open(output_path, "w", encoding="utf-8") as fout:
+        for line_no, line in enumerate(fin, start=1):
+            stripped = line.strip()
+            if not stripped:
                 continue
             total += 1
             try:
-                row = json.loads(line)
-            except Exception:
-                extracted_rows.append(
-                    {
-                        "line_no": line_no,
-                        "scenario": "",
-                        "action": "",
-                        "entities": [],
-                        "method": "invalid_jsonl_row",
-                    }
-                )
-                continue
+                row = json.loads(stripped)
+            except Exception as exc:
+                raise ValueError(f"Invalid JSONL row at line {line_no}: {exc}") from exc
 
             if not isinstance(row, dict):
-                extracted_rows.append(
-                    {
-                        "line_no": line_no,
-                        "scenario": "",
-                        "action": "",
-                        "entities": [],
-                        "method": "row_not_dict",
-                    }
-                )
-                continue
+                raise ValueError(f"JSONL row at line {line_no} is not a JSON object.")
 
-            raw_text, raw_field = detect_raw_text_field(row)
+            raw_text, _ = detect_raw_text_field(row)
             if not raw_text:
                 raw_text = json.dumps(row, ensure_ascii=False)
-                raw_field = "row_dump_fallback"
 
-            label_obj, method = extract_label_from_text(raw_text)
-            if is_nonempty_label(label_obj):
+            label_obj, _ = extract_label_from_text(raw_text)
+            has_new_label = is_nonempty_label(label_obj)
+            if has_new_label:
                 extracted += 1
 
-            out = {
-                "line_no": line_no,
-                "id": pick_first_nonempty(row.get("id"), row.get("sample_id"), row.get("uid")),
-                "slurp_id": pick_first_nonempty(row.get("slurp_id")),
-                "scenario": label_obj.get("scenario", ""),
-                "action": label_obj.get("action", ""),
-                "entities": label_obj.get("entities", []),
-                "method": method,
-                "raw_field": raw_field,
-            }
-            extracted_rows.append(out)
+            out_row = dict(row)
+            old_scenario = str(out_row.get("scenario", "")).strip()
+            old_action = str(out_row.get("action", "")).strip()
+            old_entities = out_row.get("entities", [])
 
-    output_path = resolve_output_path(input_path)
-    output_obj = {
-        "input_jsonl": input_path,
-        "output_json": output_path,
-        "total_rows": total,
-        "extracted_rows": extracted,
-        "rows": extracted_rows,
-    }
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output_obj, f, ensure_ascii=False, indent=2)
+            if label_obj.get("scenario"):
+                out_row["scenario"] = label_obj["scenario"]
+            if label_obj.get("action"):
+                out_row["action"] = label_obj["action"]
+            if has_new_label:
+                out_row["entities"] = label_obj.get("entities", [])
+            elif "entities" not in out_row:
+                out_row["entities"] = parse_entities(old_entities)
+
+            new_scenario = str(out_row.get("scenario", "")).strip()
+            new_action = str(out_row.get("action", "")).strip()
+            new_entities = out_row.get("entities", [])
+            if (old_scenario != new_scenario) or (old_action != new_action) or (old_entities != new_entities):
+                updated += 1
+
+            fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
 
     print(f"[DONE] input: {input_path}")
-    print(f"[DONE] output: {output_path}")
+    print(f"[DONE] output_jsonl: {output_path}")
     print(f"[DONE] extracted: {extracted}/{total}")
+    print(f"[DONE] updated_rows: {updated}/{total}")
 
 
 if __name__ == "__main__":
     main()
-
