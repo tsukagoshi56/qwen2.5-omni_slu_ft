@@ -8,14 +8,23 @@ The process involves generating n-best ASR hypotheses from audio and then using 
 
 ### Step 1: Run ASR to Generate N-best Hypotheses
 
-This script runs Whisper (`openai/whisper-large-v3-turbo` by default) to perform ASR on the audio files you provide. It uses the `recordings[].file` field from the SLURP jsonl and resolves it under `--audio_dir` (e.g., `slurp/slurp_real`). Audio decoding uses `ffmpeg_read`, matching the official evaluation script. It generates a JSONL file containing the n-best transcription hypotheses for each audio file. You can select which recording to use with `--recording_index` (default: 0). Set `--language` to control Whisper's decoding language. For diversity, you can use `--diversity_method group_beam` (default) with `--diversity_penalty` or `--diversity_method sampling_pool --sampling_pool 100` to sample and select diverse n-best; if group beam is unavailable, the script can fall back to sampling_pool when provided. By default it restricts to 2 GPUs via `--cuda_devices 0,1`.
+This script runs Whisper (`openai/whisper-large-v3-turbo` by default) to perform ASR on the audio files you provide. It uses the `recordings[].file` field from the SLURP jsonl and resolves it under `--audio_dir` (e.g., `slurp/audio/slurp_real`). Audio decoding uses `ffmpeg_read`, matching the official evaluation script. It generates a JSONL file containing the n-best transcription hypotheses for each audio file. You can select which recording to use with `--recording_index` (default: 0). Set `--language` to control Whisper's decoding language. For diversity, you can use `--diversity_method group_beam` (default) with `--diversity_penalty` or `--diversity_method sampling_pool --sampling_pool 100` to sample and select diverse n-best; if group beam is unavailable, the script can fall back to sampling_pool when provided.
 
-**Command:**
+**Command (Single GPU):**
 Run from the repository root (e.g., `qwen2 2.5-omni_slu_ft`). Errors are printed to the console by default.
 
 ```bash
 uv run Experiment_Rationale/2_run_asr_on_audio.py
 ```
+
+**Multi-GPU Execution (Fast):**
+To speed up inference, use `torchrun` to parallelize across multiple GPUs. The script automatically splits the workload and merges the results into a single file at the end.
+
+```bash
+# Example: Run on 4 GPUs
+torchrun --nproc_per_node=4 Experiment_Rationale/2_run_asr_on_audio.py
+```
+*(Note: If using `uv`, you might need `uv run torchrun ...` or ensure torchrun is in your path)*
 
 **Quick test (process only 10 files):**
 ```bash

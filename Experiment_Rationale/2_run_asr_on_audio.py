@@ -6,6 +6,7 @@ import argparse
 import random
 import numpy as np
 import torch
+import torch.distributed as dist
 import librosa
 from tqdm import tqdm
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -163,26 +164,42 @@ def main():
         print(f"[ERROR] --smoke_limit must be >= 1, got {args.smoke_limit}")
         return
 
+    # Distributed Setup
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank != -1:
+        dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device_str = f"cuda:{local_rank}"
+    else:
+        rank = 0
+        world_size = 1
+        device_str = args.device
+    
+    device = torch.device(device_str)
+
     # パス設定
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     audio_dir_path = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     output_file_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
     slurp_test_path = os.path.join(base_dir, args.slurp_test_file) if not os.path.isabs(args.slurp_test_file) else args.slurp_test_file
 
-    print(f"=== Running Whisper with Sampling (do_sample=True) ===")
-    print(f"Model: {args.model_name_or_path}")
-    print(f"Temp: {args.temperature}, Top-p: {args.top_p}, Pool Size: {args.sampling_pool_size}")
-    if args.smoke:
-        print(f"[SMOKE] Enabled. Full Whisper inference runs with reduced samples (smoke_limit={args.smoke_limit}).")
+    if rank == 0:
+        print(f"=== Running Whisper with Sampling (do_sample=True) ===")
+        print(f"World Size: {world_size}")
+        print(f"Model: {args.model_name_or_path}")
+        print(f"Temp: {args.temperature}, Top-p: {args.top_p}, Pool Size: {args.sampling_pool_size}")
+        if args.smoke:
+            print(f"[SMOKE] Enabled. Full Whisper inference runs with reduced samples (smoke_limit={args.smoke_limit}).")
 
     # モデル読み込み
     try:
         processor = WhisperProcessor.from_pretrained(args.model_name_or_path)
         model = WhisperForConditionalGeneration.from_pretrained(
             args.model_name_or_path,
-            torch_dtype=torch.float16 if "cuda" in args.device else torch.float32,
+            torch_dtype=torch.float16 if "cuda" in device_str else torch.float32,
             low_cpu_mem_usage=True
-        ).to(args.device)
+        ).to(device)
         model.eval()
     except Exception as e:
         print(f"Error loading model: {e}")
@@ -222,17 +239,19 @@ def main():
     if args.smoke:
         tasks = tasks[:args.smoke_limit]
     
-    print(f"Processing {len(tasks)} audio files...")
+    # Rankごとのデータ分割
+    my_tasks = tasks[rank::world_size]
+    print(f"[Rank {rank}] Processing {len(my_tasks)} / {len(tasks)} audio files...")
 
     results = []
 
-    for slurp_id, audio_path, meta_entry in tqdm(tasks):
+    for slurp_id, audio_path, meta_entry in tqdm(my_tasks, disable=(rank!=0)):
         audio_data = load_audio(audio_path)
         if audio_data is None:
             continue
 
-        inputs = processor(audio_data, sampling_rate=16000, return_tensors="pt").to(args.device)
-        if "cuda" in args.device:
+        inputs = processor(audio_data, sampling_rate=16000, return_tensors="pt").to(device)
+        if "cuda" in device_str:
             inputs["input_features"] = inputs["input_features"].half()
 
         try:
@@ -276,13 +295,39 @@ def main():
         except Exception as e:
             print(f"Error processing {slurp_id}: {e}")
 
-    # 保存
-    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
-    with open(output_file_path, "w", encoding="utf-8") as f:
+    # Rankごとの保存
+    rank_output_path = f"{output_file_path}.rank{rank}"
+    os.makedirs(os.path.dirname(rank_output_path), exist_ok=True)
+    with open(rank_output_path, "w", encoding="utf-8") as f:
         for item in results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    
+    print(f"[Rank {rank}] Saved to {rank_output_path}")
 
-    print(f"Done. Saved to {output_file_path}")
+    # マージ処理 (Rank 0のみ)
+    if world_size > 1:
+        dist.barrier()
+        if rank == 0:
+            print("Merging rank outputs...")
+            all_results = []
+            for r in range(world_size):
+                r_path = f"{output_file_path}.rank{r}"
+                if os.path.exists(r_path):
+                    with open(r_path, "r", encoding="utf-8") as rf:
+                        for line in rf:
+                            all_results.append(line.strip())
+                    os.remove(r_path) # クリーンアップ
+            
+            with open(output_file_path, "w", encoding="utf-8") as f:
+                for line in all_results:
+                    f.write(line + "\n")
+            print(f"All done. Merged file saved to {output_file_path}")
+        dist.barrier()
+        dist.destroy_process_group()
+    else:
+        # Single GPU / No distributed processing -> Just move rank file to final
+        os.rename(rank_output_path, output_file_path)
+        print(f"Done. Saved to {output_file_path}")
 
 if __name__ == "__main__":
     main()
