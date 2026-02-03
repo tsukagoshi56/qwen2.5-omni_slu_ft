@@ -1581,8 +1581,8 @@ def main():
     if args.smoke:
         if rank == 0:
             logger.info("SMOKE MODE ON")
-        # Increase smoke learn data to 200, reduce eval to 10
-        train_max_samples = 200
+        # Increase smoke learn data to 2000, keep eval small
+        train_max_samples = 2000
         eval_max_samples = 10
         args.num_train_epochs = 1
 
@@ -1665,7 +1665,7 @@ def main():
     if world_size > 1:
         dist.barrier()
 
-    test_max_samples = 2000 if args.smoke else None
+    test_max_samples = 10 if args.smoke else None
     if rank == 0 and args.smoke:
         logger.info("Loading only %d test items (smoke).", test_max_samples)
 
