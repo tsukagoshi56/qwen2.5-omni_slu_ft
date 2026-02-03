@@ -753,6 +753,8 @@ def main():
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
     parser.add_argument("--num_candidates", type=int, default=5, help="(Compatibility) ignored: all slot types are always used as candidates.")
+    parser.add_argument("--intent_candidate_limit", type=int, default=0, help="Use top-k intent candidates to shorten prompts (0 means use full inventory).")
+    parser.add_argument("--slot_candidate_limit", type=int, default=0, help="Use top-k slot candidates to shorten prompts (0 means use full inventory).")
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -769,6 +771,7 @@ def main():
     parser.add_argument("--save_raw", action="store_true")
     parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
+    parser.add_argument("--skip_format_validation", action="store_true", help="Skip topk_intents format validation/retry for faster API runs.")
     parser.add_argument("--smoke", action="store_true", help="Run full rationale generation with reduced sample count for smoke checks.")
     parser.add_argument("--smoke_limit", type=int, default=100, help="Number of samples processed in --smoke mode.")
     parser.add_argument("--api_timeout", type=float, default=120.0, help="Timeout (seconds) per API request in API mode.")
@@ -799,6 +802,18 @@ def main():
         return
     if args.smoke_limit < 1:
         print(f"[ERROR] smoke_limit must be >= 1, got {args.smoke_limit}")
+        return
+    if args.intent_candidate_limit < 0:
+        print(f"[ERROR] intent_candidate_limit must be >= 0, got {args.intent_candidate_limit}")
+        return
+    if args.slot_candidate_limit < 0:
+        print(f"[ERROR] slot_candidate_limit must be >= 0, got {args.slot_candidate_limit}")
+        return
+    if (not args.skip_format_validation) and args.intent_candidate_limit and args.intent_candidate_limit < 5:
+        print(
+            "[ERROR] intent_candidate_limit must be >= 5 when format validation is enabled "
+            "(topk_intents requires exactly 5 unique intents)."
+        )
         return
     if args.mode != "nbest" and (args.ablation_1to5 or args.nbest_values):
         print("[ERROR] --ablation_1to5 and --nbest_values are supported only in --mode nbest.")
@@ -839,6 +854,7 @@ def main():
         print(f"[WARN] Could not build intents from splits. Falling back to metadata intents ({len(intent_inventory)}).")
 
     slurp_map = load_slurp_map(split_paths + [slurp_path])
+    rng = random.Random(args.seed)
 
     items = read_jsonl(input_path)
     if args.limit:
@@ -954,11 +970,28 @@ def main():
                         nbest_texts.append(txt.strip())
             stable_unstable = summarize_nbest(nbest_texts)
 
-            intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
-            slot_candidates = build_full_slot_candidates(
-                reference_slot_types=gold_slot_types,
-                slot_inventory=metadata["slot_types"],
-            )
+            if args.intent_candidate_limit > 0:
+                intent_candidates = select_candidates_topk(
+                    gold=gold_intent,
+                    candidates=intent_inventory,
+                    k=args.intent_candidate_limit,
+                    rng=rng,
+                )
+            else:
+                intent_candidates = build_full_intent_candidates(gold_intent, intent_inventory)
+
+            if args.slot_candidate_limit > 0:
+                slot_candidates = select_slot_types_topk(
+                    gold_types=gold_slot_types,
+                    slot_types=metadata["slot_types"],
+                    k=args.slot_candidate_limit,
+                    rng=rng,
+                )
+            else:
+                slot_candidates = build_full_slot_candidates(
+                    reference_slot_types=gold_slot_types,
+                    slot_inventory=metadata["slot_types"],
+                )
 
             audio = None
             if args.mode == "audio":
@@ -1113,12 +1146,16 @@ def main():
                     generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
 
                 parsed = extract_json(generated)
-                topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
+                if args.skip_format_validation:
+                    topk_valid = isinstance(parsed, dict)
+                    validation_error = "" if topk_valid else "output is not valid JSON object"
+                else:
+                    topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
                 debug_log(
                     should_debug_sample,
                     f"format_validation topk_valid={topk_valid} reason='{validation_error}'",
                 )
-                if topk_valid:
+                if topk_valid or args.skip_format_validation:
                     break
 
             parsed = postprocess_rationale_output(parsed, fallback_intent=gold_intent)
