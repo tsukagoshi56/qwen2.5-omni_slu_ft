@@ -1651,20 +1651,9 @@ def main():
         args=training_args,
         train_dataset=MixedDataset(train_items),
         eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor, debug=args.smoke),
+        data_collator=SmartCollator(processor, debug=False),
         tokenizer=processor.tokenizer,
     )
-
-    if len(eval_items) > 0:
-        trainer.add_callback(
-            SampleGenerationCallback(
-                eval_items=eval_items,
-                processor=processor,
-                model=model,
-                num_samples=3,
-                max_new_tokens=args.max_new_tokens,
-            )
-        )
 
     trainer.train()
 
