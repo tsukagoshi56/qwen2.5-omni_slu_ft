@@ -870,7 +870,7 @@ def main():
             return
         
         API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-        API_ENDPOINT = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        API_ENDPOINT = os.environ.get("API_ENDPOINT") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
         if not API_KEY:
             print("[ERROR] DEEPSEEK_API_KEY environment variable is not set.")
