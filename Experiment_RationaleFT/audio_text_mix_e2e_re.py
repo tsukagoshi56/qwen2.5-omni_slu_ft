@@ -1668,6 +1668,7 @@ def main():
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         report_to="none",
+        disable_tqdm=True,
     )
 
     trainer = CustomTrainer(
