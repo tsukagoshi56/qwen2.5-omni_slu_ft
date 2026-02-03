@@ -134,7 +134,7 @@ def main():
     parser.add_argument("--language", type=str, default="en")
     
     # Data arguments
-    parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
+    parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
     parser.add_argument("--slurp_test_file", type=str, default="slurp/dataset/slurp/test.jsonl")
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/real_asr_sampling_data.jsonl")
     parser.add_argument("--recording_index", type=int, default=0)
