@@ -599,37 +599,62 @@ def build_items_from_rationale_jsonl(
                 continue
             parsed_rows += 1
 
-            sample_id = extract_sample_id(data, fallback_index=parsed_rows)
-            filename = extract_filename(data)
-            if filename:
-                rows_with_filename += 1
-
-            candidates = data.get("candidates", [])
-            if not isinstance(candidates, list):
-                candidates = []
-            candidates = [candidate_to_text(c) for c in candidates]
-            candidates = [c for c in candidates if c]
-
+            # Extract messages and audios first
             user_text, assistant_text = extract_messages_texts(data)
-            if not candidates:
-                candidates = extract_candidates_from_user_text(user_text)
-
-            transcript = candidates[0] if candidates else ""
-            rationale_text = normalize_rationale_text(data.get("rationale_text"))
-            if not rationale_text and user_text:
-                rationale_text = user_text
-
-            target_obj = extract_target_obj(data)
-            if not target_obj.get("scenario") and not target_obj.get("action") and not target_obj.get("entities"):
-                target_obj = extract_target_obj_from_assistant(data)
+            raw_audios = data.get("audios")
             
-            final_json = assistant_text.strip() if assistant_text else json.dumps(target_obj, ensure_ascii=False)
-            
-            # Construct Chain-of-Thought Target: Candidates -> Rationale -> SLU
-            nbest_block = "ASR n-best hypotheses:\n" + format_nbest(candidates)
-            rationale_block = "Rationale:\n" + (rationale_text if rationale_text else "(none)")
-            target_str = f"{nbest_block}\n{rationale_block}\nSLU:{final_json}"
+            # Check if this is a pre-formatted record (has messages and audios)
+            is_preformatted = (
+                isinstance(raw_audios, list) 
+                and len(raw_audios) > 0 
+                and assistant_text 
+                and "candidates" not in data  # Assuming pre-formatted data might not have top-level candidates/final
+            )
 
+            # If pre-formatted, trust the messages/audios directly
+            if is_preformatted or (raw_audios and assistant_text):
+                 # Use the assistant text EXACTLY as the target
+                target_str = assistant_text
+                # Use the first audio path
+                filename = raw_audios[0]
+                
+                # Try to resolve generic info for logging/eval (optional)
+                sample_id = extract_sample_id(data, fallback_index=parsed_rows)
+                candidates = [] # Not needed for training if target is pre-built
+                rationale_text = "" 
+                target_obj = extract_target_obj_from_assistant(data) # Attempt to parse back for eval metrics
+                transcript = ""
+            else:
+                # --- Original Logic for Raw/Component Data ---
+                sample_id = extract_sample_id(data, fallback_index=parsed_rows)
+                filename = extract_filename(data)
+                
+                candidates = data.get("candidates", [])
+                if not isinstance(candidates, list):
+                    candidates = []
+                candidates = [candidate_to_text(c) for c in candidates]
+                candidates = [c for c in candidates if c]
+
+                if not candidates:
+                    candidates = extract_candidates_from_user_text(user_text)
+
+                transcript = candidates[0] if candidates else ""
+                rationale_text = normalize_rationale_text(data.get("rationale_text"))
+                if not rationale_text and user_text:
+                    rationale_text = user_text
+
+                target_obj = extract_target_obj(data)
+                if not target_obj.get("scenario") and not target_obj.get("action") and not target_obj.get("entities"):
+                    target_obj = extract_target_obj_from_assistant(data)
+                
+                final_json = assistant_text.strip() if assistant_text else json.dumps(target_obj, ensure_ascii=False)
+                
+                # Construct Chain-of-Thought Target: Candidates -> Rationale -> SLU
+                nbest_block = "ASR n-best hypotheses:\n" + format_nbest(candidates)
+                rationale_block = "Rationale:\n" + (rationale_text if rationale_text else "(none)")
+                target_str = f"{nbest_block}\n{rationale_block}\nSLU:{final_json}"
+            
+            # Common file resolution
             if filename:
                 audio_path, searched_paths = resolve_audio_path(
                     audio_dir,
@@ -1528,7 +1553,7 @@ def main():
     parser.add_argument(
         "--train_file",
         type=str,
-        default="/lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_train.jsonl",
+        default="/experiments/training_file_make/ASR_cot_data_train.jsonl",
     )
     parser.add_argument(
         "--eval_file",
