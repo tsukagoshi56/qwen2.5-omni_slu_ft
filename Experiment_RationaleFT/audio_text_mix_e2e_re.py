@@ -88,19 +88,8 @@ def candidate_to_text(value: Any) -> str:
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     if item.get("prompt_text"):
         return str(item["prompt_text"])
-
-    candidates = item.get("candidates", []) or []
-    rationale_text = item.get("rationale_text", "") or ""
-
-    blocks = []
-    # n-best
-    blocks.append("ASR n-best hypotheses:\n" + format_nbest(candidates))
-    # Rationale
-    blocks.append("Rationale:\n" + (rationale_text if rationale_text else "(none)"))
-    # SLU marker
-    blocks.append("SLU:")
     
-    return "\n\n".join(blocks)
+    return "Predict the final SLU label."
 
 
 # ==============================================================================
@@ -633,7 +622,13 @@ def build_items_from_rationale_jsonl(
             target_obj = extract_target_obj(data)
             if not target_obj.get("scenario") and not target_obj.get("action") and not target_obj.get("entities"):
                 target_obj = extract_target_obj_from_assistant(data)
-            target_str = assistant_text.strip() if assistant_text else json.dumps(target_obj, ensure_ascii=False)
+            
+            final_json = assistant_text.strip() if assistant_text else json.dumps(target_obj, ensure_ascii=False)
+            
+            # Construct Chain-of-Thought Target: Candidates -> Rationale -> SLU
+            nbest_block = "ASR n-best hypotheses:\n" + format_nbest(candidates)
+            rationale_block = "Rationale:\n" + (rationale_text if rationale_text else "(none)")
+            target_str = f"{nbest_block}\n{rationale_block}\nSLU:{final_json}"
 
             if filename:
                 audio_path, searched_paths = resolve_audio_path(
