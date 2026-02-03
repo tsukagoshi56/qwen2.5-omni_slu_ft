@@ -320,6 +320,21 @@ def build_test_items_from_slurp(test_jsonl: str, audio_dir: str, max_samples: Op
     return items
 
 
+def force_slu_test_mode(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    forced: List[Dict[str, Any]] = []
+    for item in items:
+        transcript = str(item.get("transcript", "") or "")
+        candidates = item.get("candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+        rationale_text = str(item.get("rationale_text", "") or "")
+        new_item = dict(item)
+        new_item["task_tag"] = "<slu>"
+        new_item["prompt_text"] = _build_slu_prompt(transcript, candidates, rationale_text)
+        forced.append(new_item)
+    return forced
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_file", type=str, required=True, help="Rationale train JSONL.")
@@ -441,6 +456,9 @@ def main():
         dist.barrier()
 
     test_items = build_test_items_from_slurp(args.test_file, args.audio_dir, max_samples=test_max_samples)
+    test_items = force_slu_test_mode(test_items)
+    if rank == 0:
+        logger.info("Test inference mode is forced to <slu> (%d samples).", len(test_items))
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
     base.run_distributed_inference(
         model=model,
@@ -473,4 +491,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
