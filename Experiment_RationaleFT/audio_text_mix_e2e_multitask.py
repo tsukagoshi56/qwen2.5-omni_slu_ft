@@ -14,13 +14,28 @@ import argparse
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration, TrainingArguments
 
-from Experiment_RationaleFT import audio_text_mix_e2e_re as base
+try:
+    from Experiment_RationaleFT import audio_text_mix_e2e_re as base
+except ModuleNotFoundError:
+    # Fallback for executions launched from inside subdirectories.
+    this_dir = Path(__file__).resolve().parent
+    repo_root = this_dir.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from Experiment_RationaleFT import audio_text_mix_e2e_re as base
+    except ModuleNotFoundError:
+        if str(this_dir) not in sys.path:
+            sys.path.insert(0, str(this_dir))
+        import audio_text_mix_e2e_re as base
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
