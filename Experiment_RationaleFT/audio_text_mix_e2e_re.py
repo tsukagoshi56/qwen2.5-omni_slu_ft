@@ -612,7 +612,7 @@ def build_items_from_rationale_jsonl(
                 context_desc = "ASR n-best context"
 
             TASK_INSTRUCTION = (
-                f"Analyze the provided audio and {context_desc} to predict the correct SLU label (scenario, action, entities). "
+                f"Analyze the provided audio and {context_desc} to predict the SLU label (scenario, action, entities) with a rationale. "
                 "Output the result in JSON format."
             )
             if user_text:
