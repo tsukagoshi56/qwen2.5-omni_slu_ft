@@ -46,15 +46,16 @@ It outputs a JSONL file with short, structured rationales.
 
 ```bash
 export DEEPSEEK_API_KEY=your_api_key
-# Optional (default: https://api.deepseek.com)
-export DEEPSEEK_BASE_URL=https://api.deepseek.com
+# Optional (priority: API_ENDPOINT > DEEPSEEK_BASE_URL > default)
+export API_ENDPOINT=https://api.deepseek.com
+# export DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
 **N-best mode with DeepSeek (default):**
 ```bash
 uv run Experiment_Rationale/3_generate_rationale.py \
   --mode nbest \
-  --model_name_or_path deepseek-chat \
+  --model_name_or_path deepseek-r1 \
   --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
   --output_file Experiment_Rationale/rationale_output.jsonl
 ```
@@ -63,10 +64,24 @@ uv run Experiment_Rationale/3_generate_rationale.py \
 ```bash
 uv run Experiment_Rationale/3_generate_rationale.py \
   --mode audio \
-  --model_name_or_path deepseek-chat \
+  --model_name_or_path deepseek-r1 \
   --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
   --output_file Experiment_Rationale/rationale_output_audio.jsonl
 ```
+
+**API parallel run (recommended for speed, no GPU required):**
+`torchrun` launches multiple workers, and each worker sends API requests in parallel.
+```bash
+uv run torchrun --standalone --nproc_per_node=8 \
+  Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest \
+  --append_worker_suffix \
+  --output_file Experiment_Rationale/rationale_output_parallel_api.jsonl
+
+cat Experiment_Rationale/rationale_output_parallel_api.w*of8.jsonl \
+  > Experiment_Rationale/rationale_output_parallel_api_merged.jsonl
+```
+Tip: If you hit API rate limits/timeouts, reduce `--nproc_per_node` (e.g., 8 -> 4).
 
 **Local Qwen2-Audio mode (`--local`):**
 ```bash
