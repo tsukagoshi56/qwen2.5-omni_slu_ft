@@ -132,10 +132,17 @@ def normalize_label_obj(obj: Dict[str, Any]) -> Dict[str, Any]:
     action = str(obj.get("action", "")).strip()
     entities = parse_entities(obj.get("entities", []))
 
-    if not scenario and not action:
-        intent = obj.get("intent")
-        if isinstance(intent, str):
-            scenario, action = split_intent(intent)
+    def missing_or_error(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        return (not text) or text in {"error", "err", "unknown", "none", "null", "n/a", "na"}
+
+    intent = obj.get("intent")
+    if isinstance(intent, str) and (missing_or_error(scenario) or missing_or_error(action)):
+        intent_scenario, intent_action = split_intent(intent)
+        if missing_or_error(scenario) and intent_scenario:
+            scenario = intent_scenario
+        if missing_or_error(action) and intent_action:
+            action = intent_action
 
     return {
         "scenario": scenario,
@@ -204,11 +211,17 @@ def extract_label_from_patterns(raw_text: str) -> Dict[str, Any]:
 
     scenario = extract_last_group(r'"scenario"\s*[:=]\s*"([^"]+)"', search_text)
     if not scenario:
+        scenario = extract_last_group(r"'scenario'\s*[:=]\s*'([^']+)'", search_text)
+    if not scenario:
         scenario = extract_last_group(r"scenario\s*[:=]\s*([A-Za-z0-9_:-]+)", search_text)
     action = extract_last_group(r'"action"\s*[:=]\s*"([^"]+)"', search_text)
     if not action:
+        action = extract_last_group(r"'action'\s*[:=]\s*'([^']+)'", search_text)
+    if not action:
         action = extract_last_group(r"action\s*[:=]\s*([A-Za-z0-9_:-]+)", search_text)
     intent = extract_last_group(r'"intent"\s*[:=]\s*"([^"]+)"', search_text)
+    if not intent:
+        intent = extract_last_group(r"'intent'\s*[:=]\s*'([^']+)'", search_text)
     if not intent:
         intent = extract_last_group(r"intent\s*[:=]\s*([A-Za-z0-9_:-]+)", search_text)
 
@@ -329,6 +342,8 @@ def main() -> None:
     total = 0
     extracted = 0
     updated = 0
+    unresolved = 0
+    unresolved_rows: List[Dict[str, Any]] = []
     output_path = resolve_output_path(input_path)
 
     with open(input_path, "r", encoding="utf-8") as fin, open(output_path, "w", encoding="utf-8") as fout:
@@ -389,6 +404,20 @@ def main() -> None:
                 if is_missing_or_error(out_row.get("action")) and patch_label.get("action"):
                     out_row["action"] = patch_label["action"]
 
+            if is_missing_or_error(out_row.get("scenario")) or is_missing_or_error(out_row.get("action")):
+                unresolved += 1
+                if len(unresolved_rows) < 200:
+                    unresolved_rows.append(
+                        {
+                            "line_no": line_no,
+                            "id": pick_first_nonempty(out_row.get("id"), out_row.get("sample_id"), out_row.get("uid")),
+                            "slurp_id": pick_first_nonempty(out_row.get("slurp_id")),
+                            "scenario": str(out_row.get("scenario", "")).strip(),
+                            "action": str(out_row.get("action", "")).strip(),
+                            "raw_head": str(raw_text)[:500],
+                        }
+                    )
+
             new_scenario = str(out_row.get("scenario", "")).strip()
             new_action = str(out_row.get("action", "")).strip()
             new_entities = out_row.get("entities", [])
@@ -401,6 +430,13 @@ def main() -> None:
     print(f"[DONE] output_jsonl: {output_path}")
     print(f"[DONE] extracted: {extracted}/{total}")
     print(f"[DONE] updated_rows: {updated}/{total}")
+    print(f"[DONE] unresolved_rows: {unresolved}/{total}")
+    if unresolved_rows:
+        unresolved_path = output_path.replace(".jsonl", ".unresolved.jsonl")
+        with open(unresolved_path, "w", encoding="utf-8") as f:
+            for row in unresolved_rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(f"[DONE] unresolved_preview: {unresolved_path} (up to 200 rows)")
 
 
 if __name__ == "__main__":
