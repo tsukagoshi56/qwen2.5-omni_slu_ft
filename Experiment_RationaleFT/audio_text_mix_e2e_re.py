@@ -856,10 +856,10 @@ class SmartCollator:
     max_length: int = 512
     ignore_index: int = -100
     debug: bool = False
-    _has_printed: bool = False
+    _print_count: int = 0
 
     def __post_init__(self):
-        self._has_printed = False
+        self._print_count = 0
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0:
@@ -908,11 +908,11 @@ class SmartCollator:
             text_input = self._build_audio_chat(item)
             full_text = text_input + item["target"] + eos_token
 
-            if self.debug and not self._has_printed:
+            if self.debug and self._print_count < 5:
                 print(f"\n[DEBUG Visualizer] Audio Sample ID: {item.get('id')}")
                 print(f"[DEBUG Visualizer] Input Prompt:\n{text_input}")
                 print(f"[DEBUG Visualizer] Target:\n{item['target']}")
-                self._has_printed = True
+                self._print_count += 1
 
             inputs = self.processor(
                 text=full_text,
@@ -984,11 +984,11 @@ class SmartCollator:
             text_input = self._build_text_chat(item)
             full_text = text_input + item["target"] + eos_token
 
-            if self.debug and not self._has_printed:
+            if self.debug and self._print_count < 5:
                 print(f"\n[DEBUG Visualizer] Text Sample ID: {item.get('id')}")
                 print(f"[DEBUG Visualizer] Input Prompt:\n{text_input}")
                 print(f"[DEBUG Visualizer] Target:\n{item['target']}")
-                self._has_printed = True
+                self._print_count += 1
 
             inputs = self.processor.tokenizer(full_text, return_tensors="pt")
             prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
@@ -1646,7 +1646,7 @@ def main():
         args=training_args,
         train_dataset=MixedDataset(train_items),
         eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor, debug=False),
+        data_collator=SmartCollator(processor, debug=args.smoke),
         tokenizer=processor.tokenizer,
     )
 
