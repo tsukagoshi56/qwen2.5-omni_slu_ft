@@ -742,7 +742,7 @@ def main():
     parser.add_argument("--confusing_pairs_file", type=str, default="Experiment_3/slurp_confusing_pairs.json")
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/rationale_output.jsonl")
     parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write compact records with raw outputs; full: write full metadata JSON.")
-    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
+    parser.add_argument("--model_name_or_path", type=str, default="deepseek-chat")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
@@ -765,7 +765,7 @@ def main():
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     parser.add_argument("--smoke", action="store_true", help="Run full rationale generation with reduced sample count for smoke checks.")
     parser.add_argument("--smoke_limit", type=int, default=100, help="Number of samples processed in --smoke mode.")
-    parser.add_argument("--use_api", action="store_true", help="Use DeepSeek API instead of local model.")
+    parser.add_argument("--local", action="store_true", help="Use local Qwen2-Audio model instead of DeepSeek API.")
     args = parser.parse_args()
 
     # torchrun compatibility: auto-map worker/device from distributed env vars.
@@ -848,8 +848,9 @@ def main():
     model = None
     processor = None
     client = None
+    use_api = not args.local
 
-    if args.use_api:
+    if use_api:
         if OpenAI is None:
             print("[ERROR] 'openai' package is required for API mode. Install it via 'pip install openai'.")
             return
@@ -971,8 +972,7 @@ def main():
             max_attempts = max(1, args.format_retries + 1)
             for attempt in range(max_attempts):
                 current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
-                
-                if args.use_api:
+                if use_api:
                     # API Generation
                     try:
                         response = client.chat.completions.create(
