@@ -22,7 +22,7 @@ uv run Experiment_Rationale/2_run_asr_on_audio.py
 uv run Experiment_Rationale/2_run_asr_on_audio.py --limit 10
 ```
 
-**Smoke test (skip Whisper inference, validate I/O path):**
+**Smoke test (run full Whisper with reduced samples):**
 ```bash
 uv run Experiment_Rationale/2_run_asr_on_audio.py --smoke --smoke_limit 3
 ```
@@ -53,7 +53,7 @@ uv run Experiment_Rationale/3_generate_rationale.py \
 uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --limit 10
 ```
 
-**Smoke test (skip model inference, check end-to-end outputs):**
+**Smoke test (run full rationale generation with reduced samples):**
 ```bash
 uv run Experiment_Rationale/3_generate_rationale.py --mode nbest --smoke --smoke_limit 3 --output_mode full
 ```

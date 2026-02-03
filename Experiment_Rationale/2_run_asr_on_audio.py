@@ -124,35 +124,6 @@ def load_slurp_metadata(slurp_file: str) -> dict:
                 continue
     return metadata
 
-def build_smoke_hypotheses(meta_entry: dict, num_hypotheses: int) -> list:
-    """Build deterministic fake hypotheses for quick end-to-end smoke checks."""
-    sentence = str(meta_entry.get("sentence", "") or "").strip()
-    if not sentence:
-        sentence = "smoke test utterance"
-    words = sentence.split()
-    variants = [sentence]
-    if len(words) > 1:
-        variants.append(" ".join(words[:-1]))
-        variants.append(" ".join(words[1:]))
-    variants.append(sentence.lower())
-    variants.append(f"{sentence} please")
-
-    selected = []
-    seen = set()
-    max_hyp = max(1, int(num_hypotheses))
-    for cand in variants:
-        text = cand.strip()
-        key = normalize_text(text)
-        if not text or key in seen:
-            continue
-        seen.add(key)
-        selected.append({"text": text})
-        if len(selected) >= max_hyp:
-            break
-    while len(selected) < max_hyp:
-        selected.append({"text": sentence})
-    return selected
-
 # --- メイン処理 ---
 
 def main():
@@ -183,7 +154,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--smoke", action="store_true", help="Skip Whisper inference and emit deterministic dummy hypotheses.")
+    parser.add_argument("--smoke", action="store_true", help="Run full ASR with a reduced number of samples for quick smoke checks.")
     parser.add_argument("--smoke_limit", type=int, default=3, help="Number of samples to process in --smoke mode.")
 
     args = parser.parse_args()
@@ -202,23 +173,20 @@ def main():
     print(f"Model: {args.model_name_or_path}")
     print(f"Temp: {args.temperature}, Top-p: {args.top_p}, Pool Size: {args.sampling_pool_size}")
     if args.smoke:
-        print(f"[SMOKE] Enabled. Model inference is skipped (smoke_limit={args.smoke_limit}).")
+        print(f"[SMOKE] Enabled. Full Whisper inference runs with reduced samples (smoke_limit={args.smoke_limit}).")
 
     # モデル読み込み
-    processor = None
-    model = None
-    if not args.smoke:
-        try:
-            processor = WhisperProcessor.from_pretrained(args.model_name_or_path)
-            model = WhisperForConditionalGeneration.from_pretrained(
-                args.model_name_or_path,
-                torch_dtype=torch.float16 if "cuda" in args.device else torch.float32,
-                low_cpu_mem_usage=True
-            ).to(args.device)
-            model.eval()
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return
+    try:
+        processor = WhisperProcessor.from_pretrained(args.model_name_or_path)
+        model = WhisperForConditionalGeneration.from_pretrained(
+            args.model_name_or_path,
+            torch_dtype=torch.float16 if "cuda" in args.device else torch.float32,
+            low_cpu_mem_usage=True
+        ).to(args.device)
+        model.eval()
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return
 
     # データ準備
     slurp_metadata = load_slurp_metadata(slurp_test_path)
@@ -231,7 +199,7 @@ def main():
                 filename = recs[args.recording_index].get("file")
                 if filename:
                     path = os.path.join(audio_dir_path, filename)
-                    if args.smoke or os.path.exists(path):
+                    if os.path.exists(path):
                         tasks.append((slurp_id, path, entry))
     
     if not tasks:
@@ -253,16 +221,6 @@ def main():
     results = []
 
     for slurp_id, audio_path, meta_entry in tqdm(tasks):
-        if args.smoke:
-            output_item = meta_entry.copy()
-            output_item["slurp_id"] = slurp_id
-            output_item["asr_hypotheses"] = build_smoke_hypotheses(meta_entry, args.num_hypotheses)
-            output_item["smoke_mode"] = True
-            if args.save_raw:
-                output_item["asr_raw_hypotheses"] = list(output_item["asr_hypotheses"])
-            results.append(output_item)
-            continue
-
         audio_data = load_audio(audio_path)
         if audio_data is None:
             continue
@@ -302,6 +260,7 @@ def main():
             
             output_item = meta_entry.copy()
             output_item["slurp_id"] = slurp_id
+            output_item["smoke_mode"] = bool(args.smoke)
             output_item["asr_hypotheses"] = hypotheses
             if args.save_raw:
                 output_item["asr_raw_hypotheses"] = [{"text": t.strip()} for t in raw_texts]

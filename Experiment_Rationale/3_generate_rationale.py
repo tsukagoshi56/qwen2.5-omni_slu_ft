@@ -178,58 +178,6 @@ def resolve_output_path_for_k(output_path: str, k: int, schedule: List[int]) -> 
     root, ext = os.path.splitext(output_path)
     return f"{root}.k{k}{ext or '.jsonl'}"
 
-def build_smoke_rationale_output(
-    gold_intent: str,
-    gold_slot_types: List[str],
-    intent_candidates: List[str],
-    nbest_texts: List[str],
-) -> Dict[str, Any]:
-    ordered_intents: List[str] = []
-    if gold_intent:
-        ordered_intents.append(gold_intent)
-    for cand in intent_candidates:
-        if cand and cand not in ordered_intents:
-            ordered_intents.append(cand)
-        if len(ordered_intents) >= 5:
-            break
-    topk = ordered_intents[:5]
-    intent_elimination = [
-        {
-            "intent": intent,
-            "reason": "smoke mode placeholder rationale for I/O validation",
-        }
-        for intent in topk
-        if intent != gold_intent
-    ][:4]
-    source_hypothesis = "interpretation_1" if nbest_texts else "none"
-    slot_grounding = []
-    for slot_type in gold_slot_types:
-        slot_grounding.append(
-            {
-                "slot_type": slot_type,
-                "supported": bool(nbest_texts),
-                "best_span": nbest_texts[0] if nbest_texts else "",
-                "source_hypothesis": source_hypothesis,
-            }
-        )
-    scenario, action = split_intent(gold_intent)
-    return {
-        "interpretation_uncertainty_analysis": {
-            "stable_cues": [],
-            "unstable_cues": [],
-            "decision_pivots": [],
-        },
-        "topk_intents": [{"intent": intent} for intent in topk],
-        "intent_elimination": intent_elimination,
-        "final_prediction": {
-            "intent": gold_intent,
-            "scenario": scenario,
-            "action": action,
-        },
-        "slot_grounding": slot_grounding,
-        "final_rationalization": "smoke mode placeholder rationale",
-    }
-
 def load_metadata(path: str) -> Dict[str, List[str]]:
     if not os.path.exists(path):
         return {"scenarios": [], "actions": [], "intents": [], "slot_types": []}
@@ -803,7 +751,7 @@ def main():
     parser.add_argument("--save_raw", action="store_true")
     parser.add_argument("--use_fewshot", action="store_true", help="Enable built-in few-shot exemplars in prompts.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
-    parser.add_argument("--smoke", action="store_true", help="Skip model inference and emit deterministic placeholder rationales.")
+    parser.add_argument("--smoke", action="store_true", help="Run full rationale generation with reduced sample count for smoke checks.")
     parser.add_argument("--smoke_limit", type=int, default=3, help="Number of samples processed in --smoke mode.")
     args = parser.parse_args()
 
@@ -884,23 +832,19 @@ def main():
         print(f"[ERROR] No input items found for this worker: {input_path}")
         return
 
-    processor = None
-    model = None
-    sr = 16000
-    if not args.smoke:
-        processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-            processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
 
-        torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
-        model = Qwen2AudioForConditionalGeneration.from_pretrained(
-            args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
-        ).to(args.device)
-        model.eval()
-        sr = processor.feature_extractor.sampling_rate
-    else:
-        print(f"[SMOKE] Enabled. Model inference skipped (smoke_limit={args.smoke_limit}).")
+    torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
+    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+        args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
+    ).to(args.device)
+    model.eval()
+    sr = processor.feature_extractor.sampling_rate
+    if args.smoke:
+        print(f"[SMOKE] Enabled. Full model inference runs with reduced samples (smoke_limit={args.smoke_limit}).")
 
     if args.mode != "nbest":
         nbest_schedule = [args.num_hypotheses]
@@ -976,57 +920,47 @@ def main():
             topk_valid = False
             validation_error = ""
 
-            if args.smoke:
-                parsed = build_smoke_rationale_output(
-                    gold_intent=gold_intent,
-                    gold_slot_types=gold_slot_types,
-                    intent_candidates=intent_candidates,
-                    nbest_texts=nbest_texts,
-                )
-                generated = json.dumps(parsed, ensure_ascii=False)
+            gen_kwargs = {
+                "max_new_tokens": args.max_new_tokens,
+                "pad_token_id": processor.tokenizer.pad_token_id,
+            }
+            if args.do_sample:
+                gen_kwargs.update({
+                    "do_sample": True,
+                    "temperature": args.temperature,
+                    "top_p": args.top_p,
+                })
+
+            base_prompt = prompt
+            max_attempts = max(1, args.format_retries + 1)
+            for attempt in range(max_attempts):
+                current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
+                if args.mode == "nbest":
+                    user_content = [{"type": "text", "text": current_prompt}]
+                    text_input = processor.apply_chat_template(
+                        [{"role": "user", "content": user_content}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                    inputs = processor(text=text_input, return_tensors="pt")
+                else:
+                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
+                    text_input = processor.apply_chat_template(
+                        [{"role": "user", "content": user_content}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                    inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+
+                inputs = {k: v.to(args.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    output_ids = model.generate(**inputs, **gen_kwargs)
+                input_len = inputs["input_ids"].shape[1]
+                generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                parsed = extract_json(generated)
                 topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
-            else:
-                gen_kwargs = {
-                    "max_new_tokens": args.max_new_tokens,
-                    "pad_token_id": processor.tokenizer.pad_token_id,
-                }
-                if args.do_sample:
-                    gen_kwargs.update({
-                        "do_sample": True,
-                        "temperature": args.temperature,
-                        "top_p": args.top_p,
-                    })
-
-                base_prompt = prompt
-                max_attempts = max(1, args.format_retries + 1)
-                for attempt in range(max_attempts):
-                    current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
-                    if args.mode == "nbest":
-                        user_content = [{"type": "text", "text": current_prompt}]
-                        text_input = processor.apply_chat_template(
-                            [{"role": "user", "content": user_content}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                        inputs = processor(text=text_input, return_tensors="pt")
-                    else:
-                        user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
-                        text_input = processor.apply_chat_template(
-                            [{"role": "user", "content": user_content}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                        inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
-
-                    inputs = {k: v.to(args.device) for k, v in inputs.items()}
-                    with torch.no_grad():
-                        output_ids = model.generate(**inputs, **gen_kwargs)
-                    input_len = inputs["input_ids"].shape[1]
-                    generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-                    parsed = extract_json(generated)
-                    topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
-                    if topk_valid:
-                        break
+                if topk_valid:
+                    break
 
             parsed = postprocess_rationale_output(parsed, fallback_intent=gold_intent)
 
