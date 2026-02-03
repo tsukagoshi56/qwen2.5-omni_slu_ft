@@ -650,7 +650,13 @@ def build_items_from_rationale_jsonl(
                 candidates = [] # Not needed for training if target is pre-built
                 rationale_text = "" 
                 target_obj = extract_target_obj_from_assistant(data) # Attempt to parse back for eval metrics
-                transcript = ""
+                
+                # Prioritize explicit transcript fields
+                transcript = pick_first_nonempty(
+                    data.get("transcript"),
+                    data.get("text"),
+                    data.get("sentence"),
+                )
             else:
                 # --- Original Logic for Raw/Component Data ---
                 sample_id = extract_sample_id(data, fallback_index=parsed_rows)
@@ -665,7 +671,13 @@ def build_items_from_rationale_jsonl(
                 if not candidates:
                     candidates = extract_candidates_from_user_text(user_text)
 
-                transcript = candidates[0] if candidates else ""
+                # Prioritize explicit transcript fields, fallback to candidates[0]
+                transcript = pick_first_nonempty(
+                    data.get("transcript"),
+                    data.get("text"),
+                    data.get("sentence"),
+                    candidates[0] if candidates else ""
+                )
                 rationale_text = normalize_rationale_text(data.get("rationale_text"))
                 if not rationale_text and user_text:
                     rationale_text = user_text
@@ -1158,9 +1170,7 @@ class SampleGenerationCallback(TrainerCallback):
 
                 logger.info("-" * 60)
                 logger.info("File:       %s", item.get("file"))
-                logger.info("N-best[0]:  %s", (item.get("candidates") or [""])[0])
-                logger.info("Rationale:  %s", (item.get("rationale_text") or "")[:120])
-                logger.info("Target:     %s", item.get("target"))
+                logger.info("Transcript: %s", item.get("transcript"))
                 logger.info("Prediction: %s", clean_pred)
             except Exception as exc:
                 logger.error("Failed to generate sample for %s: %s", item.get("file"), exc)
@@ -1209,34 +1219,32 @@ def parse_prediction_label(raw_output: str) -> Dict[str, Any]:
         return default_obj
 
     # Extraction Logic
+    # 1. Check for "final" wrapper FIRST (To handle: "final": {"intent": "..."})
+    final_obj = parsed.get("final")
+    if isinstance(final_obj, dict):
+        parsed = final_obj
+
     scenario = parsed.get("scenario")
     action = parsed.get("action")
-    entities = parsed.get("entities")
+    entities = parsed.get("entities") or []
 
-    # Check for "final" wrapper
-    if not scenario and not action:
-        final_obj = parsed.get("final")
-        if isinstance(final_obj, dict):
-            scenario = final_obj.get("scenario")
-            action = final_obj.get("action")
-            entities = final_obj.get("entities", [])
-            # If inside final there is "intent"
-            if not scenario and not action:
-                intent = final_obj.get("intent")
-                if isinstance(intent, str) and "_" in intent:
-                    # User confirmed action may contain _, so split by FIRST underscore for scenario_action
-                    scenario, action = intent.split("_", 1)
-    
-    # Check for top-level "intent"
+    # 2. If scenario/action are missing, try to parse "intent"
     if not scenario and not action:
         intent = parsed.get("intent")
-        if isinstance(intent, str) and "_" in intent:
-             scenario, action = intent.split("_", 1)
+        if isinstance(intent, str):
+            intent = intent.strip()
+            if "_" in intent:
+                # Split by FIRST underscore
+                scenario, action = intent.split("_", 1)
+            else:
+                # Fallback: keep scenario empty, use intent as action
+                scenario = ""
+                action = intent
 
     return {
         "scenario": str(scenario or "").strip(),
         "action": str(action or "").strip(),
-        "entities": parse_entities(entities or []),
+        "entities": parse_entities(entities),
     }
 
 
@@ -1604,7 +1612,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--learning_rate", type=float, default=3e-5)
+    parser.add_argument("--learning_rate", type=float, default=4e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
