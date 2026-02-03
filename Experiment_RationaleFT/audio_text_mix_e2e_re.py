@@ -573,14 +573,6 @@ def build_items_from_rationale_jsonl(
     allow_text_fallback_when_audio_missing: bool = True,
     print_audio_search_paths: bool = False,
     audio_search_print_limit: int = 100,
-def build_items_from_rationale_jsonl(
-    jsonl_path: str,
-    audio_dir: str,
-    add_text_only: bool = False,
-    max_samples: Optional[int] = None,
-    allow_text_fallback_when_audio_missing: bool = True,
-    print_audio_search_paths: bool = False,
-    audio_search_print_limit: int = 100,
     strict_audio_missing: bool = False,
     input_format: str = "asr",
 ) -> List[Dict[str, Any]]:
