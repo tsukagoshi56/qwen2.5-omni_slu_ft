@@ -748,7 +748,7 @@ def main():
     parser.add_argument("--confusing_pairs_file", type=str, default="Experiment_3/slurp_confusing_pairs.json")
     parser.add_argument("--output_file", type=str, default="Experiment_Rationale/rationale_output.jsonl")
     parser.add_argument("--output_mode", type=str, default="raw", choices=["raw", "full"], help="raw: write compact records with raw outputs; full: write full metadata JSON.")
-    parser.add_argument("--model_name_or_path", type=str, default="deepseek-chat")
+    parser.add_argument("--model_name_or_path", type=str, default="deepseek-r1")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
     parser.add_argument("--num_hypotheses", type=int, default=5)
@@ -862,6 +862,8 @@ def main():
     model = None
     processor = None
     client = None
+    api_model = ""
+    api_endpoint = ""
     use_api = not args.local
 
     if use_api:
@@ -876,8 +878,10 @@ def main():
             print("[ERROR] DEEPSEEK_API_KEY environment variable is not set.")
             return
 
+        api_model = args.model_name_or_path or "deepseek-r1"
+        api_endpoint = API_ENDPOINT
         client = OpenAI(api_key=API_KEY, base_url=API_ENDPOINT)
-        print(f"[INFO] Using DeepSeek API at {API_ENDPOINT} with model {args.model_name_or_path}")
+        print(f"[INFO] Using DeepSeek API at {API_ENDPOINT} with model {api_model}")
     else:
         processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
         if processor.tokenizer.pad_token is None:
@@ -1038,17 +1042,24 @@ def main():
                             ),
                         )
                         try:
-                            response = client.chat.completions.create(
-                                model=args.model_name_or_path, # e.g. "deepseek-chat" or "deepseek-reasoner"
-                                messages=[
+                            create_kwargs = {
+                                "model": api_model,
+                                "base_url": api_endpoint,
+                                "messages": [
                                     {"role": "system", "content": "You are a helpful assistant."},
-                                    {"role": "user", "content": current_prompt}
+                                    {"role": "user", "content": current_prompt},
                                 ],
-                                stream=False,
-                                temperature=args.temperature if args.do_sample else 0.0,
-                                max_tokens=args.max_new_tokens,
-                                timeout=args.api_timeout,
-                            )
+                                "stream": False,
+                                "temperature": args.temperature if args.do_sample else 0.0,
+                                "max_tokens": args.max_new_tokens,
+                                "timeout": args.api_timeout,
+                            }
+                            try:
+                                response = client.chat.completions.create(**create_kwargs)
+                            except TypeError:
+                                # Some OpenAI SDK versions do not accept base_url at request-level.
+                                create_kwargs.pop("base_url", None)
+                                response = client.chat.completions.create(**create_kwargs)
                             generated = response.choices[0].message.content
                             elapsed = time.time() - request_started_at
                             debug_log(
