@@ -959,8 +959,9 @@ def main():
 
             gen_kwargs = {
                 "max_new_tokens": args.max_new_tokens,
-                "pad_token_id": processor.tokenizer.pad_token_id,
             }
+            if not use_api and processor is not None:
+                gen_kwargs["pad_token_id"] = processor.tokenizer.pad_token_id
             if args.do_sample:
                 gen_kwargs.update({
                     "do_sample": True,
