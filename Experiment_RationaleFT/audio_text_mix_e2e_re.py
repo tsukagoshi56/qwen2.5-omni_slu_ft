@@ -1608,6 +1608,11 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
+        "--train_audio_encoder",
+        action="store_true",
+        help="Enable training of audio_tower (audio encoder).",
+    )
+    parser.add_argument(
         "--export_label_eval",
         action="store_true",
         help="Also export label-only predictions and metrics after inference.",
@@ -1714,9 +1719,15 @@ def main():
         trust_remote_code=True,
     ).to(device)
 
-    # Keep the original lightweight FT setup.
-    model.audio_tower.requires_grad_(False)
+    # Keep the original lightweight FT setup by default.
+    model.audio_tower.requires_grad_(args.train_audio_encoder)
     model.multi_modal_projector.requires_grad_(False)
+    if rank == 0:
+        logger.info(
+            "Trainability | audio_tower=%s, multi_modal_projector=%s",
+            args.train_audio_encoder,
+            False,
+        )
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
