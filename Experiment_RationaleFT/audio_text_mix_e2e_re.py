@@ -601,6 +601,17 @@ def build_items_from_rationale_jsonl(
 
             # Extract messages and audios first
             user_text, assistant_text = extract_messages_texts(data)
+
+            # Prepend explicit task instruction
+            TASK_INSTRUCTION = (
+                "Analyze the provided audio and ASR n-best context to predict the correct SLU label (scenario, action, entities). "
+                "Output the result in JSON format."
+            )
+            if user_text:
+                user_text = f"{TASK_INSTRUCTION}\n\n{user_text}"
+            else:
+                user_text = TASK_INSTRUCTION
+
             raw_audios = data.get("audios")
             
             # Check if this is a pre-formatted record (has messages and audios)
