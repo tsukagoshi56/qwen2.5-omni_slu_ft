@@ -12,6 +12,10 @@ import torch
 import librosa
 from tqdm import tqdm
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 # ----------------------------
 # Small helpers
@@ -445,7 +449,7 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
 
 def build_prompt_nbest(
     gold_intent: str,
-    gold_slot_types: List[str],
+    gold_entities: List[Dict[str, str]],
     intent_candidates: List[str],
     slot_candidates: List[str],
     nbest_texts: List[str],
@@ -453,131 +457,139 @@ def build_prompt_nbest(
     unstable_tokens: List[str],
     use_fewshot: bool = False,
 ) -> str:
-    intent_note = f"intent_candidates ({len(intent_candidates)}):"
-    slot_note = f"allowed_slot_types ({len(slot_candidates)}):"
-    interpretations_text = format_interpretations(nbest_texts)
-    fewshot = ""
-    if use_fewshot:
-        fewshot = (
-            "EXAMPLE INPUT:\n"
-            "reference_intent: play_music\n"
-            "reference_slot_types: [\"song_name\"]\n"
-            "intent_candidates (5): [\"play_music\",\"music_query\",\"alarm_set\",\"weather_query\",\"qa_factoid\"]\n"
-            "allowed_slot_types (5): [\"song_name\",\"artist_name\",\"time\",\"date\",\"place_name\"]\n"
-            "interpretations:\n"
-            "interpretation_1: play yesterday\n"
-            "interpretation_2: play yester day\n"
-            "interpretation_3: please play yesterday\n"
-            "stable_tokens: [\"play\",\"yesterday\"]\n"
-            "unstable_tokens: []\n"
-            "decision_pivots: [\"play\",\"yesterday\"]\n"
-            "EXAMPLE OUTPUT:\n"
-            "{\n"
-            "  \"interpretation_uncertainty_analysis\": {\n"
-            "    \"stable_cues\": [\"play\",\"yesterday\"],\n"
-            "    \"unstable_cues\": [],\n"
-            "    \"decision_pivots\": [\"play\",\"yesterday\"]\n"
-            "  },\n"
-            "  \"topk_intents\": [\n"
-            "    {\"intent\": \"play_music\"},\n"
-            "    {\"intent\": \"music_query\"},\n"
-            "    {\"intent\": \"alarm_set\"},\n"
-            "    {\"intent\": \"weather_query\"},\n"
-            "    {\"intent\": \"qa_factoid\"}\n"
-            "  ],\n"
-            "  \"intent_elimination\": [\n"
-            "    {\"intent\": \"music_query\", \"reason\": \"utterance is command style; no interrogative pattern for retrieval\"},\n"
-            "    {\"intent\": \"alarm_set\", \"reason\": \"lexical focus is media playback, not alarm scheduling parameters\"},\n"
-            "    {\"intent\": \"weather_query\", \"reason\": \"content refers to a track name, not meteorological information request\"},\n"
-            "    {\"intent\": \"qa_factoid\", \"reason\": \"intent asks execution of playback action, not fact-seeking answer\"}\n"
-            "  ],\n"
-            "  \"final_prediction\": {\n"
-            "    \"intent\": \"play_music\",\n"
-            "    \"scenario\": \"play\",\n"
-            "    \"action\": \"music\"\n"
-            "  },\n"
-            "  \"slot_grounding\": [\n"
-            "    {\"slot_type\": \"song_name\", \"supported\": true, \"best_span\": \"yesterday\", \"source_hypothesis\": \"interpretation_1\"}\n"
-            "  ],\n"
-            "  \"final_rationalization\": \"stable play,yesterday supports play-music with song_name despite minor uncertainty\"\n"
-            "}\n\n"
-        )
+    # Use candidates as INTENTS_LIST / ALLOWED_ENTITY_TYPES
+    intents_list_str = json.dumps(intent_candidates, ensure_ascii=False)
+    allowed_types_str = json.dumps(slot_candidates, ensure_ascii=False)
+    
+    # Format N-best as list of strings or interpretations block? Prompt2 says "via the user message... Multiple plausible interpretations"
+    # We will format them as a list in the INPUT block for clarity, or keep the specific format if desired.
+    # Prompt2 doesn't specify exact input format, just "You are provided... with ... interpretations".
+    # Let's use a clear textual representation.
+    interpretations_block = format_interpretations(nbest_texts)
+    
+    # Format reference entities
+    ref_entities_str = json.dumps(gold_entities, ensure_ascii=False)
+
     return (
-        "You are a teacher model whose role is NOT to predict labels, but to rationalize GIVEN reference labels.\n"
-        "Use ONLY the information provided below. Output ENGLISH ONLY. Output JSON ONLY.\n\n"
+        "You are a teacher model whose role is NOT to predict intents or slots, "
+        "but to rationalize GIVEN reference labels for spoken language understanding (SLU).\n\n"
+        "You are provided, via the user message, with:\n"
+        "- Multiple plausible interpretations derived from the utterance (Candidates)\n"
+        "- A reference intent (ground-truth)\n"
+        "- Reference entities / slots (ground-truth)\n"
+        "- INTENTS_LIST (a closed set of possible intents)\n"
+        "- ALLOWED_ENTITY_TYPES (a closed set of possible slot/entity types)\n\n"
+        "The maximum number of intent candidates (TOP-K) is FIXED to 5.\n\n"
+        "You must strictly follow the instructions below.\n\n"
         "==================================================\n"
         "GENERAL RULES\n"
         "==================================================\n"
-        "- Do NOT invent intents or slot types outside the provided candidates.\n"
-        "- Do NOT hallucinate slot values not supported by the utterance.\n"
-        "- Do NOT output the reference labels in the JSON.\n"
-        "- topk_intents MUST contain exactly 5 unique intents from intent_candidates.\n"
-        "- topk_intents MUST include reference_intent exactly once.\n"
-        "- intent_elimination MUST have exactly 4 items, each for a non-reference intent in topk_intents.\n"
-        "- Do NOT repeat the same elimination wording pattern; avoid generic \"no ... cue\" only responses.\n"
-        "- The maximum TOP-K for intents is fixed to 5.\n\n"
+        "- Do NOT predict or infer new intents or slots.\n"
+        "- Do NOT invent intents or entity types outside the provided lists.\n"
+        "- Do NOT hallucinate slot values that are not supported by the utterance.\n"
+        "- Use ONLY the information given in the user message.\n"
+        "- Output ENGLISH ONLY.\n"
+        "- Output JSON ONLY.\n"
+        "- Never output explanations, markdown, or commentary outside JSON.\n\n"
         "==================================================\n"
-        "INPUT (REFERENCE + CANDIDATES + INTERPRETATIONS)\n"
+        "YOUR TASK\n"
         "==================================================\n"
-        f"reference_intent: {gold_intent}\n"
-        f"reference_slot_types: {json.dumps(gold_slot_types, ensure_ascii=False)}\n"
-        f"{intent_note} {json.dumps(intent_candidates, ensure_ascii=False)}\n"
-        f"{slot_note} {json.dumps(slot_candidates, ensure_ascii=False)}\n"
-        "interpretations:\n"
-        f"{interpretations_text}\n"
-        f"stable_tokens: {json.dumps(stable_tokens, ensure_ascii=False)}\n"
-        f"unstable_tokens: {json.dumps(unstable_tokens, ensure_ascii=False)}\n"
-        "decision_pivots: []\n\n"
+        "Your task is to EXPLAIN and STRUCTURE why the given reference intent "
+        "and reference entities are correct, given the utterance and its plausible interpretations.\n\n"
+        "You must externalize decision-relevant information grounded in the utterance "
+        "without producing free-form reasoning or chain-of-thought.\n\n"
         "==================================================\n"
-        "REASONING PROCEDURE (FOLLOW IN ORDER)\n"
+        "REASONING PROCEDURE (MUST FOLLOW IN ORDER)\n"
         "==================================================\n"
         "Step 1: INTERPRETATION UNCERTAINTY ANALYSIS\n"
-        "- List stable_cues, unstable_cues, decision_pivots (<=5 each).\n"
-        "- Do NOT reference intent/slot labels.\n"
-        "Step 2: TOP-5 INTENT CANDIDATES\n"
-        "- Use ONLY intent_candidates.\n"
-        "- Produce EXACTLY 5 unique intents and include reference_intent exactly once.\n"
-        "Step 3: INTENT ELIMINATION\n"
-        "- Eliminate ONLY the 4 non-reference intents in topk_intents.\n"
-        "- Each reason must be specific and non-repetitive.\n"
-        "- Prefer different evidence dimensions across reasons (speech-act mismatch, domain mismatch, argument/slot mismatch, target mismatch).\n"
-        "Step 4: FINAL INTENT RESOLUTION\n"
-        "- Select one intent from topk_intents and split it into scenario/action by the first '_'.\n"
-        "Step 5: SLOT GROUNDING\n"
-        "- For EACH reference_slot_type, mark supported and give best_span and source_hypothesis.\n"
-        "- source_hypothesis must be interpretation_1..interpretation_5 or \"none\".\n"
+        "- Analyze the plausible interpretations of the utterance.\n"
+        "- Identify:\n"
+        "  * stable cues (phrases that are consistently perceived across interpretations)\n"
+        "  * unstable cues (phrases that are acoustically ambiguous or variably perceived)\n"
+        "  * decision pivots (words or phrases that strongly affect interpretation)\n"
+        "- Limit each list to at most 5 items.\n"
+        "- Do NOT reference intent or slot names.\n"
+        "- Do NOT refer to hypotheses or their indices explicitly.\n\n"
+        "Step 2: SEMANTIC CORE DERIVATION\n"
+        "- Derive a short canonical semantic interpretation of the utterance.\n"
+        "- Use at most ONE sentence.\n"
+        "- Do NOT reference intent or slot names.\n\n"
+        "Step 3: TOP-5 INTENT CANDIDATES\n"
+        "- From INTENTS_LIST, select at most 5 plausible intent candidates.\n"
+        "- Use ONLY the semantic core and stable cues.\n"
+        "- Do NOT include intents outside INTENTS_LIST.\n"
+        "- The reference intent MUST be included.\n\n"
+        "Step 4: INTENT ELIMINATION\n"
+        "- Eliminate all non-reference intents among the Top-5 candidates.\n"
+        "- For each eliminated intent, provide ONE concise reason.\n"
+        "- Each reason must be ONE sentence.\n"
+        "- Each reason must mention a specific cue or pivot from the utterance.\n\n"
+        "Step 5: SLOT / ENTITY GROUNDING (CRITICAL)\n"
+        "For EACH reference entity:\n"
+        "- Use ONLY entity types from ALLOWED_ENTITY_TYPES.\n"
+        "- Determine whether the entity is supported by the utterance.\n"
+        "- If supported:\n"
+        "  * Extract a VERBATIM text span from a single interpretation.\n"
+        "  * Specify the source interpretation as one of: interpretation_1, interpretation_2, ...\n"
+        "- If NOT supported:\n"
+        "  * Set supported to false.\n"
+        "  * Set best_span to an empty string.\n"
+        "  * Set source_hypothesis to \"none\".\n"
+        "- Do NOT introduce new entities.\n\n"
         "Step 6: FINAL RATIONALIZATION\n"
-        "- One concise sentence linking cues to reference labels.\n\n"
+        "- Provide ONE concise sentence explaining why the reference intent "
+        "and entities are correct, explicitly considering interpretation uncertainty inherent in the utterance.\n\n"
         "==================================================\n"
-        "OUTPUT FORMAT (STRICT JSON)\n"
+        "OUTPUT FORMAT (STRICT)\n"
         "==================================================\n"
+        "Your output MUST be a single valid JSON object with EXACTLY the following structure:\n"
         "{\n"
         "  \"interpretation_uncertainty_analysis\": {\n"
         "    \"stable_cues\": [],\n"
         "    \"unstable_cues\": [],\n"
         "    \"decision_pivots\": []\n"
         "  },\n"
+        "  \"semantic_core\": \"\",\n"
         "  \"topk_intents\": [\n"
-        "    {\"intent\": \"\"},\n"
-        "    {\"intent\": \"\"},\n"
-        "    {\"intent\": \"\"},\n"
-        "    {\"intent\": \"\"},\n"
         "    {\"intent\": \"\"}\n"
         "  ],\n"
         "  \"intent_elimination\": [\n"
-        "    {\"intent\": \"\", \"reason\": \"\"},\n"
-        "    {\"intent\": \"\", \"reason\": \"\"},\n"
-        "    {\"intent\": \"\", \"reason\": \"\"},\n"
         "    {\"intent\": \"\", \"reason\": \"\"}\n"
         "  ],\n"
-        "  \"final_prediction\": {\"intent\": \"\", \"scenario\": \"\", \"action\": \"\"},\n"
         "  \"slot_grounding\": [\n"
-        "    {\"slot_type\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
+        "    {\"slot_type\": \"\", \"gold_value\": \"\", \"supported\": true, \"best_span\": \"\", \"source_hypothesis\": \"\"}\n"
         "  ],\n"
         "  \"final_rationalization\": \"\"\n"
         "}\n\n"
-        f"{fewshot}"
-        "Now produce the JSON for the given INPUT."
+        "==================================================\n"
+        "JSON VALIDITY REQUIREMENTS (CRITICAL)\n"
+        "==================================================\n"
+        "- Output MUST be a single, valid JSON object.\n"
+        "- Do NOT wrap the JSON in markdown or code fences.\n"
+        "- Do NOT output any text before or after the JSON.\n"
+        "- Use double quotes for all JSON keys and string values.\n"
+        "- Do NOT use trailing commas.\n"
+        "- Do NOT include comments.\n"
+        "- Use ASCII characters for all JSON keys.\n"
+        "- Keep all string values concise (<= 200 characters).\n"
+        "- Do NOT include null values.\n"
+        "- Lists must not exceed their specified maximum lengths.\n\n"
+        "==================================================\n"
+        "IMPORTANT CONSTRAINTS\n"
+        "==================================================\n"
+        "- The final correct intent MUST be the provided reference intent.\n"
+        "- Slot grounding must reflect evidence honestly; unsupported slots are allowed.\n"
+        "- Faithfulness and structural correctness are more important than fluency.\n\n"
+        "==================================================\n"
+        "INPUT MESSAGE\n"
+        "==================================================\n"
+        f"reference_intent: {gold_intent}\n"
+        f"reference_entities: {ref_entities_str}\n"
+        f"INTENTS_LIST: {intents_list_str}\n"
+        f"ALLOWED_ENTITY_TYPES: {allowed_types_str}\n"
+        "interpretations:\n"
+        f"{interpretations_block}\n\n"
+        "Now produce the JSON output."
     )
 
 
@@ -753,6 +765,7 @@ def main():
     parser.add_argument("--format_retries", type=int, default=2, help="Retry count when topk_intents format constraints are violated.")
     parser.add_argument("--smoke", action="store_true", help="Run full rationale generation with reduced sample count for smoke checks.")
     parser.add_argument("--smoke_limit", type=int, default=100, help="Number of samples processed in --smoke mode.")
+    parser.add_argument("--use_api", action="store_true", help="Use DeepSeek API instead of local model.")
     args = parser.parse_args()
 
     # torchrun compatibility: auto-map worker/device from distributed env vars.
@@ -832,17 +845,40 @@ def main():
         print(f"[ERROR] No input items found for this worker: {input_path}")
         return
 
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    model = None
+    processor = None
+    client = None
 
-    torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
-        args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
-    ).to(args.device)
-    model.eval()
-    sr = processor.feature_extractor.sampling_rate
+    if args.use_api:
+        if OpenAI is None:
+            print("[ERROR] 'openai' package is required for API mode. Install it via 'pip install openai'.")
+            return
+        
+        API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+        API_ENDPOINT = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+
+        if not API_KEY:
+            print("[ERROR] DEEPSEEK_API_KEY environment variable is not set.")
+            return
+
+        client = OpenAI(api_key=API_KEY, base_url=API_ENDPOINT)
+        print(f"[INFO] Using DeepSeek API at {API_ENDPOINT} with model {args.model_name_or_path}")
+    else:
+        processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        if processor.tokenizer.pad_token is None:
+            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+            processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    
+        torch_dtype = torch.bfloat16 if "cuda" in args.device else torch.float32
+        model = Qwen2AudioForConditionalGeneration.from_pretrained(
+            args.model_name_or_path, torch_dtype=torch_dtype, trust_remote_code=True
+        ).to(args.device)
+        model.eval()
+
+    # Get sampling rate (if using local model with audio) or default
+    sr = 16000
+    if processor is not None:
+        sr = processor.feature_extractor.sampling_rate
     if args.smoke:
         print(f"[SMOKE] Enabled. Full model inference runs with reduced samples (smoke_limit={args.smoke_limit}).")
 
@@ -898,7 +934,7 @@ def main():
             if args.mode == "nbest":
                 prompt = build_prompt_nbest(
                     gold_intent=gold_intent,
-                    gold_slot_types=gold_slot_types,
+                    gold_entities=gold_entities,
                     intent_candidates=intent_candidates,
                     slot_candidates=slot_candidates,
                     nbest_texts=nbest_texts,
@@ -935,28 +971,50 @@ def main():
             max_attempts = max(1, args.format_retries + 1)
             for attempt in range(max_attempts):
                 current_prompt = base_prompt if attempt == 0 else build_retry_prompt(base_prompt, generated, validation_error)
-                if args.mode == "nbest":
-                    user_content = [{"type": "text", "text": current_prompt}]
-                    text_input = processor.apply_chat_template(
-                        [{"role": "user", "content": user_content}],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    inputs = processor(text=text_input, return_tensors="pt")
+                
+                if args.use_api:
+                    # API Generation
+                    try:
+                        response = client.chat.completions.create(
+                            model=args.model_name_or_path, # e.g. "deepseek-chat" or "deepseek-reasoner"
+                            messages=[
+                                {"role": "system", "content": "You are a helpful assistant."},
+                                {"role": "user", "content": current_prompt}
+                            ],
+                            stream=False,
+                            temperature=args.temperature if args.do_sample else 0.0,
+                            max_tokens=args.max_new_tokens,
+                        )
+                        generated = response.choices[0].message.content
+                    except Exception as e:
+                        print(f"[ERROR] API call failed: {e}")
+                        generated = "{}"
+                
                 else:
-                    user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
-                    text_input = processor.apply_chat_template(
-                        [{"role": "user", "content": user_content}],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                    inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+                    # Local Qwen2-Audio Generation
+                    if args.mode == "nbest":
+                        user_content = [{"type": "text", "text": current_prompt}]
+                        text_input = processor.apply_chat_template(
+                            [{"role": "user", "content": user_content}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                        inputs = processor(text=text_input, return_tensors="pt")
+                    else:
+                        user_content = [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": current_prompt}]
+                        text_input = processor.apply_chat_template(
+                            [{"role": "user", "content": user_content}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                        inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+    
+                    inputs = {k: v.to(args.device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        output_ids = model.generate(**inputs, **gen_kwargs)
+                    input_len = inputs["input_ids"].shape[1]
+                    generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
 
-                inputs = {k: v.to(args.device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    output_ids = model.generate(**inputs, **gen_kwargs)
-                input_len = inputs["input_ids"].shape[1]
-                generated = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
                 parsed = extract_json(generated)
                 topk_valid, validation_error = validate_topk_intents(parsed, intent_candidates, gold_intent)
                 if topk_valid:
