@@ -1682,8 +1682,6 @@ def main():
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
-        print_audio_search_paths=args.print_audio_search_paths,
-        audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
         input_format=args.input_format,
     )
