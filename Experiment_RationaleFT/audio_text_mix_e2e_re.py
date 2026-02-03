@@ -1676,7 +1676,7 @@ def main():
     if world_size > 1:
         dist.barrier()
 
-    test_max_samples = 10 if args.smoke else None
+    test_max_samples = 2000 if args.smoke else None
     if rank == 0 and args.smoke:
         logger.info("Loading only %d test items (smoke).", test_max_samples)
 
