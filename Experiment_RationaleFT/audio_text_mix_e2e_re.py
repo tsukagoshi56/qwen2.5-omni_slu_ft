@@ -573,7 +573,16 @@ def build_items_from_rationale_jsonl(
     allow_text_fallback_when_audio_missing: bool = True,
     print_audio_search_paths: bool = False,
     audio_search_print_limit: int = 100,
+def build_items_from_rationale_jsonl(
+    jsonl_path: str,
+    audio_dir: str,
+    add_text_only: bool = False,
+    max_samples: Optional[int] = None,
+    allow_text_fallback_when_audio_missing: bool = True,
+    print_audio_search_paths: bool = False,
+    audio_search_print_limit: int = 100,
     strict_audio_missing: bool = False,
+    input_format: str = "asr",
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -602,9 +611,16 @@ def build_items_from_rationale_jsonl(
             # Extract messages and audios first
             user_text, assistant_text = extract_messages_texts(data)
 
-            # Prepend explicit task instruction
+            # Prepend explicit task instruction based on format
+            if input_format == "ipa":
+                context_desc = "IPA (International Phonetic Alphabet) n-best context"
+            elif input_format == "arp":
+                context_desc = "ARPAbet n-best context"
+            else:
+                context_desc = "ASR n-best context"
+
             TASK_INSTRUCTION = (
-                "Analyze the provided audio and ASR n-best context to predict the correct SLU label (scenario, action, entities). "
+                f"Analyze the provided audio and {context_desc} to predict the correct SLU label (scenario, action, entities). "
                 "Output the result in JSON format."
             )
             if user_text:
@@ -1620,7 +1636,19 @@ def main():
     )
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
+    parser.add_argument(
+        "--input_format",
+        type=str,
+        default="asr",
+        choices=["asr", "ipa", "arp"],
+        help="Input text format for the prompt instruction (asr/ipa/arp).",
+    )
+
     args = parser.parse_args()
+
+    # Handle legacy flags if user tries to use them (optional convenience)
+    # But since we use argparse choices, we rely on --input_format argument.
+
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if local_rank != -1:
@@ -1654,7 +1682,10 @@ def main():
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
+        print_audio_search_paths=args.print_audio_search_paths,
+        audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
+        input_format=args.input_format,
     )
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
@@ -1665,6 +1696,7 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
+        input_format=args.input_format,
     )
 
     if rank == 0:
@@ -1740,6 +1772,7 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
+        input_format=args.input_format,
     )
 
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
