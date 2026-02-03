@@ -36,10 +36,48 @@ uv run Experiment_Rationale/2_run_asr_on_audio.py --limit 10
 uv run Experiment_Rationale/2_run_asr_on_audio.py --smoke
 ```
 
-### Step 2: Generate Rationale with Qwen2-Audio
+### Step 2: Generate Rationale (DeepSeek API / Local Qwen2-Audio)
 
 Use the rationale generator to connect gold labels with evidence from either n-best text or audio.
 It outputs a JSONL file with short, structured rationales.
+
+**DeepSeek API mode (default):**
+`3_generate_rationale.py` uses DeepSeek API by default (`--local` is OFF).
+
+```bash
+export DEEPSEEK_API_KEY=your_api_key
+# Optional (default: https://api.deepseek.com)
+export DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+**N-best mode with DeepSeek (default):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode nbest \
+  --model_name_or_path deepseek-chat \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output.jsonl
+```
+
+**Audio mode with DeepSeek (default):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py \
+  --mode audio \
+  --model_name_or_path deepseek-chat \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output_audio.jsonl
+```
+
+**Local Qwen2-Audio mode (`--local`):**
+```bash
+uv run Experiment_Rationale/3_generate_rationale.py \
+  --local \
+  --mode nbest \
+  --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
+  --device cuda \
+  --input_file Experiment_Rationale/real_asr_sampling_data.jsonl \
+  --output_file Experiment_Rationale/rationale_output_local.jsonl
+```
 
 **N-best mode (text-only):**
 ```bash
