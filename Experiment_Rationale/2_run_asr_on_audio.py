@@ -192,6 +192,8 @@ def main():
     slurp_metadata = load_slurp_metadata(slurp_test_path)
     tasks = []
     
+    print(f"Loaded {len(slurp_metadata)} entries from metadata.")
+    
     if slurp_metadata:
         for slurp_id, entry in slurp_metadata.items():
             recs = entry.get("recordings", [])
@@ -199,6 +201,10 @@ def main():
                 filename = recs[args.recording_index].get("file")
                 if filename:
                     path = os.path.join(audio_dir_path, filename)
+                    # Debug print for first few items
+                    if len(tasks) < 3:
+                        print(f"[DEBUG] Checking path: {path} -> Exists: {os.path.exists(path)}")
+                    
                     if os.path.exists(path):
                         tasks.append((slurp_id, path, entry))
     
