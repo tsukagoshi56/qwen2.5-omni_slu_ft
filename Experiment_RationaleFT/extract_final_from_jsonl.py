@@ -164,6 +164,68 @@ def is_error_like(value: Any) -> bool:
     return text in {"error", "err", "unknown", "none", "null", "n/a", "na"}
 
 
+def is_missing_or_error(value: Any) -> bool:
+    text = str(value or "").strip()
+    return (not text) or is_error_like(text)
+
+
+def merge_labels(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {
+        "scenario": str(primary.get("scenario", "")).strip(),
+        "action": str(primary.get("action", "")).strip(),
+        "entities": parse_entities(primary.get("entities", [])),
+    }
+    sec_scenario = str(secondary.get("scenario", "")).strip()
+    sec_action = str(secondary.get("action", "")).strip()
+    if is_missing_or_error(merged["scenario"]) and sec_scenario and (not is_error_like(sec_scenario)):
+        merged["scenario"] = sec_scenario
+    if is_missing_or_error(merged["action"]) and sec_action and (not is_error_like(sec_action)):
+        merged["action"] = sec_action
+    if (not merged["entities"]) and isinstance(secondary.get("entities"), list):
+        merged["entities"] = parse_entities(secondary.get("entities", []))
+    return merged
+
+
+def extract_last_group(pattern: str, text: str) -> str:
+    matches = re.findall(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    if not matches:
+        return ""
+    last = matches[-1]
+    if isinstance(last, tuple):
+        return str(last[0]).strip()
+    return str(last).strip()
+
+
+def extract_label_from_patterns(raw_text: str) -> Dict[str, Any]:
+    text = raw_text or ""
+    # Analyze the tail after the last "final" marker first.
+    final_matches = list(re.finditer(r"(?i)\bfinal(?:_prediction)?\b\s*[:=]?", text))
+    search_text = text[final_matches[-1].start():] if final_matches else text
+
+    scenario = extract_last_group(r'"scenario"\s*[:=]\s*"([^"]+)"', search_text)
+    if not scenario:
+        scenario = extract_last_group(r"scenario\s*[:=]\s*([A-Za-z0-9_:-]+)", search_text)
+    action = extract_last_group(r'"action"\s*[:=]\s*"([^"]+)"', search_text)
+    if not action:
+        action = extract_last_group(r"action\s*[:=]\s*([A-Za-z0-9_:-]+)", search_text)
+    intent = extract_last_group(r'"intent"\s*[:=]\s*"([^"]+)"', search_text)
+    if not intent:
+        intent = extract_last_group(r"intent\s*[:=]\s*([A-Za-z0-9_:-]+)", search_text)
+
+    if (is_missing_or_error(scenario) or is_missing_or_error(action)) and intent:
+        intent_scenario, intent_action = split_intent(intent)
+        if is_missing_or_error(scenario) and intent_scenario:
+            scenario = intent_scenario
+        if is_missing_or_error(action) and intent_action:
+            action = intent_action
+
+    return {
+        "scenario": str(scenario or "").strip(),
+        "action": str(action or "").strip(),
+        "entities": [],
+    }
+
+
 def extract_from_final_keyword(raw_text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     # Highest priority: object right after "final:" or "final_prediction:"
     matches = list(re.finditer(r"(?i)\bfinal(?:_prediction)?\b\s*[:=]\s*", raw_text))
@@ -291,6 +353,10 @@ def main() -> None:
             row_dump_label, _ = extract_label_from_text(json.dumps(row, ensure_ascii=False))
             if label_score(row_dump_label) > label_score(label_obj):
                 label_obj = row_dump_label
+            # Final safety fallback: pattern analysis for rows still missing labels.
+            if is_missing_or_error(label_obj.get("scenario")) or is_missing_or_error(label_obj.get("action")):
+                pattern_label = extract_label_from_patterns(raw_text + "\n" + json.dumps(row, ensure_ascii=False))
+                label_obj = merge_labels(label_obj, pattern_label)
             has_new_label = is_nonempty_label(label_obj)
             if has_new_label:
                 extracted += 1
@@ -314,6 +380,14 @@ def main() -> None:
                 out_row["entities"] = label_obj.get("entities", [])
             elif "entities" not in out_row:
                 out_row["entities"] = parse_entities(old_entities)
+
+            # Last check: if still empty/error, analyze full row text once more and patch fields.
+            if is_missing_or_error(out_row.get("scenario")) or is_missing_or_error(out_row.get("action")):
+                patch_label = extract_label_from_patterns(json.dumps(out_row, ensure_ascii=False))
+                if is_missing_or_error(out_row.get("scenario")) and patch_label.get("scenario"):
+                    out_row["scenario"] = patch_label["scenario"]
+                if is_missing_or_error(out_row.get("action")) and patch_label.get("action"):
+                    out_row["action"] = patch_label["action"]
 
             new_scenario = str(out_row.get("scenario", "")).strip()
             new_action = str(out_row.get("action", "")).strip()
