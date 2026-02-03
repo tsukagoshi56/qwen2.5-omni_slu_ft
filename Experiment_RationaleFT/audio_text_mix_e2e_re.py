@@ -1603,7 +1603,7 @@ def main():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
     parser.add_argument("--num_train_epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
@@ -1671,7 +1671,7 @@ def main():
             logger.info("SMOKE MODE ON")
         # Increase smoke learn data to 2000, keep eval small
         train_max_samples = 2000
-        eval_max_samples = 10
+        eval_max_samples = 200
         args.num_train_epochs = 1
 
     train_items = build_items_from_rationale_jsonl(
