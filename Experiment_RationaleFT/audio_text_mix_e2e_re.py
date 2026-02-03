@@ -1604,8 +1604,14 @@ def main():
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--learning_rate", type=float, default=4e-5)
+    parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument(
+        "--eval_max_samples",
+        type=int,
+        default=None,
+        help="Cap eval set size to speed up validation (None means no extra cap).",
+    )
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
         "--train_audio_encoder",
@@ -1669,7 +1675,9 @@ def main():
         logger.info("Using test_file: %s", args.test_file)
 
     train_max_samples = args.max_samples
-    eval_max_samples = (args.max_samples // 2) if args.max_samples else None
+    eval_max_samples = args.eval_max_samples
+    if eval_max_samples is None:
+        eval_max_samples = (args.max_samples // 2) if args.max_samples else None
 
     if args.smoke:
         if rank == 0:
