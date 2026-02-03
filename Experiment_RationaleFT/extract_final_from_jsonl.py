@@ -148,6 +148,22 @@ def is_nonempty_label(label_obj: Dict[str, Any]) -> bool:
     return bool(label_obj.get("scenario") or label_obj.get("action") or label_obj.get("entities"))
 
 
+def label_score(label_obj: Dict[str, Any]) -> int:
+    score = 0
+    if str(label_obj.get("scenario", "")).strip():
+        score += 1
+    if str(label_obj.get("action", "")).strip():
+        score += 1
+    if isinstance(label_obj.get("entities"), list) and label_obj.get("entities"):
+        score += 1
+    return score
+
+
+def is_error_like(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"error", "err", "unknown", "none", "null", "n/a", "na"}
+
+
 def extract_from_final_keyword(raw_text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     # Highest priority: object right after "final:" or "final_prediction:"
     matches = list(re.finditer(r"(?i)\bfinal(?:_prediction)?\b\s*[:=]\s*", raw_text))
@@ -272,6 +288,9 @@ def main() -> None:
                 raw_text = json.dumps(row, ensure_ascii=False)
 
             label_obj, _ = extract_label_from_text(raw_text)
+            row_dump_label, _ = extract_label_from_text(json.dumps(row, ensure_ascii=False))
+            if label_score(row_dump_label) > label_score(label_obj):
+                label_obj = row_dump_label
             has_new_label = is_nonempty_label(label_obj)
             if has_new_label:
                 extracted += 1
@@ -280,6 +299,12 @@ def main() -> None:
             old_scenario = str(out_row.get("scenario", "")).strip()
             old_action = str(out_row.get("action", "")).strip()
             old_entities = out_row.get("entities", [])
+
+            # Clear placeholder error labels before replacement.
+            if is_error_like(old_scenario):
+                out_row["scenario"] = ""
+            if is_error_like(old_action):
+                out_row["action"] = ""
 
             if label_obj.get("scenario"):
                 out_row["scenario"] = label_obj["scenario"]
