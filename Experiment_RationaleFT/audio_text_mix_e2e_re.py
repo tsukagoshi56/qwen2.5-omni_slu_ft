@@ -1136,26 +1136,55 @@ def clean_json_text(text: str) -> str:
 def parse_prediction_label(raw_output: str) -> Dict[str, Any]:
     default_obj = {"scenario": "error", "action": "error", "entities": []}
 
+    # If "SLU:" marker exists, focus on content after it.
+    if "SLU:" in raw_output:
+        raw_output = raw_output.rsplit("SLU:", 1)[-1]  # Use rsplit to be safe
+    
     json_str = clean_json_text(raw_output)
+    parsed = None
     try:
         parsed = json.loads(json_str)
     except Exception:
         # Last fallback: extract first {...} block.
         match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-        if not match:
-            return default_obj
-        try:
-            parsed = json.loads(match.group(0))
-        except Exception:
-            return default_obj
-
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except Exception:
+                pass
+    
     if not isinstance(parsed, dict):
         return default_obj
 
+    # Extraction Logic
+    scenario = parsed.get("scenario")
+    action = parsed.get("action")
+    entities = parsed.get("entities")
+
+    # Check for "final" wrapper
+    if not scenario and not action:
+        final_obj = parsed.get("final")
+        if isinstance(final_obj, dict):
+            scenario = final_obj.get("scenario")
+            action = final_obj.get("action")
+            entities = final_obj.get("entities", [])
+            # If inside final there is "intent"
+            if not scenario and not action:
+                intent = final_obj.get("intent")
+                if isinstance(intent, str) and "_" in intent:
+                    # User confirmed action may contain _, so split by FIRST underscore for scenario_action
+                    scenario, action = intent.split("_", 1)
+    
+    # Check for top-level "intent"
+    if not scenario and not action:
+        intent = parsed.get("intent")
+        if isinstance(intent, str) and "_" in intent:
+             scenario, action = intent.split("_", 1)
+
     return {
-        "scenario": str(parsed.get("scenario", "")).strip(),
-        "action": str(parsed.get("action", "")).strip(),
-        "entities": parse_entities(parsed.get("entities", [])),
+        "scenario": str(scenario or "").strip(),
+        "action": str(action or "").strip(),
+        "entities": parse_entities(entities or []),
     }
 
 
