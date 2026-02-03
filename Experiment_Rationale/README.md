@@ -344,3 +344,4 @@ Useful options:
 - `--disable_rationale_slu`: keep `<ras>` + gold-text `<slu>`, but disable `<slu>` from rationale files
 - `--gold_text_slu_limit`, `--gold_text_slu_eval_limit`: cap mixed gold-text SLU size
 - `--train_audio_encoder`: enable audio encoder fine-tuning
+- `--input_format {asr,ipa,arp}`: keep prompt context type compatible with the original script (default: `asr`)

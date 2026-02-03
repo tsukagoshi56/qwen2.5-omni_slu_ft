@@ -116,10 +116,20 @@ def _extract_candidates(record: Dict[str, Any], user_text: str) -> List[str]:
     return [c for c in candidates if c]
 
 
-def _build_ras_prompt(transcript: str, candidates: List[str]) -> str:
+def _context_desc(input_format: str) -> str:
+    if input_format == "ipa":
+        return "IPA (International Phonetic Alphabet) n-best context"
+    if input_format == "arp":
+        return "ARPAbet n-best context"
+    return "ASR n-best context"
+
+
+def _build_ras_prompt(transcript: str, candidates: List[str], input_format: str = "asr") -> str:
     transcript = str(transcript or "").strip()
+    context_desc = _context_desc(input_format)
     body = (
         "<ras>\n"
+        f"Analyze the provided audio and {context_desc}.\n"
         "Generate concise rationale text only (no JSON).\n"
         "Focus on key evidence for intent/slots.\n"
     )
@@ -129,11 +139,18 @@ def _build_ras_prompt(transcript: str, candidates: List[str]) -> str:
     return body
 
 
-def _build_slu_prompt(transcript: str, candidates: List[str], rationale_text: str = "") -> str:
+def _build_slu_prompt(
+    transcript: str,
+    candidates: List[str],
+    rationale_text: str = "",
+    input_format: str = "asr",
+) -> str:
     transcript = str(transcript or "").strip()
     rationale_text = str(rationale_text or "").strip()
+    context_desc = _context_desc(input_format)
     body = (
         "<slu>\n"
+        f"Analyze the provided audio and {context_desc}.\n"
         "Predict SLU label.\n"
         "Output JSON only with keys: scenario, action, entities.\n"
     )
@@ -153,6 +170,7 @@ def build_multitask_items_from_rationale(
     add_text_only: bool = False,
     max_samples: Optional[int] = None,
     allow_text_fallback_when_audio_missing: bool = True,
+    input_format: str = "asr",
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -206,7 +224,7 @@ def build_multitask_items_from_rationale(
             ras_item = {
                 **common,
                 "task_tag": "<ras>",
-                "prompt_text": _build_ras_prompt(transcript, candidates),
+                "prompt_text": _build_ras_prompt(transcript, candidates, input_format=input_format),
                 "target": rationale_text,
             }
             if audio_path:
@@ -224,7 +242,12 @@ def build_multitask_items_from_rationale(
             slu_item = {
                 **common,
                 "task_tag": "<slu>",
-                "prompt_text": _build_slu_prompt(transcript, candidates, rationale_text),
+                "prompt_text": _build_slu_prompt(
+                    transcript,
+                    candidates,
+                    rationale_text,
+                    input_format=input_format,
+                ),
                 "target": slu_target,
             }
             if audio_path:
@@ -245,7 +268,11 @@ def build_multitask_items_from_rationale(
     return items
 
 
-def build_gold_text_slu_items(slurp_jsonl: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
+def build_gold_text_slu_items(
+    slurp_jsonl: str,
+    max_samples: Optional[int] = None,
+    input_format: str = "asr",
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     if not slurp_jsonl or not os.path.exists(slurp_jsonl):
         logger.warning("Gold SLU JSONL not found: %s", slurp_jsonl)
@@ -280,7 +307,12 @@ def build_gold_text_slu_items(slurp_jsonl: str, max_samples: Optional[int] = Non
                     "rationale_text": "",
                     "target_obj": {"scenario": scenario, "action": action, "entities": entities},
                     "task_tag": "<slu>",
-                    "prompt_text": _build_slu_prompt(transcript, [transcript] if transcript else [], ""),
+                    "prompt_text": _build_slu_prompt(
+                        transcript,
+                        [transcript] if transcript else [],
+                        "",
+                        input_format=input_format,
+                    ),
                     "target": _make_slu_target(scenario, action, entities),
                 }
             )
@@ -288,7 +320,12 @@ def build_gold_text_slu_items(slurp_jsonl: str, max_samples: Optional[int] = Non
     return items
 
 
-def build_test_items_from_slurp(test_jsonl: str, audio_dir: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
+def build_test_items_from_slurp(
+    test_jsonl: str,
+    audio_dir: str,
+    max_samples: Optional[int] = None,
+    input_format: str = "asr",
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     if not os.path.exists(test_jsonl):
         raise FileNotFoundError(f"Test JSONL not found: {test_jsonl}")
@@ -327,7 +364,12 @@ def build_test_items_from_slurp(test_jsonl: str, audio_dir: str, max_samples: Op
                     "rationale_text": "",
                     "target_obj": {"scenario": scenario, "action": action, "entities": entities},
                     "task_tag": "<slu>",
-                    "prompt_text": _build_slu_prompt(transcript, [transcript] if transcript else [], ""),
+                    "prompt_text": _build_slu_prompt(
+                        transcript,
+                        [transcript] if transcript else [],
+                        "",
+                        input_format=input_format,
+                    ),
                     "target": _make_slu_target(scenario, action, entities),
                 }
             )
@@ -335,7 +377,7 @@ def build_test_items_from_slurp(test_jsonl: str, audio_dir: str, max_samples: Op
     return items
 
 
-def force_slu_test_mode(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def force_slu_test_mode(items: List[Dict[str, Any]], input_format: str = "asr") -> List[Dict[str, Any]]:
     forced: List[Dict[str, Any]] = []
     for item in items:
         transcript = str(item.get("transcript", "") or "")
@@ -345,7 +387,12 @@ def force_slu_test_mode(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rationale_text = str(item.get("rationale_text", "") or "")
         new_item = dict(item)
         new_item["task_tag"] = "<slu>"
-        new_item["prompt_text"] = _build_slu_prompt(transcript, candidates, rationale_text)
+        new_item["prompt_text"] = _build_slu_prompt(
+            transcript,
+            candidates,
+            rationale_text,
+            input_format=input_format,
+        )
         forced.append(new_item)
     return forced
 
@@ -373,6 +420,13 @@ def main():
     parser.add_argument("--train_audio_encoder", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--export_label_eval", action="store_true")
+    parser.add_argument(
+        "--input_format",
+        type=str,
+        default="asr",
+        choices=["asr", "ipa", "arp"],
+        help="Input text format for task prompts (asr/ipa/arp).",
+    )
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -402,6 +456,7 @@ def main():
         include_slu=not args.disable_rationale_slu,
         add_text_only=False,
         max_samples=train_max_samples,
+        input_format=args.input_format,
     )
     eval_items = build_multitask_items_from_rationale(
         jsonl_path=args.eval_file,
@@ -410,9 +465,22 @@ def main():
         include_slu=not args.disable_rationale_slu,
         add_text_only=False,
         max_samples=eval_max_samples,
+        input_format=args.input_format,
     )
-    train_items.extend(build_gold_text_slu_items(args.gold_text_slu_file, args.gold_text_slu_limit))
-    eval_items.extend(build_gold_text_slu_items(args.gold_text_slu_eval_file, args.gold_text_slu_eval_limit))
+    train_items.extend(
+        build_gold_text_slu_items(
+            args.gold_text_slu_file,
+            args.gold_text_slu_limit,
+            input_format=args.input_format,
+        )
+    )
+    eval_items.extend(
+        build_gold_text_slu_items(
+            args.gold_text_slu_eval_file,
+            args.gold_text_slu_eval_limit,
+            input_format=args.input_format,
+        )
+    )
 
     if len(train_items) == 0:
         raise RuntimeError("No train items were built.")
@@ -470,8 +538,13 @@ def main():
     if world_size > 1:
         dist.barrier()
 
-    test_items = build_test_items_from_slurp(args.test_file, args.audio_dir, max_samples=test_max_samples)
-    test_items = force_slu_test_mode(test_items)
+    test_items = build_test_items_from_slurp(
+        args.test_file,
+        args.audio_dir,
+        max_samples=test_max_samples,
+        input_format=args.input_format,
+    )
+    test_items = force_slu_test_mode(test_items, input_format=args.input_format)
     if rank == 0:
         logger.info("Test inference mode is forced to <slu> (%d samples).", len(test_items))
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
