@@ -304,3 +304,43 @@ This script:
 - evaluates using label-only extraction and saves:
   - `prediction_labels_only.jsonl`
   - `metrics_label_only.json`
+
+### Step 3-B: Multi-task FT with `<ras>` + `<slu>` (New)
+
+Use `audio_text_mix_e2e_multitask.py` to train two tasks together:
+- `<ras>`: rationale text generation only
+- `<slu>`: simple SLU JSON generation (`scenario`, `action`, `entities`)
+
+It can also mix extra `<slu>` samples from gold text (`slurp train/devel`).
+
+```bash
+uv run Experiment_RationaleFT/audio_text_mix_e2e_multitask.py \
+  --train_file /path/to/rationale_train.jsonl \
+  --eval_file /path/to/rationale_eval.jsonl \
+  --test_file slurp/dataset/slurp/test.jsonl \
+  --gold_text_slu_file slurp/dataset/slurp/train.jsonl \
+  --gold_text_slu_eval_file slurp/dataset/slurp/devel.jsonl \
+  --audio_dir /path/to/slurp/audio/slurp_real \
+  --output_dir outputs/qwen_multitask_ras_slu_ft
+```
+
+2-GPU run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
+  Experiment_RationaleFT/audio_text_mix_e2e_multitask.py \
+  --train_file /path/to/rationale_train.jsonl \
+  --eval_file /path/to/rationale_eval.jsonl \
+  --test_file slurp/dataset/slurp/test.jsonl \
+  --gold_text_slu_file slurp/dataset/slurp/train.jsonl \
+  --gold_text_slu_eval_file slurp/dataset/slurp/devel.jsonl \
+  --audio_dir /path/to/slurp/audio/slurp_real \
+  --output_dir outputs/qwen_multitask_ras_slu_ft_2gpu \
+  --batch_size 8
+```
+
+Useful options:
+- `--disable_ras`: train only `<slu>`
+- `--disable_rationale_slu`: keep `<ras>` + gold-text `<slu>`, but disable `<slu>` from rationale files
+- `--gold_text_slu_limit`, `--gold_text_slu_eval_limit`: cap mixed gold-text SLU size
+- `--train_audio_encoder`: enable audio encoder fine-tuning
