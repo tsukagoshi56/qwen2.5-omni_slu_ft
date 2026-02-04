@@ -376,9 +376,9 @@ def main():
     parser.add_argument("--audio_dir", type=str, required=True)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_multitask_ras_slu_ft")
-    parser.add_argument("--num_train_epochs", type=int, default=3)
+    parser.add_argument("--num_train_epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--learning_rate", type=float, default=4e-5)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--max_samples", type=int, default=None)
@@ -479,6 +479,8 @@ def main():
     model.audio_tower.requires_grad_(args.train_audio_encoder)
     model.multi_modal_projector.requires_grad_(False)
 
+    has_eval = len(eval_items) > 0
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
@@ -486,13 +488,19 @@ def main():
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
-        warmup_ratio=0.1,
+        warmup_ratio=0.05,
         lr_scheduler_type="cosine",
+        weight_decay=0.1,
+        max_grad_norm=1.0,
         bf16=True,
         logging_steps=1 if args.smoke else 10,
-        eval_strategy="steps" if len(eval_items) > 0 else "no",
-        eval_steps=2 if args.smoke else 50,
-        save_strategy="no",
+        eval_strategy="steps" if has_eval else "no",
+        eval_steps=2 if args.smoke else 20,
+        save_strategy="steps" if has_eval else "no",
+        save_steps=2 if args.smoke else 20,
+        load_best_model_at_end=has_eval,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         report_to="none",
