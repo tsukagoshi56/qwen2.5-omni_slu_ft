@@ -312,6 +312,8 @@ Use `audio_text_mix_e2e_multitask.py` to train two tasks together:
 - `<slu>`: simple SLU JSON generation (`scenario`, `action`, `entities`)
 
 It can also mix extra `<slu>` samples from gold text (`slurp train/devel`).
+Rationale-derived `<ras>`/`<slu>` samples are trained as audio-conditioned tasks, while gold-text `<slu>` remains text-only.
+At test time, inference is forced to audio-conditioned `<slu>` mode.
 
 ```bash
 uv run Experiment_RationaleFT/audio_text_mix_e2e_multitask.py \

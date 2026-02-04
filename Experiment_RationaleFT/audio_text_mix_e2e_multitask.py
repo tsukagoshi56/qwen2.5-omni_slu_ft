@@ -124,8 +124,7 @@ def _context_desc(input_format: str) -> str:
     return "ASR n-best context"
 
 
-def _build_ras_prompt(transcript: str, candidates: List[str], input_format: str = "asr") -> str:
-    transcript = str(transcript or "").strip()
+def _build_audio_ras_prompt(input_format: str = "asr") -> str:
     context_desc = _context_desc(input_format)
     body = (
         "<ras>\n"
@@ -133,20 +132,10 @@ def _build_ras_prompt(transcript: str, candidates: List[str], input_format: str 
         "Generate concise rationale text only (no JSON).\n"
         "Focus on key evidence for intent/slots.\n"
     )
-    if transcript:
-        body += f"Transcript: {transcript}\n"
-    body += "N-best hypotheses:\n" + base.format_nbest(candidates) + "\n"
     return body
 
 
-def _build_slu_prompt(
-    transcript: str,
-    candidates: List[str],
-    rationale_text: str = "",
-    input_format: str = "asr",
-) -> str:
-    transcript = str(transcript or "").strip()
-    rationale_text = str(rationale_text or "").strip()
+def _build_audio_slu_prompt(input_format: str = "asr") -> str:
     context_desc = _context_desc(input_format)
     body = (
         "<slu>\n"
@@ -154,11 +143,20 @@ def _build_slu_prompt(
         "Predict SLU label.\n"
         "Output JSON only with keys: scenario, action, entities.\n"
     )
+    return body
+
+
+def _build_text_slu_prompt(transcript: str, input_format: str = "asr") -> str:
+    transcript = str(transcript or "").strip()
+    context_desc = _context_desc(input_format)
+    body = (
+        "<slu>\n"
+        f"Analyze the provided text in {context_desc}.\n"
+        "Predict SLU label.\n"
+        "Output JSON only with keys: scenario, action, entities.\n"
+    )
     if transcript:
         body += f"Transcript: {transcript}\n"
-    body += "N-best hypotheses:\n" + base.format_nbest(candidates) + "\n"
-    if rationale_text:
-        body += f"Rationale hint: {rationale_text}\n"
     return body
 
 
@@ -173,13 +171,13 @@ def build_multitask_items_from_rationale(
     input_format: str = "asr",
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
-    fallback_text_items: List[Dict[str, Any]] = []
     if not os.path.exists(jsonl_path):
         logger.warning("Rationale JSONL not found: %s", jsonl_path)
         return items
 
     records = base.load_rationale_records(jsonl_path)
     parsed_rows = 0
+    rows_missing_audio = 0
     for record in records:
         if max_samples is not None and parsed_rows >= max_samples:
             break
@@ -220,18 +218,19 @@ def build_multitask_items_from_rationale(
             "target_obj": target_obj,
         }
 
+        # For rationale-derived tasks, train only audio-conditioned tasks.
+        if not audio_path:
+            rows_missing_audio += 1
+            continue
+
         if include_ras and rationale_text:
             ras_item = {
                 **common,
                 "task_tag": "<ras>",
-                "prompt_text": _build_ras_prompt(transcript, candidates, input_format=input_format),
+                "prompt_text": _build_audio_ras_prompt(input_format=input_format),
                 "target": rationale_text,
             }
-            if audio_path:
-                items.append(ras_item)
-            elif add_text_only:
-                items.append({**ras_item, "audio_path": None})
-            fallback_text_items.append({**ras_item, "audio_path": None})
+            items.append(ras_item)
 
         if include_slu:
             slu_target = _make_slu_target(
@@ -242,29 +241,17 @@ def build_multitask_items_from_rationale(
             slu_item = {
                 **common,
                 "task_tag": "<slu>",
-                "prompt_text": _build_slu_prompt(
-                    transcript,
-                    candidates,
-                    rationale_text,
-                    input_format=input_format,
-                ),
+                "prompt_text": _build_audio_slu_prompt(input_format=input_format),
                 "target": slu_target,
             }
-            if audio_path:
-                items.append(slu_item)
-            elif add_text_only:
-                items.append({**slu_item, "audio_path": None})
-            fallback_text_items.append({**slu_item, "audio_path": None})
+            items.append(slu_item)
 
-    if (not add_text_only) and len(items) == 0 and allow_text_fallback_when_audio_missing:
-        logger.warning(
-            "No audio could be resolved from %s. Falling back to text-only items (%d rows).",
-            jsonl_path,
-            len(fallback_text_items),
-        )
-        items.extend(fallback_text_items)
-
-    logger.info("Loaded multitask rationale items: %s -> %d", jsonl_path, len(items))
+    logger.info(
+        "Loaded multitask rationale items: %s -> %d (skipped_no_audio=%d)",
+        jsonl_path,
+        len(items),
+        rows_missing_audio,
+    )
     return items
 
 
@@ -307,12 +294,7 @@ def build_gold_text_slu_items(
                     "rationale_text": "",
                     "target_obj": {"scenario": scenario, "action": action, "entities": entities},
                     "task_tag": "<slu>",
-                    "prompt_text": _build_slu_prompt(
-                        transcript,
-                        [transcript] if transcript else [],
-                        "",
-                        input_format=input_format,
-                    ),
+                    "prompt_text": _build_text_slu_prompt(transcript, input_format=input_format),
                     "target": _make_slu_target(scenario, action, entities),
                 }
             )
@@ -353,6 +335,8 @@ def build_test_items_from_slurp(
                 filename = str(recordings[0].get("file", "")).strip()
             audio_path = base.resolve_audio_path(audio_dir, filename) if filename else None
 
+            if not audio_path:
+                continue
             items.append(
                 {
                     "id": str(sample_id),
@@ -364,12 +348,7 @@ def build_test_items_from_slurp(
                     "rationale_text": "",
                     "target_obj": {"scenario": scenario, "action": action, "entities": entities},
                     "task_tag": "<slu>",
-                    "prompt_text": _build_slu_prompt(
-                        transcript,
-                        [transcript] if transcript else [],
-                        "",
-                        input_format=input_format,
-                    ),
+                    "prompt_text": _build_audio_slu_prompt(input_format=input_format),
                     "target": _make_slu_target(scenario, action, entities),
                 }
             )
@@ -380,19 +359,9 @@ def build_test_items_from_slurp(
 def force_slu_test_mode(items: List[Dict[str, Any]], input_format: str = "asr") -> List[Dict[str, Any]]:
     forced: List[Dict[str, Any]] = []
     for item in items:
-        transcript = str(item.get("transcript", "") or "")
-        candidates = item.get("candidates", [])
-        if not isinstance(candidates, list):
-            candidates = []
-        rationale_text = str(item.get("rationale_text", "") or "")
         new_item = dict(item)
         new_item["task_tag"] = "<slu>"
-        new_item["prompt_text"] = _build_slu_prompt(
-            transcript,
-            candidates,
-            rationale_text,
-            input_format=input_format,
-        )
+        new_item["prompt_text"] = _build_audio_slu_prompt(input_format=input_format)
         forced.append(new_item)
     return forced
 
