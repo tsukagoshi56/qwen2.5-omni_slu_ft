@@ -1363,6 +1363,7 @@ def run_distributed_inference(
     world_size,
     batch_size=1,
     max_new_tokens: int = 2048,
+    num_workers: int = 0,
 ):
     model.eval()
 
@@ -1383,7 +1384,7 @@ def run_distributed_inference(
         audio_loader = DataLoader(
             MixedDataset(my_audio_items),
             batch_size=batch_size,
-            num_workers=4,
+            num_workers=num_workers,
             collate_fn=InferenceCollator(processor),
             drop_last=False,
             shuffle=False,
@@ -1411,7 +1412,7 @@ def run_distributed_inference(
         text_loader = DataLoader(
             MixedDataset(my_text_items),
             batch_size=batch_size,
-            num_workers=4,
+            num_workers=num_workers,
             collate_fn=InferenceCollator(processor),
             drop_last=False,
             shuffle=False,
@@ -1614,6 +1615,12 @@ def main():
     )
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
+        "--inference_num_workers",
+        type=int,
+        default=0,
+        help="DataLoader workers for test inference (0 is safer to avoid deadlocks).",
+    )
+    parser.add_argument(
         "--train_audio_encoder",
         action="store_true",
         help="Enable training of audio_tower (audio encoder).",
@@ -1793,6 +1800,8 @@ def main():
     )
 
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
+    if rank == 0:
+        logger.info("Test inference DataLoader workers: %d", args.inference_num_workers)
     run_distributed_inference(
         model=model,
         processor=processor,
@@ -1803,6 +1812,7 @@ def main():
         world_size=world_size,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
+        num_workers=args.inference_num_workers,
     )
 
     if world_size > 1:
