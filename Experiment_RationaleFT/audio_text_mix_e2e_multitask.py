@@ -413,6 +413,12 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument(
+        "--eval_max_samples",
+        type=int,
+        default=None,
+        help="Cap eval rationale samples for faster validation (None means no extra cap).",
+    )
     parser.add_argument("--gold_text_slu_limit", type=int, default=None)
     parser.add_argument("--gold_text_slu_eval_limit", type=int, default=None)
     parser.add_argument("--disable_ras", action="store_true", help="Disable <ras> samples.")
@@ -441,7 +447,9 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_max_samples = args.max_samples
-    eval_max_samples = (args.max_samples // 2) if args.max_samples else None
+    eval_max_samples = args.eval_max_samples
+    if eval_max_samples is None:
+        eval_max_samples = (args.max_samples // 2) if args.max_samples else None
     test_max_samples = None
     if args.smoke:
         train_max_samples = 2000

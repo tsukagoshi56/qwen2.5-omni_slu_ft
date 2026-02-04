@@ -342,6 +342,7 @@ CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
 Useful options:
 - `--disable_ras`: train only `<slu>`
 - `--disable_rationale_slu`: keep `<ras>` + gold-text `<slu>`, but disable `<slu>` from rationale files
+- `--eval_max_samples`: cap rationale eval subset for faster validation
 - `--gold_text_slu_limit`, `--gold_text_slu_eval_limit`: cap mixed gold-text SLU size
 - `--train_audio_encoder`: enable audio encoder fine-tuning
 - `--input_format {asr,ipa,arp}`: keep prompt context type compatible with the original script (default: `asr`)
