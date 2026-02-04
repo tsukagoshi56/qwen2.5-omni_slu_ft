@@ -486,6 +486,8 @@ def main():
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
+        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
         bf16=True,
         logging_steps=1 if args.smoke else 10,
         eval_strategy="steps" if len(eval_items) > 0 else "no",
