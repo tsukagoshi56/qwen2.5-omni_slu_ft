@@ -78,3 +78,22 @@ The script produces:
 - **`prediction.jsonl`**: Full output including generated text.
 - **`prediction_labels_only.jsonl`**: (If `--export_label_eval`) JSONL with only the parsed SLU labels.
 - **`metrics_label_only.json`**: (If `--export_label_eval`) Calculated accuracy and F1 scores.
+
+## Rationale-Only Inference (`<rat>` / `<ras>`)
+
+Use `run_rat_inference.py` to load a saved checkpoint and generate explanation outputs only.
+
+```bash
+uv run python Experiment_RationaleFT/run_rat_inference.py \
+  --checkpoint_dir outputs/qwen_multitask_ras_slu_ft \
+  --input_file slurp/dataset/slurp/test.jsonl \
+  --audio_dir /path/to/slurp/audio/slurp_real \
+  --output_file outputs/qwen_multitask_ras_slu_ft/prediction_rat.jsonl \
+  --task_tag rat \
+  --batch_size 4 \
+  --inference_num_workers 0
+```
+
+Notes:
+- `--task_tag rat` uses `<rat>` prompt, `--task_tag ras` uses `<ras>` prompt.
+- Output JSONL includes `raw_output` and normalized `rationale_text`.
