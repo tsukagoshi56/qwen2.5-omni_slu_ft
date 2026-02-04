@@ -330,10 +330,20 @@ def build_test_items_from_slurp(
             )
             sample_id = base.pick_first_nonempty(rec.get("slurp_id"), rec.get("id"), f"test_{idx}")
             filename = ""
+            audio_path = None
             recordings = rec.get("recordings", []) or []
-            if recordings and isinstance(recordings[0], dict):
-                filename = str(recordings[0].get("file", "")).strip()
-            audio_path = base.resolve_audio_path(audio_dir, filename) if filename else None
+            if isinstance(recordings, list):
+                for recording in recordings:
+                    if not isinstance(recording, dict):
+                        continue
+                    cand_file = str(recording.get("file", "")).strip()
+                    if not cand_file:
+                        continue
+                    cand_audio_path = base.resolve_audio_path(audio_dir, cand_file)
+                    if cand_audio_path:
+                        filename = cand_file
+                        audio_path = cand_audio_path
+                        break
 
             if not audio_path:
                 continue
