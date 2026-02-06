@@ -404,7 +404,9 @@ def main() -> None:
             model,
             device_ids=[local_rank] if torch.cuda.is_available() else None,
             output_device=local_rank if torch.cuda.is_available() else None,
-            find_unused_parameters=False,
+            # Audio/Text batches can activate different submodules per step.
+            # Enable unused-parameter detection to avoid DDP reduction errors.
+            find_unused_parameters=True,
         )
     model.train()
 
