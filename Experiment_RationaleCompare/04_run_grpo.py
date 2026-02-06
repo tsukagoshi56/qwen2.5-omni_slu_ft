@@ -192,6 +192,32 @@ def generate_samples(
     return outputs
 
 
+def _shorten(text: str, max_chars: int) -> str:
+    text = str(text or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...(truncated)"
+
+
+def _debug_write_jsonl(path: str, row: Dict[str, Any]) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _debug_print_dataset(items: List[GrpoItem], preview_items: int) -> None:
+    audio_count = sum(1 for x in items if x.mode == "audio")
+    text_count = sum(1 for x in items if x.mode == "text")
+    print(f"[DEBUG] dataset_size={len(items)} audio_items={audio_count} text_items={text_count}")
+    for idx, item in enumerate(items[:preview_items]):
+        print(
+            "[DEBUG] item_preview "
+            f"idx={idx} slurp_id={item.slurp_id} mode={item.mode} "
+            f"audio_path={item.audio_path} "
+            f"sentence_len={len(item.sentence)} "
+            f"gold={json.dumps(item.gold_label, ensure_ascii=False)}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run GRPO fine-tuning after SF-CoT.")
     parser.add_argument("--train_file", type=str, required=True)
@@ -222,6 +248,17 @@ def main() -> None:
     parser.add_argument("--reward_w_action", type=float, default=1.0)
     parser.add_argument("--reward_w_intent", type=float, default=0.5)
     parser.add_argument("--reward_w_entity", type=float, default=1.0)
+    parser.add_argument("--debug", action="store_true", help="Print rich debug information.")
+    parser.add_argument("--debug_preview_items", type=int, default=5, help="Dataset preview rows in debug.")
+    parser.add_argument("--debug_preview_steps", type=int, default=3, help="Training steps to trace in debug.")
+    parser.add_argument("--debug_preview_samples", type=int, default=3, help="Generated samples to show per item.")
+    parser.add_argument("--debug_max_chars", type=int, default=1200, help="Max chars per debug text field.")
+    parser.add_argument(
+        "--debug_output_file",
+        type=str,
+        default="",
+        help="Optional JSONL path for debug traces (default: <output_dir>/grpo_debug_trace.jsonl).",
+    )
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -233,11 +270,42 @@ def main() -> None:
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     output_dir = os.path.join(base_dir, args.output_dir) if not os.path.isabs(args.output_dir) else args.output_dir
     os.makedirs(output_dir, exist_ok=True)
+    if args.debug:
+        if args.debug_output_file:
+            debug_output_path = (
+                args.debug_output_file
+                if os.path.isabs(args.debug_output_file)
+                else os.path.join(base_dir, args.debug_output_file)
+            )
+        else:
+            debug_output_path = os.path.join(output_dir, "grpo_debug_trace.jsonl")
+        os.makedirs(os.path.dirname(debug_output_path), exist_ok=True)
+        if os.path.exists(debug_output_path):
+            os.remove(debug_output_path)
+    else:
+        debug_output_path = ""
 
     metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
+    if args.debug:
+        print("[DEBUG] ===== Run Config =====")
+        print(
+            f"[DEBUG] train_path={train_path} metadata_path={metadata_path} audio_dir={audio_dir} output_dir={output_dir}"
+        )
+        print(
+            f"[DEBUG] model={args.model_name_or_path} ref_model={args.ref_model_name_or_path or args.model_name_or_path}"
+        )
+        print(
+            "[DEBUG] hyperparams "
+            f"batch_size={args.batch_size} group_size={args.group_size} max_new_tokens={args.max_new_tokens} "
+            f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
+            f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps}"
+        )
+        print(f"[DEBUG] debug_output_file={debug_output_path}")
+        _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
+
     dataset = GrpoDataset(items)
     dataloader = DataLoader(
         dataset,
@@ -288,6 +356,18 @@ def main() -> None:
                 else:
                     prompt = render_infer_text_prompt(db_definitions, item.sentence)
 
+                debug_step = args.debug and (global_step < args.debug_preview_steps)
+                if debug_step:
+                    chat_prompt = build_chat_input(processor, prompt, audio is not None)
+                    print(
+                        f"[DEBUG][step={global_step}] item slurp_id={item.slurp_id} mode={item.mode} "
+                        f"audio_used={audio is not None}"
+                    )
+                    print("[DEBUG] prompt_raw:")
+                    print(_shorten(prompt, args.debug_max_chars))
+                    print("[DEBUG] chat_prompt_raw:")
+                    print(_shorten(chat_prompt, args.debug_max_chars))
+
                 samples = generate_samples(
                     model=model,
                     processor=processor,
@@ -321,6 +401,16 @@ def main() -> None:
                     rewards.append(reward)
                     pred_labels.append(pred_label)
 
+                if debug_step:
+                    preview_n = min(args.debug_preview_samples, len(samples))
+                    for i in range(preview_n):
+                        print(
+                            f"[DEBUG][step={global_step}] sample#{i} reward={rewards[i]:.4f} "
+                            f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
+                        )
+                        print("[DEBUG] sample_raw:")
+                        print(_shorten(samples[i], args.debug_max_chars))
+
                 mean_reward = sum(rewards) / max(len(rewards), 1)
                 if args.advantage_normalize:
                     variance = sum((r - mean_reward) ** 2 for r in rewards) / max(len(rewards), 1)
@@ -328,7 +418,7 @@ def main() -> None:
                 else:
                     std = 1.0
 
-                for sample_text, reward in zip(samples, rewards):
+                for sample_idx, (sample_text, reward) in enumerate(zip(samples, rewards)):
                     advantage = (reward - mean_reward) / (std + 1e-6)
                     prompt_text = build_chat_input(processor, prompt, audio is not None)
                     full_text = prompt_text + sample_text
@@ -356,6 +446,33 @@ def main() -> None:
                     loss = -(advantage * logprob) + args.kl_beta * kl
                     batch_loss += loss
                     sample_count += 1
+
+                    if debug_step and sample_idx < args.debug_preview_samples:
+                        trace_row = {
+                            "global_step": global_step,
+                            "epoch": epoch,
+                            "slurp_id": item.slurp_id,
+                            "mode": item.mode,
+                            "sample_idx": sample_idx,
+                            "reward": float(reward),
+                            "mean_reward": float(mean_reward),
+                            "std_reward": float(std),
+                            "advantage": float(advantage),
+                            "logprob": float(logprob.item()),
+                            "ref_logprob": float(ref_logprob.item()),
+                            "kl": float(kl.item()),
+                            "loss": float(loss.item()),
+                            "gold_label": item.gold_label,
+                            "pred_label": pred_labels[sample_idx] if sample_idx < len(pred_labels) else {},
+                            "prompt": _shorten(prompt, args.debug_max_chars),
+                            "sample_raw": _shorten(sample_text, args.debug_max_chars),
+                        }
+                        _debug_write_jsonl(debug_output_path, trace_row)
+                        print(
+                            f"[DEBUG][step={global_step}] sample#{sample_idx} "
+                            f"adv={advantage:.4f} logprob={logprob.item():.4f} "
+                            f"ref={ref_logprob.item():.4f} kl={kl.item():.4f} loss={loss.item():.4f}"
+                        )
 
             if sample_count == 0:
                 continue
