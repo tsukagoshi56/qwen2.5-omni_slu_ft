@@ -13,6 +13,7 @@ Rules:
 - C must include at least one competing intent and one competing slot value.
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
+- List candidates in the exact order they appear in DB Definitions.
 - No conversational filler.
 
 ---
@@ -36,6 +37,7 @@ Rules:
 - C must include at least one competing intent and one competing slot value.
 - Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
+- List candidates in the exact order they appear in DB Definitions.
 - No conversational filler.
 
 ---
@@ -58,6 +60,7 @@ Rules:
 - C must include at least one competing intent and one competing slot value.
 - Cite specific evidence from audio.
 - Output exactly 3 lines (C, R, J) and nothing else.
+- List candidates in the exact order they appear in DB Definitions.
 - No conversational filler.
 
 ---

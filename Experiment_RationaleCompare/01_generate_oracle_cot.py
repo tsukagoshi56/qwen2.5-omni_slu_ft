@@ -106,6 +106,41 @@ def _extract_crj(output: str) -> Tuple[str, bool]:
     return output, False
 
 
+def _reorder_candidates(values: List[str], order: List[str]) -> List[str]:
+    order_map = {v: i for i, v in enumerate(order)}
+    known = [v for v in values if v in order_map]
+    unknown = [v for v in values if v not in order_map]
+    known.sort(key=lambda v: order_map[v])
+    return known + unknown
+
+
+def _reorder_c_line(c_line: str, intent_order: List[str], slot_order: List[str]) -> str:
+    if not c_line.startswith("C:"):
+        return c_line
+    content = c_line[2:].strip()
+    parts = [p.strip() for p in content.split(";", 1)]
+    intent_part = parts[0] if parts else ""
+    slot_part = parts[1] if len(parts) > 1 else ""
+
+    intents = [x.strip() for x in intent_part.split("|") if x.strip()]
+    intents = _reorder_candidates(intents, intent_order)
+    intent_part_new = " | ".join(intents) if intents else intent_part
+
+    slot_part_new = slot_part
+    if slot_part:
+        # If multiple slot types are present, reorder by slot_order.
+        slot_chunks = [s.strip() for s in slot_part.split(",") if s.strip()]
+        if len(slot_chunks) > 1:
+            def slot_key(chunk: str) -> str:
+                return chunk.split(":", 1)[0].strip()
+            slot_chunks = _reorder_candidates(slot_chunks, slot_order=[s for s in slot_order])
+            slot_part_new = ", ".join(slot_chunks)
+
+    if slot_part_new:
+        return f"C: {intent_part_new}; {slot_part_new}"
+    return f"C: {intent_part_new}"
+
+
 def _log_error(message: str) -> None:
     with _error_lock:
         if tqdm is not None:
@@ -166,6 +201,8 @@ def _run_single(
     idx: int,
     record: Dict[str, Any],
     db_definitions: str,
+    intent_order: List[str],
+    slot_order: List[str],
     args: argparse.Namespace,
 ) -> Optional[Tuple[int, Dict[str, Any], str, str, str]]:
     gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
@@ -178,7 +215,10 @@ def _run_single(
     output, prompt_used, error_msg, api_meta = _generate_with_retries(prompt, args)
     cleaned, has_crj = _extract_crj(output)
     if has_crj:
-        output = cleaned
+        lines = cleaned.splitlines()
+        if lines:
+            lines[0] = _reorder_c_line(lines[0], intent_order, slot_order)
+        output = "\n".join(lines)
     else:
         if not error_msg:
             error_msg = "missing_crj_lines"
@@ -240,6 +280,8 @@ def main() -> None:
 
     metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
+    intent_order = [str(x).strip() for x in metadata.get("intents", []) or [] if str(x).strip()]
+    slot_order = [str(x).strip() for x in metadata.get("slot_types", []) or [] if str(x).strip()]
 
     items = read_jsonl(input_path)
     if args.limit:
@@ -256,7 +298,7 @@ def main() -> None:
     if args.parallel > 1 and ThreadPoolExecutor is not None:
         with ThreadPoolExecutor(max_workers=args.parallel) as executor:
             futures = [
-                executor.submit(_run_single, idx, record, db_definitions, args)
+                executor.submit(_run_single, idx, record, db_definitions, intent_order, slot_order, args)
                 for idx, record in enumerate(items)
             ]
             iterator = as_completed(futures) if as_completed is not None else futures
@@ -300,7 +342,7 @@ def main() -> None:
         if tqdm is not None:
             iterator = tqdm(items, desc="Oracle CoT", unit="sample")
         for idx, record in enumerate(iterator):
-            res = _run_single(idx, record, db_definitions, args)
+            res = _run_single(idx, record, db_definitions, intent_order, slot_order, args)
             if res is None:
                 continue
             idx, row, prompt, gold_text, gold_json = res
