@@ -480,7 +480,7 @@ def main() -> None:
         help="Optional JSONL path for debug traces (default: <output_dir>/grpo_debug_trace.jsonl).",
     )
     parser.add_argument("--smoke", action="store_true", help="Run a tiny sanity-check setting.")
-    parser.add_argument("--smoke_train_samples", type=int, default=64)
+    parser.add_argument("--smoke_train_samples", type=int, default=200)
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
     parser.set_defaults(include_text=False)

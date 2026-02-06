@@ -90,6 +90,15 @@ def _load_config(path: str) -> Dict[str, Any]:
     return data
 
 
+def _tail_lines(path: str, n: int = 80) -> List[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        return lines[-n:]
+    except Exception:
+        return []
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sweep runner for 04_run_grpo.py")
     parser.add_argument("--config", type=str, required=True, help="Path to sweep JSON config.")
@@ -191,6 +200,9 @@ def main() -> None:
                 assert proc.stdout is not None
                 for line in proc.stdout:
                     log_f.write(line)
+                    # Stream child process output so errors are visible immediately.
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
                     if "[GRPO-EVAL-FINAL]" in line:
                         parsed = _parse_metric_line(line, "[GRPO-EVAL-FINAL]")
                         if parsed:
@@ -222,7 +234,15 @@ def main() -> None:
             score = _score_from_summary(row, rank_by)
             print(f"[SWEEP] done elapsed={elapsed:.1f}s score({rank_by})={score}")
         else:
-            print(f"[SWEEP] failed return_code={return_code}")
+            print(f"[SWEEP] failed return_code={return_code} log={log_path}")
+            tail = _tail_lines(log_path, n=80)
+            if tail:
+                print("[SWEEP] ---- tail(run.log) ----")
+                for line in tail:
+                    sys.stdout.write(line)
+                if not tail[-1].endswith("\n"):
+                    print("")
+                print("[SWEEP] ---- end tail ----")
             if args.stop_on_error:
                 break
 
