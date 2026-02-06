@@ -83,9 +83,9 @@ def _generate_with_retries(
         if fmt_attempt > 0:
             prompt_used = (
                 prompt
-                + \"\\n\\nReminder: Include a non-empty C line with at least one competing intent and one competing slot value.\"
+                + "\n\nReminder: Include a non-empty C line with at least one competing intent and one competing slot value."
             )
-        output = \"\"
+        output = ""
         for attempt in range(args.retry + 1):
             try:
                 client = _get_thread_client()
@@ -101,7 +101,7 @@ def _generate_with_retries(
             except Exception as exc:
                 last_exc = exc
                 if attempt >= args.retry:
-                    output = \"\"
+                    output = ""
                     break
                 time.sleep(args.retry_sleep)
         if not output:
