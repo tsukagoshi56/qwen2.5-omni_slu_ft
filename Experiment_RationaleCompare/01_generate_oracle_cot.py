@@ -6,6 +6,8 @@ import random
 import re
 import threading
 import time
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -210,6 +212,34 @@ def _merge_worker_outputs(base_output_path: str, num_workers: int, cleanup: bool
     return len(merged)
 
 
+def _strip_arg(args_list: List[str], flag: str, has_value: bool = True) -> List[str]:
+    if flag not in args_list:
+        return args_list
+    cleaned: List[str] = []
+    i = 0
+    while i < len(args_list):
+        if args_list[i] == flag:
+            i += 1
+            if has_value and i < len(args_list):
+                i += 1
+            continue
+        cleaned.append(args_list[i])
+        i += 1
+    return cleaned
+
+
+def _spawn_workers(num_workers: int, base_args: List[str]) -> List[subprocess.Popen]:
+    procs: List[subprocess.Popen] = []
+    base_args = _strip_arg(base_args, "--worker_rank", has_value=True)
+    base_args = _strip_arg(base_args, "--merge_only", has_value=False)
+    base_args = _strip_arg(base_args, "--no_spawn_workers", has_value=False)
+    script_path = os.path.abspath(__file__)
+    for rank in range(1, num_workers):
+        cmd = [sys.executable, script_path] + base_args + ["--worker_rank", str(rank), "--no_spawn_workers"]
+        procs.append(subprocess.Popen(cmd, env=os.environ.copy()))
+    return procs
+
+
 def _generate_with_retries(
     prompt: str,
     args: argparse.Namespace,
@@ -333,6 +363,7 @@ def main() -> None:
     parser.add_argument("--merge_workers", action="store_true", help="Merge worker shard outputs into output_file.")
     parser.add_argument("--merge_only", action="store_true", help="Only merge worker shard outputs and exit.")
     parser.add_argument("--merge_cleanup", action="store_true", help="Remove worker shard files after merge.")
+    parser.add_argument("--no_spawn_workers", action="store_true", help="Do not auto-spawn worker processes.")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
@@ -355,6 +386,15 @@ def main() -> None:
         # Always shard outputs and auto-merge when using multiple workers.
         args.append_worker_suffix = True
         args.merge_workers = True
+
+    worker_procs: List[subprocess.Popen] = []
+    if (
+        args.num_workers > 1
+        and args.worker_rank == 0
+        and (not args.no_spawn_workers)
+        and (not args.merge_only)
+    ):
+        worker_procs = _spawn_workers(args.num_workers, sys.argv[1:])
 
     rng = random.Random(args.seed + args.worker_rank)
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -496,6 +536,9 @@ def main() -> None:
         write_jsonl(output_path, final_rows)
     if args.error_file:
         write_jsonl(args.error_file, error_rows)
+
+    for proc in worker_procs:
+        proc.wait()
 
     if args.merge_workers and args.num_workers > 1 and args.append_worker_suffix and args.worker_rank == 0:
         _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
