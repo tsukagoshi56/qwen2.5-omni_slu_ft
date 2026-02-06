@@ -49,14 +49,10 @@ def build_db_definitions(metadata: Dict[str, List[str]]) -> str:
         cleaned = [str(v).strip() for v in values if str(v).strip()]
         return f"{label}: " + (", ".join(cleaned) if cleaned else "(none)")
 
-    scenarios = sorted(set(metadata.get("scenarios", []) or []))
-    actions = sorted(set(metadata.get("actions", []) or []))
     intents = sorted({str(x).strip() for x in metadata.get("intents", []) or [] if str(x).strip()})
     slot_types = sorted(set(metadata.get("slot_types", []) or []))
 
     parts = [
-        fmt("Scenarios", scenarios),
-        fmt("Actions", actions),
         fmt("Intents", intents),
         fmt("Slot Types", slot_types),
     ]
