@@ -14,6 +14,7 @@ Rules:
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
+- Use intent labels with '_' (e.g., alarm_query), never ':'.
 - No conversational filler.
 
 ---
@@ -38,6 +39,7 @@ Rules:
 - Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
+- Use intent labels with '_' (e.g., alarm_query), never ':'.
 - No conversational filler.
 
 ---
@@ -61,6 +63,7 @@ Rules:
 - Cite specific evidence from audio.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
+- Use intent labels with '_' (e.g., alarm_query), never ':'.
 - No conversational filler.
 
 ---

@@ -60,7 +60,7 @@ def build_db_definitions(metadata: Dict[str, List[str]]) -> str:
         cleaned = [str(v).strip() for v in values if str(v).strip()]
         return f"{label}: " + (", ".join(cleaned) if cleaned else "(none)")
 
-    intents = unique_keep_order(metadata.get("intents", []) or [])
+    intents = [normalize_intent_label(x) for x in unique_keep_order(metadata.get("intents", []) or [])]
     slot_types = unique_keep_order(metadata.get("slot_types", []) or [])
 
     parts = [

@@ -36,6 +36,7 @@ from prompts import render_oracle_prompt
 
 _thread_local = threading.local()
 _error_lock = threading.Lock()
+_DEBUG = False
 
 
 def _build_client() -> Any:
@@ -106,6 +107,10 @@ def _extract_crj(output: str) -> Tuple[str, bool]:
     return output, False
 
 
+def _normalize_intent(value: str) -> str:
+    return value.replace(":", "_").strip()
+
+
 def _reorder_candidates(values: List[str], order: List[str]) -> List[str]:
     order_map = {v: i for i, v in enumerate(order)}
     known = [v for v in values if v in order_map]
@@ -122,9 +127,10 @@ def _reorder_c_line(c_line: str, intent_order: List[str], slot_order: List[str])
     intent_part = parts[0] if parts else ""
     slot_part = parts[1] if len(parts) > 1 else ""
 
-    intents = [x.strip() for x in intent_part.split("|") if x.strip()]
-    intents = _reorder_candidates(intents, intent_order)
-    intent_part_new = " | ".join(intents) if intents else intent_part
+    intents_raw = [x.strip() for x in intent_part.split("|") if x.strip()]
+    intents_norm = [_normalize_intent(x) for x in intents_raw]
+    intents_norm = _reorder_candidates(intents_norm, intent_order)
+    intent_part_new = " | ".join(intents_norm) if intents_norm else intent_part
 
     slot_part_new = slot_part
     if slot_part:
@@ -142,6 +148,8 @@ def _reorder_c_line(c_line: str, intent_order: List[str], slot_order: List[str])
 
 
 def _log_error(message: str) -> None:
+    if not _DEBUG:
+        return
     with _error_lock:
         if tqdm is not None:
             tqdm.write(message)
@@ -222,6 +230,11 @@ def _run_single(
     else:
         if not error_msg:
             error_msg = "missing_crj_lines"
+    if args.debug:
+        word_count = len((output or "").split())
+        _log_error(
+            f"[DEBUG] slurp_id={record.get('slurp_id')} words={word_count} tokens={api_meta}"
+        )
 
     result = {
         "slurp_id": record.get("slurp_id"),
@@ -264,6 +277,9 @@ def main() -> None:
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     args = parser.parse_args()
 
+    global _DEBUG
+    _DEBUG = args.debug
+
     if args.num_workers < 1:
         raise ValueError("num_workers must be >= 1")
     if args.worker_rank < 0 or args.worker_rank >= args.num_workers:
@@ -280,7 +296,9 @@ def main() -> None:
 
     metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
-    intent_order = [str(x).strip() for x in metadata.get("intents", []) or [] if str(x).strip()]
+    intent_order = [
+        _normalize_intent(str(x)) for x in metadata.get("intents", []) or [] if str(x).strip()
+    ]
     slot_order = [str(x).strip() for x in metadata.get("slot_types", []) or [] if str(x).strip()]
 
     items = read_jsonl(input_path)
