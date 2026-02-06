@@ -41,24 +41,21 @@ try:
 except ImportError:
     HAS_JIWER = False
 
-try:
-    from common import build_db_definitions as compare_build_db_definitions
-    from common import load_metadata as compare_load_metadata
-    from prompts import render_infer_audio_prompt, render_infer_text_prompt
-
-    HAS_COMPARE_PROMPTS = True
-except ImportError:
-    HAS_COMPARE_PROMPTS = False
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PROMPT_HEADER = (
-    "Infer the intent and slots from the input.\n"
-    "Output exactly 3 lines: C, R, J."
+SYSTEM_PROMPT_TEXT = (
+    'System: SLU Logic Analyst. Infer the intent and slots using "Transcript".'
 )
-PROMPT_DB_DEFINITIONS = ""
-USE_COMPARE_PROMPTS = True
+SYSTEM_PROMPT_AUDIO = (
+    'System: SLU Logic Analyst. Infer the intent and slots using "Audio".'
+)
+PROMPT_OUTPUT_FORMAT = (
+    "Output Format:\n"
+    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+    "R: label1!reason1; label2!reason2; ...\n"
+    "J: [Final JSON]"
+)
 
 
 def format_nbest(candidates: List[str], max_items: int = 5) -> str:
@@ -100,17 +97,19 @@ def candidate_to_text(value: Any) -> str:
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
 
-    if USE_COMPARE_PROMPTS and PROMPT_DB_DEFINITIONS and HAS_COMPARE_PROMPTS:
-        if include_transcript:
-            return render_infer_text_prompt(PROMPT_DB_DEFINITIONS, transcript)
-        return render_infer_audio_prompt(PROMPT_DB_DEFINITIONS)
-
-    if item.get("prompt_text"):
-        return str(item["prompt_text"]).strip()
-
     if include_transcript and transcript:
-        return f"{PROMPT_HEADER}\n\nTranscript: {transcript}"
-    return PROMPT_HEADER
+        return (
+            f"{SYSTEM_PROMPT_TEXT}\n\n"
+            f"{PROMPT_OUTPUT_FORMAT}\n\n"
+            "[Input Data]\n"
+            f"- Transcript: {transcript}"
+        )
+    return (
+        f"{SYSTEM_PROMPT_AUDIO}\n\n"
+        f"{PROMPT_OUTPUT_FORMAT}\n\n"
+        "[Input Data]\n"
+        "- Audio: <AUDIO>"
+    )
 
 
 def build_training_target(rationale_text: str, final_json: str) -> str:
@@ -612,7 +611,6 @@ def build_items_from_rationale_jsonl(
     print_audio_search_paths: bool = False,
     audio_search_print_limit: int = 100,
     strict_audio_missing: bool = False,
-    input_format: str = "asr",
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -640,23 +638,6 @@ def build_items_from_rationale_jsonl(
 
             # Extract messages and audios first
             user_text, assistant_text = extract_messages_texts(data)
-
-            # Prepend explicit task instruction based on format
-            if input_format == "ipa":
-                context_desc = "IPA (International Phonetic Alphabet) n-best context"
-            elif input_format == "arp":
-                context_desc = "ARPAbet n-best context"
-            else:
-                context_desc = "ASR n-best context"
-
-            TASK_INSTRUCTION = (
-                f"Analyze the provided audio and {context_desc} to predict the SLU label (scenario, action, entities) with a rationale. "
-                "Output the result in JSON format."
-            )
-            if user_text:
-                user_text = f"{TASK_INSTRUCTION}\n\n{user_text}"
-            else:
-                user_text = TASK_INSTRUCTION
 
             raw_audios = data.get("audios")
             
@@ -1625,12 +1606,12 @@ def main():
     parser.add_argument(
         "--train_file",
         type=str,
-        default="/experiments/training_file_make/ASR_cot_data_train.jsonl",
+        default="Experiment_RationaleCompare/sft_success_train.jsonl",
     )
     parser.add_argument(
         "--eval_file",
         type=str,
-        default="/lustre/home/71200138/qwen_test/experiments/CoT_maker/ASR_cot_devel.jsonl",
+        default="Experiment_RationaleCompare/sft_success_train.jsonl",
     )
     parser.add_argument(
         "--test_file",
@@ -1642,17 +1623,6 @@ def main():
         "--audio_dir",
         type=str,
         default="/lustre/home/71200138/INTERSPEECH/experiment1/slurp/audio/slurp_real",
-    )
-    parser.add_argument(
-        "--metadata_file",
-        type=str,
-        default="Experiment_3/slurp_metadata.json",
-        help="SLURP metadata file used to build DB definitions for compare prompts.",
-    )
-    parser.add_argument(
-        "--disable_compare_prompts",
-        action="store_true",
-        help="Disable prompts.py templates and fall back to record/user prompt text.",
     )
 
     parser.add_argument("--max_samples", type=int, default=None)
@@ -1709,45 +1679,7 @@ def main():
     )
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
-    parser.add_argument(
-        "--input_format",
-        type=str,
-        default="asr",
-        choices=["asr", "ipa", "arp"],
-        help="Input text format for the prompt instruction (asr/ipa/arp).",
-    )
-
     args = parser.parse_args()
-
-    # Handle legacy flags if user tries to use them (optional convenience)
-    # But since we use argparse choices, we rely on --input_format argument.
-    global PROMPT_DB_DEFINITIONS, USE_COMPARE_PROMPTS
-    USE_COMPARE_PROMPTS = not args.disable_compare_prompts
-    PROMPT_DB_DEFINITIONS = ""
-
-    if USE_COMPARE_PROMPTS:
-        if not HAS_COMPARE_PROMPTS:
-            logger.warning(
-                "Compare prompt modules not available (common.py/prompts.py). "
-                "Falling back to prompt_text/default prompt."
-            )
-            USE_COMPARE_PROMPTS = False
-        else:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            metadata_path = (
-                args.metadata_file
-                if os.path.isabs(args.metadata_file)
-                else os.path.join(base_dir, args.metadata_file)
-            )
-            if os.path.exists(metadata_path):
-                metadata = compare_load_metadata(metadata_path)
-                PROMPT_DB_DEFINITIONS = compare_build_db_definitions(metadata)
-            else:
-                logger.warning(
-                    "metadata_file not found: %s. Falling back to prompt_text/default prompt.",
-                    metadata_path,
-                )
-                USE_COMPARE_PROMPTS = False
 
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -1762,13 +1694,7 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if rank == 0:
-        if USE_COMPARE_PROMPTS:
-            logger.info(
-                "Using compare prompts from prompts.py (db_definitions chars=%d).",
-                len(PROMPT_DB_DEFINITIONS),
-            )
-        else:
-            logger.info("Using fallback prompt_text/default prompts.")
+        logger.info("Using minimal prompts (system prompt + output format, no DB definitions/rules).")
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
@@ -1795,7 +1721,6 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
-        input_format=args.input_format,
     )
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
@@ -1806,7 +1731,6 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
-        input_format=args.input_format,
     )
 
     if rank == 0:
@@ -1888,7 +1812,6 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
-        input_format=args.input_format,
     )
 
     output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")

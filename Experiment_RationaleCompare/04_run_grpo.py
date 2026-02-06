@@ -45,6 +45,11 @@ class GrpoDataset(Dataset):
         return self.items[idx]
 
 
+def collate_grpo_items(batch: List[GrpoItem]) -> List[GrpoItem]:
+    # Keep dataclass items as-is; default_collate cannot stack custom classes.
+    return batch
+
+
 def build_items(input_file: str, audio_dir: str, include_text: bool) -> List[GrpoItem]:
     records = read_jsonl(input_file)
     items: List[GrpoItem] = []
@@ -234,7 +239,12 @@ def main() -> None:
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
     dataset = GrpoDataset(items)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_grpo_items,
+    )
 
     device = torch.device(args.device)
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
