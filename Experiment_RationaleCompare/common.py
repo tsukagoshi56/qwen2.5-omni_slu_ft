@@ -86,7 +86,7 @@ def _entities_from_slurp(tokens: List[Dict[str, Any]], entities: List[Dict[str, 
             if isinstance(idx, int) and 0 <= idx < len(tokens):
                 words.append(str(tokens[idx].get("surface", "")).lower())
         filler = " ".join([w for w in words if w]).strip()
-        results.append({"type": ent_type, "filler": filler})
+        results.append({"type": ent_type, "filler": filler, "filter": filler})
     return results
 
 
@@ -105,7 +105,7 @@ def parse_entities(raw_entities: Any, tokens: Optional[List[Dict[str, Any]]] = N
             if filler is None:
                 filler = ""
             filler = str(filler)
-            results.append({"type": ent_type, "filler": filler})
+            results.append({"type": ent_type, "filler": filler, "filter": filler})
         return results
     if tokens is not None and isinstance(raw_entities, list):
         return _entities_from_slurp(tokens, raw_entities)

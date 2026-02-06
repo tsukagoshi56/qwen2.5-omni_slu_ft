@@ -8,7 +8,8 @@ Rules:
 - In C, list candidate intents: include the target label itself and all plausible similar/inclusive alternatives from DB.
 - When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
 - In C, list candidate slots (slot types). If a slot has 2+ plausible values, include value candidates as slot_type(value1|value2). If only one value, omit parentheses. If no slots, write (none).
-- R must mention slot rationale (why a slot value is supported or rejected).
+- R must list only rejection reasons for candidates in C (except the accepted label). Do not write adoption reasons.
+- The accepted label is the remaining one and should match J.
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
@@ -25,7 +26,7 @@ Rules:
 
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
-R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
+R: label1!reason1; label2!reason2; ...
 J: [Target JSON]
 """
 
@@ -36,7 +37,8 @@ Rules:
 - In C, list candidate intents: include the predicted label itself and all plausible similar/inclusive alternatives from DB.
 - When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
 - In C, list candidate slots (slot types). If a slot has 2+ plausible values, include value candidates as slot_type(value1|value2). If only one value, omit parentheses. If no slots, write (none).
-- R must mention slot rationale (why a slot value is supported or rejected).
+- R must list only rejection reasons for candidates in C (except the accepted label). Do not write adoption reasons.
+- The accepted label is the remaining one and should match J.
 - Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
@@ -51,7 +53,7 @@ Rules:
 
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
-R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
+R: label1!reason1; label2!reason2; ...
 J: [Final JSON]
 """
 
@@ -62,7 +64,8 @@ Rules:
 - In C, list candidate intents: include the predicted label itself and all plausible similar/inclusive alternatives from DB.
 - When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
 - In C, list candidate slots (slot types). If a slot has 2+ plausible values, include value candidates as slot_type(value1|value2). If only one value, omit parentheses. If no slots, write (none).
-- R must mention slot rationale (why a slot value is supported or rejected).
+- R must list only rejection reasons for candidates in C (except the accepted label). Do not write adoption reasons.
+- The accepted label is the remaining one and should match J.
 - Cite specific evidence from audio.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
@@ -77,7 +80,7 @@ Rules:
 
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
-R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
+R: label1!reason1; label2!reason2; ...
 J: [Final JSON]
 """
 
