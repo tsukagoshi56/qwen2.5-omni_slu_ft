@@ -294,7 +294,7 @@ def main() -> None:
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
     parser.add_argument("--preview", type=int, default=10, help="Print first N outputs to stdout.")
-    parser.add_argument("--format_retries", type=int, default=2, help="Retry when C line is missing.")
+    parser.add_argument("--format_retries", type=int, default=0, help="Retry when C line is missing.")
     parser.add_argument("--skip_c_check", action="store_true", help="Do not enforce C line in output.")
     parser.add_argument("--fail_on_empty", action="store_true", help="Abort if output stays empty.")
     parser.add_argument("--error_file", type=str, default="", help="Optional jsonl to save error rows.")
