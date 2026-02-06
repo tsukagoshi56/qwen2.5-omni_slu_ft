@@ -410,7 +410,12 @@ def evaluate_model(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run GRPO fine-tuning after SF-CoT.")
-    parser.add_argument("--train_file", type=str, required=True)
+    parser.add_argument(
+        "--train_file",
+        type=str,
+        default="slurp/dataset/slurp/training.json",
+        help="Training data path (default: slurp/dataset/slurp/training.json).",
+    )
     parser.add_argument("--eval_file", type=str, default="", help="Optional eval jsonl path.")
     parser.add_argument("--test_file", type=str, default="", help="Optional test jsonl path.")
     parser.add_argument(
