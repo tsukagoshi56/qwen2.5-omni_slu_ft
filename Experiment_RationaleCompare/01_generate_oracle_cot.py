@@ -68,10 +68,23 @@ def _build_client(model_name: str) -> Any:
             raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
         return OpenAI(api_key=api_key, base_url=base_url)
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL")
+    # Non-DeepSeek models: support OpenAI-compatible gateways (e.g., Bedrock proxy)
+    # by allowing the same endpoint/key style used in DeepSeek mode.
+    api_key = (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("BEDROCK_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+    )
+    base_url = (
+        os.environ.get("API_ENDPOINT")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("DEEPSEEK_BASE_URL")
+    )
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+        raise RuntimeError(
+            "No API key found for non-DeepSeek model. "
+            "Set one of OPENAI_API_KEY / BEDROCK_API_KEY / DEEPSEEK_API_KEY."
+        )
     if base_url:
         return OpenAI(api_key=api_key, base_url=base_url)
     return OpenAI(api_key=api_key)
@@ -422,8 +435,13 @@ def main() -> None:
 
     if args.worker_rank == 0:
         provider = "deepseek" if _is_deepseek_model(args.model_name) else "openai"
+        endpoint = (
+            (os.environ.get("API_ENDPOINT") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+            if provider == "deepseek"
+            else (os.environ.get("API_ENDPOINT") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("DEEPSEEK_BASE_URL") or "(default)")
+        )
         print(
-            f"[INFO] provider={provider} model={args.model_name} "
+            f"[INFO] provider={provider} model={args.model_name} endpoint={endpoint} "
             f"(set by --model/--model_name)"
         )
 
