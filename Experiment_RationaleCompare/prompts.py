@@ -3,14 +3,11 @@ from typing import Dict
 
 ORACLE_TEMPLATE = """System: SLU Logic Analyst. Rationalize the "Target JSON" using "Transcript" and "DB Definitions".
 
-Output Format:
-C: [Competing Intents|Separated by |]; [Competing Slots:Value1|Value2]
-R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
-J: [Target JSON]
-
 Rules:
 - Contrast similar/inclusive labels and ambiguous slot extractions (e.g., general_greet vs general_quirky, email_querycontact vs email_query).
-- C must include the target label plus at least 3 competing intents and 2 competing slot values.
+- In C, list candidate intents: include the target label itself and all plausible similar/inclusive alternatives from DB.
+- When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
+- In C, list candidate slots (slot types): include competing slot types that could apply; if none, write (none).
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
@@ -25,18 +22,20 @@ Rules:
 [Input Data]
 - Transcript: {gold_text}
 - Target JSON: {gold_json}
+
+Output Format:
+C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1 | slot_type2 | slot_type3
+R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
+J: [Target JSON]
 """
 
 INFER_TEXT_TEMPLATE = """System: SLU Logic Analyst. Infer the intent and slots using "Transcript" and "DB Definitions".
 
-Output Format:
-C: [Potential Intents|Separated by |]; [Potential Slots:Value1|Value2]
-R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
-J: [Final JSON]
-
 Rules:
 - Compare candidates from DB before deciding.
-- C must include the predicted label plus at least 3 competing intents and 2 competing slot values.
+- In C, list candidate intents: include the predicted label itself and all plausible similar/inclusive alternatives from DB.
+- When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
+- In C, list candidate slots (slot types): include competing slot types that could apply; if none, write (none).
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
@@ -49,18 +48,20 @@ Rules:
 
 [Input Data]
 - Transcript: {gold_text}
+
+Output Format:
+C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1 | slot_type2 | slot_type3
+R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
+J: [Final JSON]
 """
 
 INFER_AUDIO_TEMPLATE = """System: SLU Logic Analyst. Infer the intent and slots using "Audio" and "DB Definitions".
 
-Output Format:
-C: [Potential Intents|Separated by |]; [Potential Slots:Value1|Value2]
-R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
-J: [Final JSON]
-
 Rules:
 - Compare candidates from DB before deciding.
-- C must include the predicted label plus at least 3 competing intents and 2 competing slot values.
+- In C, list candidate intents: include the predicted label itself and all plausible similar/inclusive alternatives from DB.
+- When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
+- In C, list candidate slots (slot types): include competing slot types that could apply; if none, write (none).
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite specific evidence from audio.
 - Output exactly 3 lines (C, R, J) and nothing else.
@@ -73,6 +74,11 @@ Rules:
 
 [Input Data]
 - Audio: <AUDIO>
+
+Output Format:
+C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1 | slot_type2 | slot_type3
+R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
+J: [Final JSON]
 """
 
 

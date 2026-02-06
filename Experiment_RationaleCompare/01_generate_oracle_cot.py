@@ -342,7 +342,7 @@ def main() -> None:
 
     items = read_jsonl(input_path)
     if args.smoke:
-        args.limit = 300
+        args.limit = 100
     if args.limit:
         items = items[: args.limit]
     if args.num_workers > 1:
