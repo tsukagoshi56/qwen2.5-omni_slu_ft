@@ -102,6 +102,14 @@ def parse_entities(raw_entities: Any, tokens: Optional[List[Dict[str, Any]]] = N
                 filler = ent.get("filter")
             if filler is None:
                 filler = ent.get("value")
+            if filler is None and tokens is not None:
+                span = ent.get("span") or []
+                if isinstance(span, list) and span:
+                    words = []
+                    for idx in span:
+                        if isinstance(idx, int) and 0 <= idx < len(tokens):
+                            words.append(str(tokens[idx].get("surface", "")).lower())
+                    filler = " ".join([w for w in words if w]).strip()
             if filler is None:
                 filler = ""
             filler = str(filler)
@@ -132,7 +140,8 @@ def label_from_record(record: Dict[str, Any]) -> Dict[str, Any]:
             scenario2, action2 = split_intent(intent)
             scenario = scenario or scenario2
             action = action or action2
-        entities = parse_entities(final_obj.get("entities", []))
+        tokens = record.get("tokens") if isinstance(record.get("tokens"), list) else []
+        entities = parse_entities(final_obj.get("entities", []), tokens=tokens)
         return {"scenario": scenario, "action": action, "entities": entities}
 
     scenario = str(record.get("scenario", "")).strip()
