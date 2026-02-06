@@ -175,14 +175,14 @@ def main() -> None:
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/success_cot_raw.jsonl")
     parser.add_argument("--filtered_file", type=str, default="Experiment_RationaleCompare/success_cot_filtered.jsonl")
-    parser.add_argument("--modes", type=str, default="text,audio")
-    parser.add_argument("--text_model_name", type=str, default="deepseek-r1")
+    parser.add_argument("--modes", type=str, default="text")
+    parser.add_argument("--text_model_name", type=str, default="deepseekr1")
     parser.add_argument("--audio_model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--max_new_tokens", type=int, default=4096)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -199,6 +199,9 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
+
+    if str(args.text_model_name).strip() == "deepseekr1":
+        args.text_model_name = "deepseek-r1"
 
     global _DEBUG
     _DEBUG = args.debug

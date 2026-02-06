@@ -29,7 +29,11 @@ def main() -> None:
     for path in files:
         items = read_jsonl(path)
         for record in items:
-            final_label = label_from_record(record)
+            gold_label = record.get("gold_label")
+            if isinstance(gold_label, dict):
+                final_label = gold_label
+            else:
+                final_label = label_from_record(record)
             rationale_text = record.get("rationale_text", "")
             method = record.get("method")
             mode = record.get("mode")
