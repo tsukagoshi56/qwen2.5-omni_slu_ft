@@ -344,6 +344,12 @@ def main() -> None:
         for batch in dataloader:
             batch_loss = torch.tensor(0.0, device=device)
             sample_count = 0
+            reward_values: List[float] = []
+            advantage_values: List[float] = []
+            kl_values: List[float] = []
+            logprob_values: List[float] = []
+            ref_logprob_values: List[float] = []
+            sample_loss_values: List[float] = []
 
             for item in batch:
                 audio = None
@@ -399,6 +405,7 @@ def main() -> None:
                         w_entity=args.reward_w_entity,
                     )
                     rewards.append(reward)
+                    reward_values.append(float(reward))
                     pred_labels.append(pred_label)
 
                 if debug_step:
@@ -420,6 +427,7 @@ def main() -> None:
 
                 for sample_idx, (sample_text, reward) in enumerate(zip(samples, rewards)):
                     advantage = (reward - mean_reward) / (std + 1e-6)
+                    advantage_values.append(float(advantage))
                     prompt_text = build_chat_input(processor, prompt, audio is not None)
                     full_text = prompt_text + sample_text
 
@@ -446,6 +454,10 @@ def main() -> None:
                     loss = -(advantage * logprob) + args.kl_beta * kl
                     batch_loss += loss
                     sample_count += 1
+                    logprob_values.append(float(logprob.item()))
+                    ref_logprob_values.append(float(ref_logprob.item()))
+                    kl_values.append(float(kl.item()))
+                    sample_loss_values.append(float(loss.item()))
 
                     if debug_step and sample_idx < args.debug_preview_samples:
                         trace_row = {
@@ -487,7 +499,28 @@ def main() -> None:
                 optimizer.zero_grad()
 
             if args.log_every and global_step % args.log_every == 0:
-                print(f"[GRPO] step={global_step} loss={batch_loss.item():.4f} samples={sample_count}")
+                if reward_values:
+                    reward_mean = sum(reward_values) / len(reward_values)
+                    reward_min = min(reward_values)
+                    reward_max = max(reward_values)
+                else:
+                    reward_mean = reward_min = reward_max = 0.0
+                adv_mean = (sum(advantage_values) / len(advantage_values)) if advantage_values else 0.0
+                kl_mean = (sum(kl_values) / len(kl_values)) if kl_values else 0.0
+                logprob_mean = (sum(logprob_values) / len(logprob_values)) if logprob_values else 0.0
+                ref_logprob_mean = (
+                    (sum(ref_logprob_values) / len(ref_logprob_values)) if ref_logprob_values else 0.0
+                )
+                sample_loss_mean = (
+                    (sum(sample_loss_values) / len(sample_loss_values)) if sample_loss_values else 0.0
+                )
+                print(
+                    f"[GRPO] step={global_step} loss={batch_loss.item():.4f} samples={sample_count} "
+                    f"reward_mean={reward_mean:.4f} reward_min={reward_min:.4f} reward_max={reward_max:.4f} "
+                    f"adv_mean={adv_mean:.4f} kl_mean={kl_mean:.4f} "
+                    f"logprob_mean={logprob_mean:.4f} ref_logprob_mean={ref_logprob_mean:.4f} "
+                    f"sample_loss_mean={sample_loss_mean:.4f}"
+                )
 
             if args.save_every and global_step > 0 and global_step % args.save_every == 0:
                 ckpt_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
