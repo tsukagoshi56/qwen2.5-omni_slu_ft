@@ -45,12 +45,23 @@ def normalize_intent_label(intent: str) -> str:
 
 
 def build_db_definitions(metadata: Dict[str, List[str]]) -> str:
+    def unique_keep_order(values: List[str]) -> List[str]:
+        seen = set()
+        ordered: List[str] = []
+        for v in values:
+            text = str(v).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return ordered
+
     def fmt(label: str, values: List[str]) -> str:
         cleaned = [str(v).strip() for v in values if str(v).strip()]
         return f"{label}: " + (", ".join(cleaned) if cleaned else "(none)")
 
-    intents = sorted({str(x).strip() for x in metadata.get("intents", []) or [] if str(x).strip()})
-    slot_types = sorted(set(metadata.get("slot_types", []) or []))
+    intents = unique_keep_order(metadata.get("intents", []) or [])
+    slot_types = unique_keep_order(metadata.get("slot_types", []) or [])
 
     parts = [
         fmt("Intents", intents),
