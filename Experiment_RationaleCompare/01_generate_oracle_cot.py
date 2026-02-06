@@ -298,6 +298,7 @@ def main() -> None:
     parser.add_argument("--append_worker_suffix", action="store_true")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
+    parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
 
     global _DEBUG
@@ -325,6 +326,8 @@ def main() -> None:
     slot_order = [str(x).strip() for x in metadata.get("slot_types", []) or [] if str(x).strip()]
 
     items = read_jsonl(input_path)
+    if args.smoke:
+        args.limit = 300
     if args.limit:
         items = items[: args.limit]
     if args.num_workers > 1:
