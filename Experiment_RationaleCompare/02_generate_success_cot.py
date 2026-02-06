@@ -297,11 +297,11 @@ def main() -> None:
                             temperature=args.temperature,
                             top_p=args.top_p,
                         )
+                        time.sleep(0.2)  # per-worker rate limit (~5 req/sec)
                         break
                     except Exception:
-                        if attempt >= args.retry:
-                            raise
-                        time.sleep(args.retry_sleep)
+                        # Fail fast on any API error to avoid burning the key.
+                        raise
             elif mode == "audio":
                 if not recordings:
                     continue

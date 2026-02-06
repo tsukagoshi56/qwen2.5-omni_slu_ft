@@ -265,16 +265,15 @@ def _generate_with_retries(
                     temperature=args.temperature,
                     top_p=args.top_p,
                 )
+                time.sleep(0.2)  # per-worker rate limit (~5 req/sec)
                 break
             except Exception as exc:
                 last_exc = exc
                 _log_error(
                     f"[ERROR] API call failed (attempt {attempt + 1}/{args.retry + 1}): {exc}"
                 )
-                if attempt >= args.retry:
-                    output = ""
-                    break
-                time.sleep(args.retry_sleep)
+                # Fail fast on any API error to avoid burning the key.
+                raise
         if not output:
             continue
         if args.skip_c_check or _has_nonempty_c(output):
