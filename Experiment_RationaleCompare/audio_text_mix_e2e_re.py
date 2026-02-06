@@ -606,6 +606,7 @@ def build_items_from_rationale_jsonl(
     jsonl_path: str,
     audio_dir: str,
     add_text_only: bool = False,
+    text_only: bool = False,
     max_samples: Optional[int] = None,
     allow_text_fallback_when_audio_missing: bool = True,
     print_audio_search_paths: bool = False,
@@ -730,10 +731,15 @@ def build_items_from_rationale_jsonl(
                 "target_obj": target_obj,
                 "prompt_text": user_text.strip() if user_text else "",
             }
-            fallback_text_items.append({**base_item, "audio_path": None})
+            text_only_item = {**base_item, "audio_path": None}
+            fallback_text_items.append(text_only_item)
+
+            if text_only:
+                items.append(text_only_item)
+                continue
 
             if add_text_only:
-                items.append({**base_item, "audio_path": None})
+                items.append(text_only_item)
 
             if audio_path:
                 items.append(base_item)
@@ -1657,6 +1663,11 @@ def main():
     )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
+        "--text_only",
+        action="store_true",
+        help="Use text-only samples for all splits (audio paths are ignored).",
+    )
+    parser.add_argument(
         "--no_text_fallback_when_audio_missing",
         action="store_true",
         help="Disable automatic text-only fallback when audio files cannot be resolved.",
@@ -1695,6 +1706,8 @@ def main():
 
     if rank == 0:
         logger.info("Using minimal prompts (system prompt + output format, no DB definitions/rules).")
+        if args.text_only:
+            logger.info("text_only=True: all splits will use text-only items.")
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
@@ -1716,6 +1729,7 @@ def main():
         args.train_file,
         args.audio_dir,
         add_text_only=args.add_text_only,
+        text_only=args.text_only,
         max_samples=train_max_samples,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
         print_audio_search_paths=args.print_audio_search_paths,
@@ -1726,6 +1740,7 @@ def main():
         args.eval_file,
         args.audio_dir,
         add_text_only=args.add_text_only,
+        text_only=args.text_only,
         max_samples=eval_max_samples,
         allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
         print_audio_search_paths=args.print_audio_search_paths,
@@ -1806,9 +1821,10 @@ def main():
         args.test_file,
         args.audio_dir,
         add_text_only=False,
+        text_only=args.text_only,
         max_samples=test_max_samples,
         # Follow original script behavior for test: audio-only (no text fallback).
-        allow_text_fallback_when_audio_missing=False,
+        allow_text_fallback_when_audio_missing=False if not args.text_only else True,
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
