@@ -377,6 +377,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run GRPO fine-tuning after SF-CoT.")
     parser.add_argument("--train_file", type=str, required=True)
     parser.add_argument("--eval_file", type=str, default="", help="Optional eval jsonl path.")
+    parser.add_argument("--test_file", type=str, default="", help="Optional test jsonl path.")
     parser.add_argument(
         "--metadata_file",
         type=str,
@@ -418,6 +419,8 @@ def main() -> None:
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--eval_every", type=int, default=0, help="Run eval every N global steps (0 disables).")
     parser.add_argument("--eval_max_samples", type=int, default=None, help="Cap eval items for faster validation.")
+    parser.add_argument("--test_every", type=int, default=0, help="Run test every N global steps (0 disables).")
+    parser.add_argument("--test_max_samples", type=int, default=None, help="Cap test items for faster validation.")
     parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--kl_beta", type=float, default=0.01)
@@ -441,8 +444,22 @@ def main() -> None:
         default="",
         help="Optional JSONL path for debug traces (default: <output_dir>/grpo_debug_trace.jsonl).",
     )
+    parser.add_argument("--smoke", action="store_true", help="Run a tiny sanity-check setting.")
+    parser.add_argument("--smoke_train_samples", type=int, default=64)
+    parser.add_argument("--smoke_eval_samples", type=int, default=32)
+    parser.add_argument("--smoke_test_samples", type=int, default=32)
     parser.set_defaults(include_text=True)
     args = parser.parse_args()
+    if args.smoke:
+        args.num_train_epochs = 1
+        args.group_size = min(args.group_size, 2)
+        args.max_new_tokens = min(args.max_new_tokens, 96)
+        args.log_every = 1
+        if args.eval_file and args.eval_every <= 0:
+            args.eval_every = 10
+        if args.test_file and args.test_every <= 0:
+            args.test_every = 10
+
     auto_model_from_only_grpo = args.only_grpo and not str(args.model_name_or_path).strip()
     if auto_model_from_only_grpo:
         args.model_name_or_path = DEFAULT_ONLY_GRPO_MODEL
@@ -474,6 +491,11 @@ def main() -> None:
         if (args.eval_file and not os.path.isabs(args.eval_file))
         else args.eval_file
     )
+    test_path = (
+        os.path.join(base_dir, args.test_file)
+        if (args.test_file and not os.path.isabs(args.test_file))
+        else args.test_file
+    )
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     output_dir = os.path.join(base_dir, args.output_dir) if not os.path.isabs(args.output_dir) else args.output_dir
     if rank == 0:
@@ -497,11 +519,26 @@ def main() -> None:
         debug_output_path = ""
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
+    if args.smoke:
+        items = items[: max(1, args.smoke_train_samples)]
+
     eval_items: List[GrpoItem] = []
     if args.eval_file:
         eval_items = build_items(eval_path, audio_dir, include_text=args.include_text)
-        if args.eval_max_samples is not None:
-            eval_items = eval_items[: max(0, args.eval_max_samples)]
+        eval_cap = args.eval_max_samples
+        if args.smoke and eval_cap is None:
+            eval_cap = args.smoke_eval_samples
+        if eval_cap is not None:
+            eval_items = eval_items[: max(0, eval_cap)]
+
+    test_items: List[GrpoItem] = []
+    if args.test_file:
+        test_items = build_items(test_path, audio_dir, include_text=args.include_text)
+        test_cap = args.test_max_samples
+        if args.smoke and test_cap is None:
+            test_cap = args.smoke_test_samples
+        if test_cap is not None:
+            test_items = test_items[: max(0, test_cap)]
 
     if args.debug and rank == 0:
         print("[DEBUG] ===== Run Config =====")
@@ -517,12 +554,17 @@ def main() -> None:
             f"batch_size={args.batch_size} group_size={args.group_size} max_new_tokens={args.max_new_tokens} "
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
-            f"include_text={args.include_text}"
+            f"include_text={args.include_text} smoke={args.smoke}"
         )
         if args.eval_file:
             print(
                 f"[DEBUG] eval_file={eval_path} eval_items={len(eval_items)} "
                 f"eval_every={args.eval_every} eval_max_samples={args.eval_max_samples}"
+            )
+        if args.test_file:
+            print(
+                f"[DEBUG] test_file={test_path} test_items={len(test_items)} "
+                f"test_every={args.test_every} test_max_samples={args.test_max_samples}"
             )
         print(f"[DEBUG] debug_output_file={debug_output_path}")
         _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
@@ -557,6 +599,11 @@ def main() -> None:
             print(
                 f"[GRPO] eval enabled: eval_file={eval_path} "
                 f"eval_items={len(eval_items)} eval_every={args.eval_every}"
+            )
+        if args.test_file:
+            print(
+                f"[GRPO] test enabled: test_file={test_path} "
+                f"test_items={len(test_items)} test_every={args.test_every}"
             )
 
     if distributed:
@@ -814,6 +861,29 @@ def main() -> None:
                         f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f}"
                     )
 
+            if args.test_file and args.test_every > 0 and global_step > 0 and global_step % args.test_every == 0:
+                test_metrics = evaluate_model(
+                    model=model,
+                    processor=processor,
+                    items=test_items,
+                    device=device,
+                    max_new_tokens=args.max_new_tokens,
+                    rank=rank,
+                    world_size=world_size,
+                    debug=args.debug,
+                    debug_max_chars=args.debug_max_chars,
+                )
+                if rank == 0:
+                    print(
+                        "[GRPO-TEST] "
+                        f"step={global_step} n={int(test_metrics['num_samples'])} "
+                        f"reward_mean={test_metrics['reward_mean']:.4f} "
+                        f"intent_acc={test_metrics['intent_acc']:.4f} "
+                        f"scenario_acc={test_metrics['scenario_acc']:.4f} "
+                        f"action_acc={test_metrics['action_acc']:.4f} "
+                        f"entity_f1_mean={test_metrics['entity_f1_mean']:.4f}"
+                    )
+
             global_step += 1
 
     if args.eval_file:
@@ -837,6 +907,29 @@ def main() -> None:
                 f"scenario_acc={final_eval['scenario_acc']:.4f} "
                 f"action_acc={final_eval['action_acc']:.4f} "
                 f"entity_f1_mean={final_eval['entity_f1_mean']:.4f}"
+            )
+
+    if args.test_file:
+        final_test = evaluate_model(
+            model=model,
+            processor=processor,
+            items=test_items,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+            rank=rank,
+            world_size=world_size,
+            debug=args.debug,
+            debug_max_chars=args.debug_max_chars,
+        )
+        if rank == 0:
+            print(
+                "[GRPO-TEST-FINAL] "
+                f"n={int(final_test['num_samples'])} "
+                f"reward_mean={final_test['reward_mean']:.4f} "
+                f"intent_acc={final_test['intent_acc']:.4f} "
+                f"scenario_acc={final_test['scenario_acc']:.4f} "
+                f"action_acc={final_test['action_acc']:.4f} "
+                f"entity_f1_mean={final_test['entity_f1_mean']:.4f}"
             )
 
     if distributed:
