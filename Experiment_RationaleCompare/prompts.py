@@ -15,6 +15,7 @@ Rules:
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
+- J must exactly match the provided Target JSON (verbatim). Do not alter it.
 - No conversational filler.
 
 ---
