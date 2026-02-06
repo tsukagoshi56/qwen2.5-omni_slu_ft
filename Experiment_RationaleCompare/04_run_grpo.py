@@ -275,7 +275,8 @@ def evaluate_model(
     world_size: int,
     debug: bool = False,
     debug_max_chars: int = 1200,
-) -> Dict[str, float]:
+    collect_predictions: bool = False,
+) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     eval_model = _unwrap_model(model)
     was_training = eval_model.training
     eval_model.eval()
@@ -287,6 +288,7 @@ def evaluate_model(
     action_sum = 0.0
     intent_sum = 0.0
     entity_f1_sum = 0.0
+    local_prediction_rows: List[Dict[str, Any]] = []
 
     with torch.no_grad():
         for idx, item in enumerate(local_items):
@@ -333,6 +335,27 @@ def evaluate_model(
             intent_sum += 1.0 if stats["intent_ok"] else 0.0
             entity_f1_sum += float(stats["entity_f1"])
 
+            if collect_predictions:
+                local_prediction_rows.append(
+                    {
+                        "scenario": pred_label["scenario"],
+                        "action": pred_label["action"],
+                        "entities": pred_label["entities"],
+                        "pred_label": pred_label,
+                        "file": os.path.basename(item.audio_path) if item.audio_path else None,
+                        "slurp_id": item.slurp_id,
+                        "id": item.slurp_id,
+                        "wer": 0.0,
+                        "transcript": item.sentence,
+                        "candidates": [],
+                        "rationale_text": "",
+                        "raw_output": generated_text,
+                        "target": "",
+                        "target_label": item.gold_label,
+                        "type": "audio" if item.audio_path else "text",
+                    }
+                )
+
             if debug and rank == 0 and idx < 2:
                 print(f"[EVAL-DEBUG] mode={item.mode} slurp_id={item.slurp_id}")
                 print(f"[EVAL-DEBUG] gold={json.dumps(item.gold_label, ensure_ascii=False)}")
@@ -368,9 +391,21 @@ def evaluate_model(
             "entity_f1_mean": float(metrics_tensor[5].item() / total),
         }
 
+    prediction_rows: List[Dict[str, Any]] = []
+    if collect_predictions:
+        if world_size > 1 and _is_distributed():
+            gathered: List[List[Dict[str, Any]]] = [None] * world_size
+            dist.all_gather_object(gathered, local_prediction_rows)
+            if rank == 0:
+                for chunk in gathered:
+                    if chunk:
+                        prediction_rows.extend(chunk)
+        else:
+            prediction_rows = local_prediction_rows
+
     if was_training:
         eval_model.train()
-    return result
+    return result, prediction_rows
 
 
 def main() -> None:
@@ -448,7 +483,7 @@ def main() -> None:
     parser.add_argument("--smoke_train_samples", type=int, default=64)
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
-    parser.set_defaults(include_text=True)
+    parser.set_defaults(include_text=False)
     args = parser.parse_args()
     if args.smoke:
         args.num_train_epochs = 1
@@ -839,7 +874,7 @@ def main() -> None:
                 processor.save_pretrained(ckpt_dir)
 
             if args.eval_file and args.eval_every > 0 and global_step > 0 and global_step % args.eval_every == 0:
-                eval_metrics = evaluate_model(
+                eval_metrics, _ = evaluate_model(
                     model=model,
                     processor=processor,
                     items=eval_items,
@@ -862,7 +897,7 @@ def main() -> None:
                     )
 
             if args.test_file and args.test_every > 0 and global_step > 0 and global_step % args.test_every == 0:
-                test_metrics = evaluate_model(
+                test_metrics, _ = evaluate_model(
                     model=model,
                     processor=processor,
                     items=test_items,
@@ -887,7 +922,7 @@ def main() -> None:
             global_step += 1
 
     if args.eval_file:
-        final_eval = evaluate_model(
+        final_eval, _ = evaluate_model(
             model=model,
             processor=processor,
             items=eval_items,
@@ -910,7 +945,7 @@ def main() -> None:
             )
 
     if args.test_file:
-        final_test = evaluate_model(
+        final_test, prediction_rows = evaluate_model(
             model=model,
             processor=processor,
             items=test_items,
@@ -920,6 +955,7 @@ def main() -> None:
             world_size=world_size,
             debug=args.debug,
             debug_max_chars=args.debug_max_chars,
+            collect_predictions=True,
         )
         if rank == 0:
             print(
@@ -931,6 +967,11 @@ def main() -> None:
                 f"action_acc={final_test['action_acc']:.4f} "
                 f"entity_f1_mean={final_test['entity_f1_mean']:.4f}"
             )
+            prediction_path = os.path.join(output_dir, "prediction.jsonl")
+            with open(prediction_path, "w", encoding="utf-8") as f:
+                for row in prediction_rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            print(f"[GRPO-TEST-FINAL] saved predictions: {prediction_path}")
 
     if distributed:
         dist.barrier()
