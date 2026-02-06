@@ -3,8 +3,10 @@ import argparse
 import json
 import os
 import random
+import subprocess
+import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
 import torch
@@ -48,6 +50,66 @@ def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temper
         top_p=top_p,
     )
     return resp.choices[0].message.content or ""
+
+
+def _merge_key(row: Dict[str, Any]) -> Tuple[str, str, str]:
+    return (
+        str(row.get("slurp_id", "")),
+        str(row.get("mode", "")),
+        str(row.get("method", "")),
+    )
+
+
+def _merge_worker_outputs(base_output_path: str, num_workers: int, cleanup: bool = False) -> int:
+    root, ext = os.path.splitext(base_output_path)
+    ext = ext or ".jsonl"
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for rank in range(num_workers):
+        shard_path = f"{root}.w{rank}of{num_workers}{ext}"
+        if not os.path.exists(shard_path):
+            continue
+        for row in read_jsonl(shard_path):
+            key = _merge_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+        if cleanup:
+            try:
+                os.remove(shard_path)
+            except Exception:
+                pass
+    write_jsonl(base_output_path, merged)
+    return len(merged)
+
+
+def _strip_arg(args_list: List[str], flag: str, has_value: bool = True) -> List[str]:
+    if flag not in args_list:
+        return args_list
+    cleaned: List[str] = []
+    i = 0
+    while i < len(args_list):
+        if args_list[i] == flag:
+            i += 1
+            if has_value and i < len(args_list):
+                i += 1
+            continue
+        cleaned.append(args_list[i])
+        i += 1
+    return cleaned
+
+
+def _spawn_workers(num_workers: int, base_args: List[str]) -> List[subprocess.Popen]:
+    procs: List[subprocess.Popen] = []
+    base_args = _strip_arg(base_args, "--worker_rank", has_value=True)
+    base_args = _strip_arg(base_args, "--merge_only", has_value=False)
+    base_args = _strip_arg(base_args, "--no_spawn_workers", has_value=False)
+    script_path = os.path.abspath(__file__)
+    for rank in range(1, num_workers):
+        cmd = [sys.executable, script_path] + base_args + ["--worker_rank", str(rank), "--no_spawn_workers"]
+        procs.append(subprocess.Popen(cmd, env=os.environ.copy()))
+    return procs
 
 
 def _generate_audio_local(
@@ -118,10 +180,19 @@ def main() -> None:
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--worker_rank", type=int, default=0)
     parser.add_argument("--append_worker_suffix", action="store_true")
+    parser.add_argument("--merge_workers", action="store_true", help="Merge worker shard outputs into output_file(s).")
+    parser.add_argument("--merge_only", action="store_true", help="Only merge worker shard outputs and exit.")
+    parser.add_argument("--merge_cleanup", action="store_true", help="Remove worker shard files after merge.")
+    parser.add_argument("--no_spawn_workers", action="store_true", help="Do not auto-spawn worker processes.")
     parser.add_argument("--success_match", type=str, choices=["full", "scenario_action", "intent"], default="full")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     args = parser.parse_args()
+
+    if args.num_workers > 1:
+        # Always shard outputs and auto-merge when using multiple workers.
+        args.append_worker_suffix = True
+        args.merge_workers = True
 
     rng = random.Random(args.seed + args.worker_rank)
 
@@ -129,13 +200,29 @@ def main() -> None:
     input_path = os.path.join(base_dir, args.input_file) if not os.path.isabs(args.input_file) else args.input_file
     metadata_path = os.path.join(base_dir, args.metadata_file) if not os.path.isabs(args.metadata_file) else args.metadata_file
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
-    output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
-    filtered_path = os.path.join(base_dir, args.filtered_file) if not os.path.isabs(args.filtered_file) else args.filtered_file
+    base_output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
+    base_filtered_path = os.path.join(base_dir, args.filtered_file) if not os.path.isabs(args.filtered_file) else args.filtered_file
+    output_path = base_output_path
+    filtered_path = base_filtered_path
     if args.append_worker_suffix and args.num_workers > 1:
-        root, ext = os.path.splitext(output_path)
+        root, ext = os.path.splitext(base_output_path)
         output_path = f"{root}.w{args.worker_rank}of{args.num_workers}{ext or '.jsonl'}"
-        root, ext = os.path.splitext(filtered_path)
+        root, ext = os.path.splitext(base_filtered_path)
         filtered_path = f"{root}.w{args.worker_rank}of{args.num_workers}{ext or '.jsonl'}"
+
+    if args.merge_only:
+        _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
+        _merge_worker_outputs(base_filtered_path, args.num_workers, cleanup=args.merge_cleanup)
+        return
+
+    worker_procs: List[subprocess.Popen] = []
+    if (
+        args.num_workers > 1
+        and args.worker_rank == 0
+        and (not args.no_spawn_workers)
+        and (not args.merge_only)
+    ):
+        worker_procs = _spawn_workers(args.num_workers, sys.argv[1:])
 
     metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
@@ -260,6 +347,13 @@ def main() -> None:
 
     write_jsonl(output_path, raw_rows)
     write_jsonl(filtered_path, filtered_rows)
+
+    for proc in worker_procs:
+        proc.wait()
+
+    if args.merge_workers and args.num_workers > 1 and args.append_worker_suffix and args.worker_rank == 0:
+        _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
+        _merge_worker_outputs(base_filtered_path, args.num_workers, cleanup=args.merge_cleanup)
 
 
 if __name__ == "__main__":
