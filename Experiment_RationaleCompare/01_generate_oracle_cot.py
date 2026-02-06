@@ -152,6 +152,9 @@ def main() -> None:
         items = items[args.worker_rank :: args.num_workers]
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(items)
+    preview_limit = max(0, int(args.preview))
+    preview_lock = threading.Lock()
+    preview_printed: List[bool] = [False] * len(items)
 
     if args.parallel > 1 and ThreadPoolExecutor is not None:
         with ThreadPoolExecutor(max_workers=args.parallel) as executor:
@@ -168,6 +171,16 @@ def main() -> None:
                     continue
                 idx, row = res
                 results[idx] = row
+                if preview_limit and idx < preview_limit:
+                    with preview_lock:
+                        if not preview_printed[idx]:
+                            preview_printed[idx] = True
+                            if tqdm is not None:
+                                tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
+                                tqdm.write(row.get("rationale_text", ""))
+                            else:
+                                print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
+                                print(row.get("rationale_text", ""), flush=True)
     else:
         iterator = items
         if tqdm is not None:
@@ -178,14 +191,15 @@ def main() -> None:
                 continue
             idx, row = res
             results[idx] = row
+            if preview_limit and idx < preview_limit:
+                if tqdm is not None:
+                    tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
+                    tqdm.write(row.get("rationale_text", ""))
+                else:
+                    print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
+                    print(row.get("rationale_text", ""), flush=True)
 
     final_rows = [r for r in results if r is not None]
-    if args.preview > 0:
-        preview_rows = final_rows[: args.preview]
-        for i, row in enumerate(preview_rows, start=1):
-            print(f"[PREVIEW {i}] slurp_id={row.get('slurp_id')}")
-            print(row.get("rationale_text", ""))
-
     write_jsonl(output_path, final_rows)
 
 
