@@ -41,6 +41,18 @@ _error_lock = threading.Lock()
 _DEBUG = False
 
 
+def _canonicalize_model_name(model_name: str) -> str:
+    value = str(model_name or "").strip()
+    lower = value.lower()
+    aliases = {
+        "gpt4.1-mini": "gpt-4.1-mini",
+        "gpt4.1": "gpt-4.1",
+        "gpt4o-mini": "gpt-4o-mini",
+        "gpt4o": "gpt-4o",
+    }
+    return aliases.get(lower, value)
+
+
 def _is_deepseek_model(model_name: str) -> bool:
     return "deepseek" in str(model_name or "").strip().lower()
 
@@ -97,6 +109,8 @@ def _call_api(
     if hasattr(message, "reasoning_content"):
         reasoning_present = bool((message.reasoning_content or "").strip())
     meta = {
+        "model_requested": model_name,
+        "model_responded": getattr(resp, "model", None),
         "response_id": getattr(resp, "id", None),
         "finish_reason": getattr(resp.choices[0], "finish_reason", None),
         "prompt_tokens": getattr(getattr(resp, "usage", None), "prompt_tokens", None),
@@ -345,6 +359,8 @@ def _run_single(
         "rationale_text": output.strip(),
         "method": "or-cot",
         "mode": "text",
+        "model_name": args.model_name,
+        "provider": "deepseek" if _is_deepseek_model(args.model_name) else "openai",
     }
     if error_msg:
         result["error"] = error_msg
@@ -384,6 +400,7 @@ def main() -> None:
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
+    args.model_name = _canonicalize_model_name(args.model_name)
 
     global _DEBUG
     _DEBUG = args.debug
@@ -402,6 +419,13 @@ def main() -> None:
         # Always shard outputs and auto-merge when using multiple workers.
         args.append_worker_suffix = True
         args.merge_workers = True
+
+    if args.worker_rank == 0:
+        provider = "deepseek" if _is_deepseek_model(args.model_name) else "openai"
+        print(
+            f"[INFO] provider={provider} model={args.model_name} "
+            f"(set by --model/--model_name)"
+        )
 
     worker_procs: List[subprocess.Popen] = []
     if (
