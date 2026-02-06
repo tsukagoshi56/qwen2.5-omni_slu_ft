@@ -10,7 +10,7 @@ J: [Target JSON]
 
 Rules:
 - Contrast similar/inclusive labels and ambiguous slot extractions.
-- Reasons <15 chars. Cite DB rules vs transcript evidence.
+- Reasons <12 words. Cite DB rules vs transcript evidence.
 - No conversational filler.
 
 ---
@@ -31,7 +31,7 @@ J: [Final JSON]
 
 Rules:
 - Compare candidates from DB before deciding.
-- Reasons <15 chars. Cite specific evidence from transcript.
+- Reasons <12 words. Cite specific evidence from transcript.
 - No conversational filler.
 
 ---
@@ -51,7 +51,7 @@ J: [Final JSON]
 
 Rules:
 - Compare candidates from DB before deciding.
-- Reasons <15 chars. Cite specific evidence from audio.
+- Reasons <12 words. Cite specific evidence from audio.
 - No conversational filler.
 
 ---

@@ -70,7 +70,7 @@ def _run_single(
     record: Dict[str, Any],
     db_definitions: str,
     args: argparse.Namespace,
-) -> Optional[Tuple[int, Dict[str, Any]]]:
+) -> Optional[Tuple[int, Dict[str, Any], str, str, str]]:
     gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
     if not gold_text:
         return None
@@ -105,7 +105,7 @@ def _run_single(
         "method": "or-cot",
         "mode": "text",
     }
-    return idx, result
+    return idx, result, prompt, gold_text, gold_json
 
 
 def main() -> None:
@@ -169,7 +169,7 @@ def main() -> None:
                 res = fut.result()
                 if res is None:
                     continue
-                idx, row = res
+                idx, row, prompt, gold_text, gold_json = res
                 results[idx] = row
                 if preview_limit and idx < preview_limit:
                     with preview_lock:
@@ -177,9 +177,15 @@ def main() -> None:
                             preview_printed[idx] = True
                             if tqdm is not None:
                                 tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
+                                tqdm.write(f"INPUT Transcript: {gold_text}")
+                                tqdm.write(f"INPUT Target JSON: {gold_json}")
+                                tqdm.write("OUTPUT:")
                                 tqdm.write(row.get("rationale_text", ""))
                             else:
                                 print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
+                                print(f"INPUT Transcript: {gold_text}", flush=True)
+                                print(f"INPUT Target JSON: {gold_json}", flush=True)
+                                print("OUTPUT:", flush=True)
                                 print(row.get("rationale_text", ""), flush=True)
     else:
         iterator = items
@@ -189,14 +195,20 @@ def main() -> None:
             res = _run_single(idx, record, db_definitions, args)
             if res is None:
                 continue
-            idx, row = res
+            idx, row, prompt, gold_text, gold_json = res
             results[idx] = row
             if preview_limit and idx < preview_limit:
                 if tqdm is not None:
                     tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
+                    tqdm.write(f"INPUT Transcript: {gold_text}")
+                    tqdm.write(f"INPUT Target JSON: {gold_json}")
+                    tqdm.write("OUTPUT:")
                     tqdm.write(row.get("rationale_text", ""))
                 else:
                     print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
+                    print(f"INPUT Transcript: {gold_text}", flush=True)
+                    print(f"INPUT Target JSON: {gold_json}", flush=True)
+                    print("OUTPUT:", flush=True)
                     print(row.get("rationale_text", ""), flush=True)
 
     final_rows = [r for r in results if r is not None]
