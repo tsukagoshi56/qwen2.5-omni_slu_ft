@@ -94,6 +94,18 @@ def _has_nonempty_c(output: str) -> bool:
     return bool(match)
 
 
+def _extract_crj(output: str) -> Tuple[str, bool]:
+    if not output:
+        return output, False
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+    c_line = next((ln for ln in lines if ln.startswith("C:")), "")
+    r_line = next((ln for ln in lines if ln.startswith("R:")), "")
+    j_line = next((ln for ln in lines if ln.startswith("J:")), "")
+    if c_line and r_line and j_line:
+        return "\n".join([c_line, r_line, j_line]), True
+    return output, False
+
+
 def _log_error(message: str) -> None:
     with _error_lock:
         if tqdm is not None:
@@ -164,6 +176,12 @@ def _run_single(
     prompt = render_oracle_prompt(db_definitions, gold_text, gold_json)
 
     output, prompt_used, error_msg, api_meta = _generate_with_retries(prompt, args)
+    cleaned, has_crj = _extract_crj(output)
+    if has_crj:
+        output = cleaned
+    else:
+        if not error_msg:
+            error_msg = "missing_crj_lines"
 
     result = {
         "slurp_id": record.get("slurp_id"),
@@ -188,7 +206,6 @@ def main() -> None:
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/oracle_cot.jsonl")
     parser.add_argument("--model_name", type=str, default="deepseek-r1")
     parser.add_argument("--max_tokens", type=int, default=2048)
-    parser.add_argument("--max_new_tokens", type=int, default=None, help="Alias of --max_tokens.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
@@ -206,9 +223,6 @@ def main() -> None:
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     args = parser.parse_args()
-
-    if args.max_new_tokens is not None:
-        args.max_tokens = args.max_new_tokens
 
     if args.num_workers < 1:
         raise ValueError("num_workers must be >= 1")
