@@ -37,6 +37,7 @@ PROMPT_OUTPUT_FORMAT = (
     "R: label1!reason1; label2!reason2; ...\n"
     "J: [Final JSON]"
 )
+DEFAULT_ONLY_GRPO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
 
 
 @dataclass
@@ -273,7 +274,7 @@ def main() -> None:
         help="Unused in current minimal-prompt mode (kept for backward compatibility).",
     )
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
-    parser.add_argument("--model_name_or_path", type=str, required=True)
+    parser.add_argument("--model_name_or_path", type=str, default="")
     parser.add_argument("--ref_model_name_or_path", type=str, default="")
     parser.add_argument(
         "--only_grpo",
@@ -317,6 +318,14 @@ def main() -> None:
         help="Optional JSONL path for debug traces (default: <output_dir>/grpo_debug_trace.jsonl).",
     )
     args = parser.parse_args()
+    auto_model_from_only_grpo = args.only_grpo and not str(args.model_name_or_path).strip()
+    if auto_model_from_only_grpo:
+        args.model_name_or_path = DEFAULT_ONLY_GRPO_MODEL
+    if not str(args.model_name_or_path).strip():
+        raise ValueError(
+            "--model_name_or_path is required unless --only-grpo is set "
+            f"(then it defaults to {DEFAULT_ONLY_GRPO_MODEL})."
+        )
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     distributed = local_rank != -1
@@ -397,6 +406,11 @@ def main() -> None:
             f"[GRPO] mode={mode_label} total_batches={total_batches} "
             f"grad_accum_steps={args.grad_accum_steps} optimizer_steps~={optimizer_steps}"
         )
+        if auto_model_from_only_grpo:
+            print(
+                f"[GRPO] only_grpo=True and model unspecified -> "
+                f"auto-selected model_name_or_path={args.model_name_or_path}"
+            )
 
     if distributed:
         if torch.cuda.is_available():
