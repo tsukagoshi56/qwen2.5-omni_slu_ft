@@ -316,6 +316,8 @@ def main() -> None:
     if args.debug:
         args.save_every = 0
         args.resume = False
+    else:
+        args.preview = 0
 
     if args.num_workers < 1:
         raise ValueError("num_workers must be >= 1")
