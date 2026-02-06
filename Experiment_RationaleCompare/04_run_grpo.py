@@ -419,7 +419,7 @@ def main() -> None:
         default="Experiment_3/slurp_metadata.json",
         help="Unused in current minimal-prompt mode (kept for backward compatibility).",
     )
-    parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
+    parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
     parser.add_argument("--model_name_or_path", type=str, default="")
     parser.add_argument("--ref_model_name_or_path", type=str, default="")
     parser.add_argument(

@@ -50,7 +50,7 @@ python Experiment_RationaleCompare/01_generate_oracle_cot.py \
 python Experiment_RationaleCompare/02_generate_success_cot.py \
   --input_file slurp/dataset/slurp/train.jsonl \
   --metadata_file Experiment_3/slurp_metadata.json \
-  --audio_dir slurp/audio/slurp_real \
+  --audio_dir slurp/slurp_real \
   --output_file Experiment_RationaleCompare/success_cot_raw.jsonl \
   --filtered_file Experiment_RationaleCompare/success_cot_filtered.jsonl \
   --modes text
@@ -109,7 +109,7 @@ python Experiment_RationaleFT/audio_text_mix_e2e_re.py \
   --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
   --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
   --test_file  slurp/dataset/slurp/test.jsonl \
-  --audio_dir  slurp/audio/slurp_real \
+  --audio_dir  slurp/slurp_real \
   --add_text_only
 ```
 
@@ -124,7 +124,7 @@ python Experiment_RationaleFT/audio_text_mix_e2e_re.py \
 python Experiment_RationaleCompare/04_run_grpo.py \
   --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
   --metadata_file Experiment_3/slurp_metadata.json \
-  --audio_dir slurp/audio/slurp_real \
+  --audio_dir slurp/slurp_real \
   --model_name_or_path outputs/qwen_rationale_label_ft \
   --ref_model_name_or_path outputs/qwen_rationale_label_ft \
   --output_dir outputs/grpo \

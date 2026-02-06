@@ -7,7 +7,7 @@
     "train_file": "slurp/dataset/slurp/train.jsonl",
     "eval_file": "slurp/dataset/slurp/devel.jsonl",
     "test_file": "slurp/dataset/slurp/test.jsonl",
-    "audio_dir": "slurp/audio/slurp_real",
+    "audio_dir": "slurp/slurp_real",
     "batch_size": 1,
     "num_train_epochs": 1,
     "group_size": 4,
