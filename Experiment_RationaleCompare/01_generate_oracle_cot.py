@@ -55,7 +55,14 @@ def _get_thread_client() -> Any:
     return client
 
 
-def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temperature: float, top_p: float) -> str:
+def _call_api(
+    client: Any,
+    prompt: str,
+    model_name: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> Tuple[str, Dict[str, Any]]:
     resp = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
@@ -63,7 +70,12 @@ def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temper
         temperature=temperature,
         top_p=top_p,
     )
-    return resp.choices[0].message.content or ""
+    content = resp.choices[0].message.content or ""
+    meta = {
+        "response_id": getattr(resp, "id", None),
+        "finish_reason": getattr(resp.choices[0], "finish_reason", None),
+    }
+    return content, meta
 
 
 def _has_nonempty_c(output: str) -> bool:
@@ -76,8 +88,9 @@ def _has_nonempty_c(output: str) -> bool:
 def _generate_with_retries(
     prompt: str,
     args: argparse.Namespace,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str, Dict[str, Any]]:
     last_exc: Optional[Exception] = None
+    last_meta: Dict[str, Any] = {}
     for fmt_attempt in range(args.format_retries + 1):
         prompt_used = prompt
         if fmt_attempt > 0:
@@ -89,7 +102,7 @@ def _generate_with_retries(
         for attempt in range(args.retry + 1):
             try:
                 client = _get_thread_client()
-                output = _call_api(
+                output, last_meta = _call_api(
                     client=client,
                     prompt=prompt_used,
                     model_name=args.model_name,
@@ -100,6 +113,11 @@ def _generate_with_retries(
                 break
             except Exception as exc:
                 last_exc = exc
+                if args.debug:
+                    print(
+                        f"[ERROR] API call failed (attempt {attempt + 1}/{args.retry + 1}): {exc}",
+                        flush=True,
+                    )
                 if attempt >= args.retry:
                     output = ""
                     break
@@ -107,10 +125,13 @@ def _generate_with_retries(
         if not output:
             continue
         if _has_nonempty_c(output):
-            return output, prompt_used
-    if last_exc is not None:
+            return output, prompt_used, "", last_meta
+    if last_exc is not None and args.fail_on_empty:
         raise last_exc
-    return output, prompt
+    error_msg = "empty_output"
+    if last_exc is not None:
+        error_msg = f"api_error: {last_exc}"
+    return output, prompt, error_msg, last_meta
 
 
 def _run_single(
@@ -126,7 +147,7 @@ def _run_single(
     gold_json = json.dumps(gold_label, ensure_ascii=False)
     prompt = render_oracle_prompt(db_definitions, gold_text, gold_json)
 
-    output, prompt_used = _generate_with_retries(prompt, args)
+    output, prompt_used, error_msg, api_meta = _generate_with_retries(prompt, args)
 
     result = {
         "slurp_id": record.get("slurp_id"),
@@ -137,6 +158,10 @@ def _run_single(
         "method": "or-cot",
         "mode": "text",
     }
+    if error_msg:
+        result["error"] = error_msg
+    if api_meta:
+        result["api_meta"] = api_meta
     return idx, result, prompt_used, gold_text, gold_json
 
 
@@ -152,6 +177,9 @@ def main() -> None:
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
     parser.add_argument("--preview", type=int, default=10, help="Print first N outputs to stdout.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry when C line is missing.")
+    parser.add_argument("--fail_on_empty", action="store_true", help="Abort if output stays empty.")
+    parser.add_argument("--error_file", type=str, default="", help="Optional jsonl to save error rows.")
+    parser.add_argument("--debug", action="store_true", help="Print API errors and debug info.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=1)
@@ -185,6 +213,7 @@ def main() -> None:
         items = items[args.worker_rank :: args.num_workers]
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(items)
+    error_rows: List[Dict[str, Any]] = []
     preview_limit = max(0, int(args.preview))
     preview_lock = threading.Lock()
     preview_printed: List[bool] = [False] * len(items)
@@ -204,6 +233,8 @@ def main() -> None:
                     continue
                 idx, row, prompt, gold_text, gold_json = res
                 results[idx] = row
+                if row.get("error"):
+                    error_rows.append(row)
                 if preview_limit and idx < preview_limit:
                     with preview_lock:
                         if not preview_printed[idx]:
@@ -234,6 +265,8 @@ def main() -> None:
                 continue
             idx, row, prompt, gold_text, gold_json = res
             results[idx] = row
+            if row.get("error"):
+                error_rows.append(row)
             if preview_limit and idx < preview_limit:
                 if tqdm is not None:
                     tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
@@ -254,6 +287,8 @@ def main() -> None:
 
     final_rows = [r for r in results if r is not None]
     write_jsonl(output_path, final_rows)
+    if args.error_file:
+        write_jsonl(args.error_file, error_rows)
 
 
 if __name__ == "__main__":
