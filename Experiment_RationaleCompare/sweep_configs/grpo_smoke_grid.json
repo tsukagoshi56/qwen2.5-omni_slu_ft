@@ -12,7 +12,7 @@
     "batch_size": 1,
     "num_train_epochs": 1,
     "group_size": 4,
-    "max_new_tokens": 96,
+    "max_new_tokens": 4096,
     "eval_every": 10,
     "test_every": 10
   },

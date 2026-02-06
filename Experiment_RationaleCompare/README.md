@@ -130,7 +130,7 @@ python Experiment_RationaleCompare/04_run_grpo.py \
   --output_dir outputs/grpo \
   --include_text \
   --group_size 4 \
-  --max_new_tokens 256 \
+  --max_new_tokens 4096 \
   --kl_beta 0.01
 ```
 
