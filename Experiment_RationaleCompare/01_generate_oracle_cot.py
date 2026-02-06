@@ -178,6 +178,14 @@ def _log_error(message: str) -> None:
             print(message, flush=True)
 
 
+def _append_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def _generate_with_retries(
     prompt: str,
     args: argparse.Namespace,
@@ -290,6 +298,8 @@ def main() -> None:
     parser.add_argument("--skip_c_check", action="store_true", help="Do not enforce C line in output.")
     parser.add_argument("--fail_on_empty", action="store_true", help="Abort if output stays empty.")
     parser.add_argument("--error_file", type=str, default="", help="Optional jsonl to save error rows.")
+    parser.add_argument("--save_every", type=int, default=50, help="Write partial outputs every N rows.")
+    parser.add_argument("--resume", action="store_true", help="Skip slurp_id already in output_file.")
     parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -303,6 +313,9 @@ def main() -> None:
 
     global _DEBUG
     _DEBUG = args.debug
+    if args.debug:
+        args.save_every = 0
+        args.resume = False
 
     if args.num_workers < 1:
         raise ValueError("num_workers must be >= 1")
@@ -333,8 +346,19 @@ def main() -> None:
     if args.num_workers > 1:
         items = items[args.worker_rank :: args.num_workers]
 
+    processed_ids = set()
+    if args.resume and (not args.debug) and os.path.exists(output_path):
+        try:
+            for row in read_jsonl(output_path):
+                processed_ids.add(row.get("slurp_id"))
+        except Exception:
+            processed_ids = set()
+    if processed_ids:
+        items = [it for it in items if it.get("slurp_id") not in processed_ids]
+
     results: List[Optional[Dict[str, Any]]] = [None] * len(items)
     error_rows: List[Dict[str, Any]] = []
+    new_rows: List[Dict[str, Any]] = []
     preview_limit = max(0, int(args.preview))
     preview_lock = threading.Lock()
     preview_printed: List[bool] = [False] * len(items)
@@ -354,9 +378,13 @@ def main() -> None:
                     continue
                 idx, row, prompt, gold_text, gold_json = res
                 results[idx] = row
+                new_rows.append(row)
                 if row.get("error"):
                     error_rows.append(row)
                     _log_error(f"[ERROR] slurp_id={row.get('slurp_id')} error={row.get('error')}")
+                if (not args.debug) and args.save_every and len(new_rows) >= args.save_every:
+                    _append_jsonl(output_path, new_rows)
+                    new_rows = []
                 if preview_limit and idx < preview_limit:
                     with preview_lock:
                         if not preview_printed[idx]:
@@ -391,9 +419,13 @@ def main() -> None:
                 continue
             idx, row, prompt, gold_text, gold_json = res
             results[idx] = row
+            new_rows.append(row)
             if row.get("error"):
                 error_rows.append(row)
                 _log_error(f"[ERROR] slurp_id={row.get('slurp_id')} error={row.get('error')}")
+            if (not args.debug) and args.save_every and len(new_rows) >= args.save_every:
+                _append_jsonl(output_path, new_rows)
+                new_rows = []
             if preview_limit and idx < preview_limit:
                 if tqdm is not None:
                     tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
@@ -417,7 +449,12 @@ def main() -> None:
                         print(f"TOKENS: {row['api_meta']}", flush=True)
 
     final_rows = [r for r in results if r is not None]
-    write_jsonl(output_path, final_rows)
+    if new_rows:
+        _append_jsonl(output_path, new_rows)
+        new_rows = []
+    # If not resuming, keep full consolidated output.
+    if not args.resume:
+        write_jsonl(output_path, final_rows)
     if args.error_file:
         write_jsonl(args.error_file, error_rows)
 
