@@ -41,21 +41,38 @@ _error_lock = threading.Lock()
 _DEBUG = False
 
 
-def _build_client() -> Any:
+def _is_deepseek_model(model_name: str) -> bool:
+    return "deepseek" in str(model_name or "").strip().lower()
+
+
+def _build_client(model_name: str) -> Any:
     if OpenAI is None:
         raise RuntimeError("openai package not available. Install it or use a local generator.")
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    base_url = os.environ.get("API_ENDPOINT") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+
+    if _is_deepseek_model(model_name):
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        base_url = os.environ.get("API_ENDPOINT") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
+        return OpenAI(api_key=api_key, base_url=base_url)
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
-    return OpenAI(api_key=api_key, base_url=base_url)
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+    if base_url:
+        return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=api_key)
 
 
-def _get_thread_client() -> Any:
+def _get_thread_client(model_name: str) -> Any:
     client = getattr(_thread_local, "client", None)
-    if client is None:
-        client = _build_client()
+    family = "deepseek" if _is_deepseek_model(model_name) else "openai"
+    cached_family = getattr(_thread_local, "client_family", None)
+    if client is None or cached_family != family:
+        client = _build_client(model_name)
         _thread_local.client = client
+        _thread_local.client_family = family
     return client
 
 
@@ -256,7 +273,7 @@ def _generate_with_retries(
         output = ""
         for attempt in range(args.retry + 1):
             try:
-                client = _get_thread_client()
+                client = _get_thread_client(args.model_name)
                 output, last_meta = _call_api(
                     client=client,
                     prompt=prompt_used,
@@ -341,7 +358,7 @@ def main() -> None:
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
     parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/oracle_cot.jsonl")
-    parser.add_argument("--model_name", type=str, default="deepseek-r1")
+    parser.add_argument("--model_name", "--model", dest="model_name", type=str, default="deepseek-r1")
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)

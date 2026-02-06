@@ -34,14 +34,27 @@ from prompts import render_infer_audio_prompt, render_infer_text_prompt
 _DEBUG = False
 
 
-def _build_client() -> Any:
+def _is_deepseek_model(model_name: str) -> bool:
+    return "deepseek" in str(model_name or "").strip().lower()
+
+
+def _build_client(model_name: str) -> Any:
     if OpenAI is None:
         raise RuntimeError("openai package not available. Install it or use --text_local.")
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    base_url = os.environ.get("API_ENDPOINT") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    if _is_deepseek_model(model_name):
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        base_url = os.environ.get("API_ENDPOINT") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
+        return OpenAI(api_key=api_key, base_url=base_url)
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
-    return OpenAI(api_key=api_key, base_url=base_url)
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+    if base_url:
+        return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=api_key)
 
 
 def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temperature: float, top_p: float) -> str:
@@ -176,7 +189,7 @@ def main() -> None:
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/success_cot_raw.jsonl")
     parser.add_argument("--filtered_file", type=str, default="Experiment_RationaleCompare/success_cot_filtered.jsonl")
     parser.add_argument("--modes", type=str, default="text")
-    parser.add_argument("--text_model_name", type=str, default="deepseekr1")
+    parser.add_argument("--text_model_name", "--model", dest="text_model_name", type=str, default="deepseekr1")
     parser.add_argument("--audio_model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--recording_index", type=int, default=0)
@@ -256,7 +269,7 @@ def main() -> None:
 
     client = None
     if "text" in modes:
-        client = _build_client()
+        client = _build_client(args.text_model_name)
 
     processor = None
     model = None
