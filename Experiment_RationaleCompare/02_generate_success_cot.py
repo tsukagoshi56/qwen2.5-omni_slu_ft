@@ -31,6 +31,9 @@ from common import (
 from prompts import render_infer_audio_prompt, render_infer_text_prompt
 
 
+_DEBUG = False
+
+
 def _build_client() -> Any:
     if OpenAI is None:
         raise RuntimeError("openai package not available. Install it or use --text_local.")
@@ -159,6 +162,12 @@ def _success_match_ok(match_mode: str, stats: Dict[str, Any]) -> bool:
     return False
 
 
+def _log_debug(message: str) -> None:
+    if not _DEBUG:
+        return
+    print(message, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Success-Filtered CoT (text and audio).")
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
@@ -187,7 +196,12 @@ def main() -> None:
     parser.add_argument("--success_match", type=str, choices=["full", "scenario_action", "intent"], default="full")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
+    parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
+    parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
+
+    global _DEBUG
+    _DEBUG = args.debug
 
     if args.num_workers > 1:
         # Always shard outputs and auto-merge when using multiple workers.
@@ -228,6 +242,8 @@ def main() -> None:
     db_definitions = build_db_definitions(metadata)
 
     items = read_jsonl(input_path)
+    if args.smoke:
+        args.limit = 100
     if args.limit:
         items = items[: args.limit]
     if args.num_workers > 1:
@@ -317,6 +333,15 @@ def main() -> None:
             stats = compare_labels(pred_label, gold_label)
             is_ok = _success_match_ok(args.success_match, stats)
             reward, _ = compute_reward(pred_label, gold_label)
+
+            if args.debug:
+                word_count = len((output or "").split())
+                _log_debug(
+                    f"[DEBUG] slurp_id={record.get('slurp_id')} mode={mode} words={word_count} "
+                    f"correct={bool(is_ok)} reward={reward:.3f}"
+                )
+                _log_debug("[DEBUG] raw_output:")
+                _log_debug(output or "")
 
             raw_row = {
                 "slurp_id": record.get("slurp_id"),
