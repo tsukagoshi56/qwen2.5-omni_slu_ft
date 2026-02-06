@@ -284,7 +284,19 @@ def main() -> None:
         help="Run GRPO directly from the specified base model (no SFT prerequisite in this script).",
     )
     parser.add_argument("--output_dir", type=str, default="outputs/grpo")
-    parser.add_argument("--include_text", action="store_true")
+    parser.add_argument(
+        "--include_text",
+        dest="include_text",
+        action="store_true",
+        help="Include text-mode samples in training (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_include_text",
+        "--no-include-text",
+        dest="include_text",
+        action="store_false",
+        help="Disable text-mode samples and train with audio-mode samples only.",
+    )
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--group_size", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=256)
@@ -317,6 +329,7 @@ def main() -> None:
         default="",
         help="Optional JSONL path for debug traces (default: <output_dir>/grpo_debug_trace.jsonl).",
     )
+    parser.set_defaults(include_text=True)
     args = parser.parse_args()
     auto_model_from_only_grpo = args.only_grpo and not str(args.model_name_or_path).strip()
     if auto_model_from_only_grpo:
@@ -380,7 +393,8 @@ def main() -> None:
             "[DEBUG] hyperparams "
             f"batch_size={args.batch_size} group_size={args.group_size} max_new_tokens={args.max_new_tokens} "
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
-            f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps}"
+            f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
+            f"include_text={args.include_text}"
         )
         print(f"[DEBUG] debug_output_file={debug_output_path}")
         _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
