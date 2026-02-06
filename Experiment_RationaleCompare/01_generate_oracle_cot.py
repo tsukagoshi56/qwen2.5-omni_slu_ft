@@ -3,13 +3,20 @@ import argparse
 import json
 import os
 import random
+import threading
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
+
+try:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+except ImportError:
+    ThreadPoolExecutor = None
+    as_completed = None
 
 try:
     from openai import OpenAI
@@ -26,6 +33,9 @@ from common import (
 from prompts import render_oracle_prompt
 
 
+_thread_local = threading.local()
+
+
 def _build_client() -> Any:
     if OpenAI is None:
         raise RuntimeError("openai package not available. Install it or use a local generator.")
@@ -34,6 +44,14 @@ def _build_client() -> Any:
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
     return OpenAI(api_key=api_key, base_url=base_url)
+
+
+def _get_thread_client() -> Any:
+    client = getattr(_thread_local, "client", None)
+    if client is None:
+        client = _build_client()
+        _thread_local.client = client
+    return client
 
 
 def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temperature: float, top_p: float) -> str:
@@ -47,6 +65,49 @@ def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temper
     return resp.choices[0].message.content or ""
 
 
+def _run_single(
+    idx: int,
+    record: Dict[str, Any],
+    db_definitions: str,
+    args: argparse.Namespace,
+) -> Optional[Tuple[int, Dict[str, Any]]]:
+    gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
+    if not gold_text:
+        return None
+    gold_label = label_from_record(record)
+    gold_json = json.dumps(gold_label, ensure_ascii=False)
+    prompt = render_oracle_prompt(db_definitions, gold_text, gold_json)
+
+    output = ""
+    for attempt in range(args.retry + 1):
+        try:
+            client = _get_thread_client()
+            output = _call_api(
+                client=client,
+                prompt=prompt,
+                model_name=args.model_name,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+            )
+            break
+        except Exception:
+            if attempt >= args.retry:
+                raise
+            time.sleep(args.retry_sleep)
+
+    result = {
+        "slurp_id": record.get("slurp_id"),
+        "sentence": gold_text,
+        "recordings": record.get("recordings", []),
+        "final": gold_label,
+        "rationale_text": output.strip(),
+        "method": "or-cot",
+        "mode": "text",
+    }
+    return idx, result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Oracle CoT rationales (gold text + gold JSON).")
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
@@ -56,6 +117,8 @@ def main() -> None:
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
+    parser.add_argument("--preview", type=int, default=10, help="Print first N outputs to stdout.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=1)
@@ -88,49 +151,42 @@ def main() -> None:
     if args.num_workers > 1:
         items = items[args.worker_rank :: args.num_workers]
 
-    client = _build_client()
+    results: List[Optional[Dict[str, Any]]] = [None] * len(items)
 
-    results: List[Dict[str, Any]] = []
-    iterator = items
-    if tqdm is not None:
-        iterator = tqdm(items, desc="Oracle CoT", unit="sample")
-    for idx, record in enumerate(iterator):
-        gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
-        if not gold_text:
-            continue
-        gold_label = label_from_record(record)
-        gold_json = json.dumps(gold_label, ensure_ascii=False)
-        prompt = render_oracle_prompt(db_definitions, gold_text, gold_json)
+    if args.parallel > 1 and ThreadPoolExecutor is not None:
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = [
+                executor.submit(_run_single, idx, record, db_definitions, args)
+                for idx, record in enumerate(items)
+            ]
+            iterator = as_completed(futures) if as_completed is not None else futures
+            if tqdm is not None:
+                iterator = tqdm(iterator, total=len(futures), desc="Oracle CoT", unit="sample")
+            for fut in iterator:
+                res = fut.result()
+                if res is None:
+                    continue
+                idx, row = res
+                results[idx] = row
+    else:
+        iterator = items
+        if tqdm is not None:
+            iterator = tqdm(items, desc="Oracle CoT", unit="sample")
+        for idx, record in enumerate(iterator):
+            res = _run_single(idx, record, db_definitions, args)
+            if res is None:
+                continue
+            idx, row = res
+            results[idx] = row
 
-        output = ""
-        for attempt in range(args.retry + 1):
-            try:
-                output = _call_api(
-                    client=client,
-                    prompt=prompt,
-                    model_name=args.model_name,
-                    max_tokens=args.max_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                )
-                break
-            except Exception as exc:
-                if attempt >= args.retry:
-                    raise
-                time.sleep(args.retry_sleep)
+    final_rows = [r for r in results if r is not None]
+    if args.preview > 0:
+        preview_rows = final_rows[: args.preview]
+        for i, row in enumerate(preview_rows, start=1):
+            print(f"[PREVIEW {i}] slurp_id={row.get('slurp_id')}")
+            print(row.get("rationale_text", ""))
 
-        result = {
-            "slurp_id": record.get("slurp_id"),
-            "sentence": gold_text,
-            "recordings": record.get("recordings", []),
-            "final": gold_label,
-            "rationale_text": output.strip(),
-            "method": "or-cot",
-            "mode": "text",
-        }
-        results.append(result)
-
-    write_jsonl(output_path, results)
+    write_jsonl(output_path, final_rows)
 
 
 if __name__ == "__main__":
