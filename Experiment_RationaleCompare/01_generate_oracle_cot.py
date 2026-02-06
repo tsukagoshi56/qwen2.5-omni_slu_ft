@@ -177,12 +177,16 @@ def main() -> None:
                             preview_printed[idx] = True
                             if tqdm is not None:
                                 tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
+                                tqdm.write("SYSTEM PROMPT (FULL):")
+                                tqdm.write(prompt)
                                 tqdm.write(f"INPUT Transcript: {gold_text}")
                                 tqdm.write(f"INPUT Target JSON: {gold_json}")
                                 tqdm.write("OUTPUT:")
                                 tqdm.write(row.get("rationale_text", ""))
                             else:
                                 print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
+                                print("SYSTEM PROMPT (FULL):", flush=True)
+                                print(prompt, flush=True)
                                 print(f"INPUT Transcript: {gold_text}", flush=True)
                                 print(f"INPUT Target JSON: {gold_json}", flush=True)
                                 print("OUTPUT:", flush=True)
@@ -200,12 +204,16 @@ def main() -> None:
             if preview_limit and idx < preview_limit:
                 if tqdm is not None:
                     tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
+                    tqdm.write("SYSTEM PROMPT (FULL):")
+                    tqdm.write(prompt)
                     tqdm.write(f"INPUT Transcript: {gold_text}")
                     tqdm.write(f"INPUT Target JSON: {gold_json}")
                     tqdm.write("OUTPUT:")
                     tqdm.write(row.get("rationale_text", ""))
                 else:
                     print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
+                    print("SYSTEM PROMPT (FULL):", flush=True)
+                    print(prompt, flush=True)
                     print(f"INPUT Transcript: {gold_text}", flush=True)
                     print(f"INPUT Target JSON: {gold_json}", flush=True)
                     print("OUTPUT:", flush=True)
