@@ -188,6 +188,7 @@ def main() -> None:
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/oracle_cot.jsonl")
     parser.add_argument("--model_name", type=str, default="deepseek-r1")
     parser.add_argument("--max_tokens", type=int, default=2048)
+    parser.add_argument("--max_new_tokens", type=int, default=None, help="Alias of --max_tokens.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
@@ -205,6 +206,9 @@ def main() -> None:
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     args = parser.parse_args()
+
+    if args.max_new_tokens is not None:
+        args.max_tokens = args.max_new_tokens
 
     if args.num_workers < 1:
         raise ValueError("num_workers must be >= 1")
