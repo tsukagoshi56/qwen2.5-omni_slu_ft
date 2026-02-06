@@ -11,7 +11,7 @@ J: [Target JSON]
 Rules:
 - Contrast similar/inclusive labels and ambiguous slot extractions.
 - C must include at least one competing intent and one competing slot value.
-- Reasons <12 words. Cite DB rules vs transcript evidence.
+- Cite DB rules vs transcript evidence.
 - No conversational filler.
 
 ---
@@ -33,7 +33,7 @@ J: [Final JSON]
 Rules:
 - Compare candidates from DB before deciding.
 - C must include at least one competing intent and one competing slot value.
-- Reasons <12 words. Cite specific evidence from transcript.
+- Cite specific evidence from transcript.
 - No conversational filler.
 
 ---
@@ -54,7 +54,7 @@ J: [Final JSON]
 Rules:
 - Compare candidates from DB before deciding.
 - C must include at least one competing intent and one competing slot value.
-- Reasons <12 words. Cite specific evidence from audio.
+- Cite specific evidence from audio.
 - No conversational filler.
 
 ---
