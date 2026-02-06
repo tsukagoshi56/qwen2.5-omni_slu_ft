@@ -7,6 +7,11 @@ import time
 from typing import Any, Dict, List
 
 try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
@@ -86,7 +91,10 @@ def main() -> None:
     client = _build_client()
 
     results: List[Dict[str, Any]] = []
-    for idx, record in enumerate(items):
+    iterator = items
+    if tqdm is not None:
+        iterator = tqdm(items, desc="Oracle CoT", unit="sample")
+    for idx, record in enumerate(iterator):
         gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
         if not gold_text:
             continue
