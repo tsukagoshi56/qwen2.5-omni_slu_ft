@@ -186,6 +186,30 @@ def _append_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _merge_worker_outputs(base_output_path: str, num_workers: int, cleanup: bool = False) -> int:
+    root, ext = os.path.splitext(base_output_path)
+    ext = ext or ".jsonl"
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for rank in range(num_workers):
+        shard_path = f"{root}.w{rank}of{num_workers}{ext}"
+        if not os.path.exists(shard_path):
+            continue
+        for row in read_jsonl(shard_path):
+            sid = row.get("slurp_id")
+            if sid in seen:
+                continue
+            seen.add(sid)
+            merged.append(row)
+        if cleanup:
+            try:
+                os.remove(shard_path)
+            except Exception:
+                pass
+    write_jsonl(base_output_path, merged)
+    return len(merged)
+
+
 def _generate_with_retries(
     prompt: str,
     args: argparse.Namespace,
@@ -306,6 +330,9 @@ def main() -> None:
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--worker_rank", type=int, default=0)
     parser.add_argument("--append_worker_suffix", action="store_true")
+    parser.add_argument("--merge_workers", action="store_true", help="Merge worker shard outputs into output_file.")
+    parser.add_argument("--merge_only", action="store_true", help="Only merge worker shard outputs and exit.")
+    parser.add_argument("--merge_cleanup", action="store_true", help="Remove worker shard files after merge.")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
@@ -324,14 +351,24 @@ def main() -> None:
     if args.worker_rank < 0 or args.worker_rank >= args.num_workers:
         raise ValueError("worker_rank out of range")
 
+    if args.num_workers > 1:
+        # Always shard outputs and auto-merge when using multiple workers.
+        args.append_worker_suffix = True
+        args.merge_workers = True
+
     rng = random.Random(args.seed + args.worker_rank)
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_path = os.path.join(base_dir, args.input_file) if not os.path.isabs(args.input_file) else args.input_file
     metadata_path = os.path.join(base_dir, args.metadata_file) if not os.path.isabs(args.metadata_file) else args.metadata_file
-    output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
+    base_output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
+    output_path = base_output_path
     if args.append_worker_suffix and args.num_workers > 1:
-        root, ext = os.path.splitext(output_path)
+        root, ext = os.path.splitext(base_output_path)
         output_path = f"{root}.w{args.worker_rank}of{args.num_workers}{ext or '.jsonl'}"
+
+    if args.merge_only:
+        _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
+        return
 
     metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
@@ -459,6 +496,9 @@ def main() -> None:
         write_jsonl(output_path, final_rows)
     if args.error_file:
         write_jsonl(args.error_file, error_rows)
+
+    if args.merge_workers and args.num_workers > 1 and args.append_worker_suffix and args.worker_rank == 0:
+        _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
 
 
 if __name__ == "__main__":
