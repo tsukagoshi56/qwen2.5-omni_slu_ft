@@ -235,6 +235,8 @@ def _run_single(
         _log_error(
             f"[DEBUG] slurp_id={record.get('slurp_id')} words={word_count} tokens={api_meta}"
         )
+        _log_error("[DEBUG] raw_output:")
+        _log_error(output or "")
 
     result = {
         "slurp_id": record.get("slurp_id"),
