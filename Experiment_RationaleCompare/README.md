@@ -152,6 +152,33 @@ python scripts/evaluation/evaluate.py \
 
 ---
 
+## 7) GRPO Hyperparameter Sweep (Auto)
+
+Use `05_sweep_grpo.py` to run many `04_run_grpo.py` jobs and rank them automatically.
+
+### Smoke sweep (recommended first)
+```bash
+python Experiment_RationaleCompare/05_sweep_grpo.py \
+  --config Experiment_RationaleCompare/sweep_configs/grpo_smoke_grid.json \
+  --nproc_per_node 2
+```
+
+- Output root: `outputs/grpo_sweeps/<name_timestamp>/`
+- Each run has its own `run.log` and output dir.
+- Sweep summary is saved to:
+  - `summary.json`
+  - `summary.jsonl`
+- Ranking is printed by `rank_by` (e.g., `test_intent_acc`).
+
+### Small full sweep
+```bash
+python Experiment_RationaleCompare/05_sweep_grpo.py \
+  --config Experiment_RationaleCompare/sweep_configs/grpo_full_small.json \
+  --nproc_per_node 2
+```
+
+---
+
 ## Notes
 
 - All scripts here are **generation/prep only**. Do **not** run them locally if the data/model is on the server.

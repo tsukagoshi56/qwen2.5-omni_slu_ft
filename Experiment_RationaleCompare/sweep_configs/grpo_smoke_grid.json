@@ -1,0 +1,25 @@
+{
+  "name": "grpo_smoke_grid",
+  "rank_by": "test_intent_acc",
+  "common": {
+    "only_grpo": true,
+    "smoke": true,
+    "do_sample": true,
+    "train_file": "slurp/dataset/slurp/train.jsonl",
+    "eval_file": "slurp/dataset/slurp/devel.jsonl",
+    "test_file": "slurp/dataset/slurp/test.jsonl",
+    "audio_dir": "slurp/audio/slurp_real",
+    "batch_size": 1,
+    "num_train_epochs": 1,
+    "group_size": 4,
+    "max_new_tokens": 96,
+    "eval_every": 10,
+    "test_every": 10
+  },
+  "grid": {
+    "learning_rate": [5e-07, 1e-06, 2e-06],
+    "kl_beta": [0.005, 0.01],
+    "temperature": [0.7, 0.9],
+    "top_p": [0.9, 0.95]
+  }
+}
