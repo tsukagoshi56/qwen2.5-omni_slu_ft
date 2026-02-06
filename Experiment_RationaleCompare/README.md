@@ -53,11 +53,11 @@ python Experiment_RationaleCompare/02_generate_success_cot.py \
   --audio_dir slurp/audio/slurp_real \
   --output_file Experiment_RationaleCompare/success_cot_raw.jsonl \
   --filtered_file Experiment_RationaleCompare/success_cot_filtered.jsonl \
-  --modes text,audio
+  --modes text
 ```
 
-- **Text mode**: uses gold transcript only (DeepSeek API default)
-- **Audio mode**: uses audio only (local Qwen2Audio)
+- **Text mode**: uses gold transcript only (DeepSeek API default, same decoding defaults as 01)
+- **Audio mode**: uses audio only (local Qwen2Audio). Enable with `--modes text,audio`.
 - **Filtered** file keeps only correct predictions (configurable via `--success_match`)
 
 By default, **text‑mode filtered samples omit `recordings`** to force text‑only inputs in SFT.
@@ -87,6 +87,16 @@ python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
   --input_files Experiment_RationaleCompare/success_cot_filtered.jsonl \
   --output_file Experiment_RationaleCompare/sft_success_train.jsonl
 ```
+
+### Success‑CoT SFT (keep all outputs)
+```bash
+python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
+  --input_files Experiment_RationaleCompare/success_cot_raw.jsonl \
+  --output_file Experiment_RationaleCompare/sft_success_train.jsonl \
+  --method sf-cot
+```
+
+`success_cot_raw.jsonl` includes `gold_label`; `03_prepare_sft_jsonl.py` will use it as `final` automatically.
 
 ---
 
@@ -147,3 +157,4 @@ python scripts/evaluation/evaluate.py \
 - All scripts here are **generation/prep only**. Do **not** run them locally if the data/model is on the server.
 - Audio inference always uses **audio only** (no transcript).
 - Text inference always uses **gold transcript only**.
+- API errors **fail fast** to avoid burning keys (no retries). There is a per-worker rate limit of `0.2s` after each API call.
