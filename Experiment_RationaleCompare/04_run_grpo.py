@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -489,7 +490,19 @@ def main() -> None:
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
     parser.set_defaults(include_text=False)
-    args = parser.parse_args()
+
+    # Accept both --snake_case and --kebab-case flags.
+    normalized_argv: List[str] = []
+    for token in sys.argv[1:]:
+        if token.startswith("--"):
+            if "=" in token:
+                key, value = token.split("=", 1)
+                token = f"--{key[2:].replace('-', '_')}={value}"
+            else:
+                token = f"--{token[2:].replace('-', '_')}"
+        normalized_argv.append(token)
+
+    args = parser.parse_args(normalized_argv)
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
