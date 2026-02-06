@@ -281,7 +281,7 @@ def main() -> None:
     parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/oracle_cot.jsonl")
     parser.add_argument("--model_name", type=str, default="deepseek-r1")
-    parser.add_argument("--max_tokens", type=int, default=2048)
+    parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
