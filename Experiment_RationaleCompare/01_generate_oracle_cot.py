@@ -71,7 +71,10 @@ def _call_api(
         temperature=temperature,
         top_p=top_p,
     )
-    content = resp.choices[0].message.content or ""
+    message = resp.choices[0].message
+    content = (message.content or "").strip()
+    if not content and hasattr(message, "reasoning_content"):
+        content = (message.reasoning_content or "").strip()
     meta = {
         "response_id": getattr(resp, "id", None),
         "finish_reason": getattr(resp.choices[0], "finish_reason", None),
