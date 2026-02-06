@@ -275,6 +275,13 @@ def main() -> None:
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
     parser.add_argument("--model_name_or_path", type=str, required=True)
     parser.add_argument("--ref_model_name_or_path", type=str, default="")
+    parser.add_argument(
+        "--only_grpo",
+        "--only-grpo",
+        dest="only_grpo",
+        action="store_true",
+        help="Run GRPO directly from the specified base model (no SFT prerequisite in this script).",
+    )
     parser.add_argument("--output_dir", type=str, default="outputs/grpo")
     parser.add_argument("--include_text", action="store_true")
     parser.add_argument("--batch_size", type=int, default=1)
@@ -382,6 +389,15 @@ def main() -> None:
         sampler=sampler,
         collate_fn=collate_grpo_items,
     )
+    if rank == 0:
+        total_batches = len(dataloader) * args.num_train_epochs
+        optimizer_steps = math.ceil(total_batches / max(1, args.grad_accum_steps))
+        mode_label = "ONLY_GRPO" if args.only_grpo else "SFT_INIT+GRPO"
+        print(
+            f"[GRPO] mode={mode_label} total_batches={total_batches} "
+            f"grad_accum_steps={args.grad_accum_steps} optimizer_steps~={optimizer_steps}"
+        )
+
     if distributed:
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{local_rank}")
@@ -411,6 +427,10 @@ def main() -> None:
     model.train()
 
     ref_path = args.ref_model_name_or_path or args.model_name_or_path
+    if rank == 0 and args.only_grpo:
+        print(
+            f"[GRPO] only_grpo=True: policy_init={args.model_name_or_path} ref_model={ref_path}"
+        )
     ref_model = Qwen2AudioForConditionalGeneration.from_pretrained(
         ref_path,
         torch_dtype=torch.bfloat16,
