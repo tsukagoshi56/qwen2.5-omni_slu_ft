@@ -219,19 +219,8 @@ class DistributedHomogeneousBatchSampler(Sampler):
         else:
             shuffled_audio = audio_indices_tensor
 
-        total_audio_count = len(shuffled_audio)
-        actual_epochs = max(1, self.total_epochs)
-        chunk_size = max(1, total_audio_count // actual_epochs)
-        
-        current_chunk_idx = self.epoch % actual_epochs
-        
-        start_idx = current_chunk_idx * chunk_size
-        if current_chunk_idx == actual_epochs - 1:
-            end_idx = total_audio_count
-        else:
-            end_idx = start_idx + chunk_size
-            
-        active_audio_indices = shuffled_audio[start_idx:end_idx]
+        # Use all audio every epoch (Direct Mixing p=1)
+        active_audio_indices = shuffled_audio
         active_text_indices = torch.tensor(self.local_text_indices)
 
         g_dynamic = torch.Generator()
@@ -265,9 +254,7 @@ class DistributedHomogeneousBatchSampler(Sampler):
 
     def __len__(self):
         total_audio = len(self.local_audio_indices)
-        actual_epochs = max(1, self.total_epochs)
-        chunk_size = total_audio // actual_epochs
-        current_audio_len = chunk_size 
+        current_audio_len = total_audio
         current_text_len = len(self.local_text_indices)
         audio_batches = (current_audio_len + self.batch_size - 1) // self.batch_size
         text_batches = (current_text_len + self.batch_size - 1) // self.batch_size
@@ -636,7 +623,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_smart_batch_ddp")
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--learning_rate", type=float, default=3e-5)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     
     # Smoke Test Flag
     parser.add_argument("--smoke", action="store_true", help="Run a quick smoke test with tiny data to verify pipeline.")
@@ -688,8 +675,8 @@ def main():
         args.model_name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
     ).to(device)
     
-    model.audio_tower.requires_grad_(False)
-    model.multi_modal_projector.requires_grad_(False)
+    model.audio_tower.requires_grad_(True)
+    model.multi_modal_projector.requires_grad_(True)
 
     # --- Training ---
     training_args = TrainingArguments(
@@ -699,6 +686,8 @@ def main():
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=4,
         learning_rate=args.learning_rate,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.04,
         bf16=True,
         logging_steps=1 if args.smoke else 10,
         eval_strategy="steps" if len(eval_items) > 0 else "no",
