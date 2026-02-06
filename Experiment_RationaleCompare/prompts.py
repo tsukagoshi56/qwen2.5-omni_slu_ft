@@ -9,7 +9,7 @@ R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
 J: [Target JSON]
 
 Rules:
-- Contrast similar/inclusive labels and ambiguous slot extractions (e.g., specific vs broader intent like alarm_set vs alarm_query).
+- Contrast similar/inclusive labels and ambiguous slot extractions (e.g., general_greet vs general_quirky, email_querycontact vs email_query).
 - C must include the target label plus at least 3 competing intents and 2 competing slot values.
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite DB rules vs transcript evidence.
