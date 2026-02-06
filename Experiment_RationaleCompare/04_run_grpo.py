@@ -5,24 +5,38 @@ import math
 import os
 import random
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
 from common import (
-    build_db_definitions,
     compute_reward,
     label_from_record,
-    load_metadata,
     parse_j_from_output,
     read_jsonl,
     resolve_audio_path,
 )
-from prompts import render_infer_audio_prompt, render_infer_text_prompt
+
+
+SYSTEM_PROMPT_TEXT = (
+    'System: SLU Logic Analyst. Infer the intent and slots using "Transcript".'
+)
+SYSTEM_PROMPT_AUDIO = (
+    'System: SLU Logic Analyst. Infer the intent and slots using "Audio".'
+)
+PROMPT_OUTPUT_FORMAT = (
+    "Output Format:\n"
+    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+    "R: label1!reason1; label2!reason2; ...\n"
+    "J: [Final JSON]"
+)
 
 
 @dataclass
@@ -100,6 +114,23 @@ def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
         [{"role": "user", "content": user_content}],
         tokenize=False,
         add_generation_prompt=True,
+    )
+
+
+def build_grpo_prompt(mode: str, sentence: str) -> str:
+    if mode == "audio":
+        return (
+            f"{SYSTEM_PROMPT_AUDIO}\n\n"
+            f"{PROMPT_OUTPUT_FORMAT}\n\n"
+            "[Input Data]\n"
+            "- Audio: <AUDIO>"
+        )
+    text = str(sentence or "").strip()
+    return (
+        f"{SYSTEM_PROMPT_TEXT}\n\n"
+        f"{PROMPT_OUTPUT_FORMAT}\n\n"
+        "[Input Data]\n"
+        f"- Transcript: {text}"
     )
 
 
@@ -218,10 +249,29 @@ def _debug_print_dataset(items: List[GrpoItem], preview_items: int) -> None:
         )
 
 
+def _is_distributed() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _get_rank_world() -> Tuple[int, int]:
+    if _is_distributed():
+        return dist.get_rank(), dist.get_world_size()
+    return 0, 1
+
+
+def _unwrap_model(model):
+    return model.module if isinstance(model, DDP) else model
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run GRPO fine-tuning after SF-CoT.")
     parser.add_argument("--train_file", type=str, required=True)
-    parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
+    parser.add_argument(
+        "--metadata_file",
+        type=str,
+        default="Experiment_3/slurp_metadata.json",
+        help="Unused in current minimal-prompt mode (kept for backward compatibility).",
+    )
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
     parser.add_argument("--model_name_or_path", type=str, required=True)
     parser.add_argument("--ref_model_name_or_path", type=str, default="")
@@ -261,16 +311,31 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    distributed = local_rank != -1
+    if distributed:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        rank, world_size = _get_rank_world()
+    else:
+        rank, world_size = 0, 1
+
+    seed = args.seed + rank
+    random.seed(seed)
+    torch.manual_seed(seed)
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     train_path = os.path.join(base_dir, args.train_file) if not os.path.isabs(args.train_file) else args.train_file
-    metadata_path = os.path.join(base_dir, args.metadata_file) if not os.path.isabs(args.metadata_file) else args.metadata_file
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     output_dir = os.path.join(base_dir, args.output_dir) if not os.path.isabs(args.output_dir) else args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
-    if args.debug:
+    if rank == 0:
+        os.makedirs(output_dir, exist_ok=True)
+    if distributed:
+        dist.barrier()
+
+    if args.debug and rank == 0:
         if args.debug_output_file:
             debug_output_path = (
                 args.debug_output_file
@@ -285,14 +350,12 @@ def main() -> None:
     else:
         debug_output_path = ""
 
-    metadata = load_metadata(metadata_path)
-    db_definitions = build_db_definitions(metadata)
-
     items = build_items(train_path, audio_dir, include_text=args.include_text)
-    if args.debug:
+    if args.debug and rank == 0:
         print("[DEBUG] ===== Run Config =====")
+        print(f"[DEBUG] distributed={distributed} rank={rank} world_size={world_size} local_rank={local_rank}")
         print(
-            f"[DEBUG] train_path={train_path} metadata_path={metadata_path} audio_dir={audio_dir} output_dir={output_dir}"
+            f"[DEBUG] train_path={train_path} audio_dir={audio_dir} output_dir={output_dir}"
         )
         print(
             f"[DEBUG] model={args.model_name_or_path} ref_model={args.ref_model_name_or_path or args.model_name_or_path}"
@@ -307,14 +370,25 @@ def main() -> None:
         _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
 
     dataset = GrpoDataset(items)
+    sampler = (
+        DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        if distributed
+        else None
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         collate_fn=collate_grpo_items,
     )
-
-    device = torch.device(args.device)
+    if distributed:
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
@@ -325,6 +399,13 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
+    if distributed:
+        model = DDP(
+            model,
+            device_ids=[local_rank] if torch.cuda.is_available() else None,
+            output_device=local_rank if torch.cuda.is_available() else None,
+            find_unused_parameters=False,
+        )
     model.train()
 
     ref_path = args.ref_model_name_or_path or args.model_name_or_path
@@ -341,6 +422,8 @@ def main() -> None:
 
     global_step = 0
     for epoch in range(args.num_train_epochs):
+        if sampler is not None:
+            sampler.set_epoch(epoch)
         for batch in dataloader:
             batch_loss = torch.tensor(0.0, device=device)
             sample_count = 0
@@ -357,12 +440,9 @@ def main() -> None:
                     sr = processor.feature_extractor.sampling_rate
                     audio, _ = librosa.load(item.audio_path, sr=sr)
 
-                if item.mode == "audio":
-                    prompt = render_infer_audio_prompt(db_definitions)
-                else:
-                    prompt = render_infer_text_prompt(db_definitions, item.sentence)
+                prompt = build_grpo_prompt(item.mode, item.sentence)
 
-                debug_step = args.debug and (global_step < args.debug_preview_steps)
+                debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
                 if debug_step:
                     chat_prompt = build_chat_input(processor, prompt, audio is not None)
                     print(
@@ -375,7 +455,7 @@ def main() -> None:
                     print(_shorten(chat_prompt, args.debug_max_chars))
 
                 samples = generate_samples(
-                    model=model,
+                    model=_unwrap_model(model),
                     processor=processor,
                     prompt_text=prompt,
                     audio=audio,
@@ -498,7 +578,7 @@ def main() -> None:
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if args.log_every and global_step % args.log_every == 0:
+            if rank == 0 and args.log_every and global_step % args.log_every == 0:
                 if reward_values:
                     reward_mean = sum(reward_values) / len(reward_values)
                     reward_min = min(reward_values)
@@ -522,18 +602,23 @@ def main() -> None:
                     f"sample_loss_mean={sample_loss_mean:.4f}"
                 )
 
-            if args.save_every and global_step > 0 and global_step % args.save_every == 0:
+            if rank == 0 and args.save_every and global_step > 0 and global_step % args.save_every == 0:
                 ckpt_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
                 os.makedirs(ckpt_dir, exist_ok=True)
-                model.save_pretrained(ckpt_dir)
+                _unwrap_model(model).save_pretrained(ckpt_dir)
                 processor.save_pretrained(ckpt_dir)
 
             global_step += 1
 
-    final_dir = os.path.join(output_dir, "final")
-    os.makedirs(final_dir, exist_ok=True)
-    model.save_pretrained(final_dir)
-    processor.save_pretrained(final_dir)
+    if distributed:
+        dist.barrier()
+    if rank == 0:
+        final_dir = os.path.join(output_dir, "final")
+        os.makedirs(final_dir, exist_ok=True)
+        _unwrap_model(model).save_pretrained(final_dir)
+        processor.save_pretrained(final_dir)
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
