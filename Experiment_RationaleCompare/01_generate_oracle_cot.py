@@ -72,12 +72,17 @@ def _call_api(
         top_p=top_p,
     )
     message = resp.choices[0].message
-    content = (message.content or "").strip()
-    if not content and hasattr(message, "reasoning_content"):
-        content = (message.reasoning_content or "").strip()
+    content = message.content or ""
+    reasoning_present = False
+    if hasattr(message, "reasoning_content"):
+        reasoning_present = bool((message.reasoning_content or "").strip())
     meta = {
         "response_id": getattr(resp, "id", None),
         "finish_reason": getattr(resp.choices[0], "finish_reason", None),
+        "prompt_tokens": getattr(getattr(resp, "usage", None), "prompt_tokens", None),
+        "completion_tokens": getattr(getattr(resp, "usage", None), "completion_tokens", None),
+        "total_tokens": getattr(getattr(resp, "usage", None), "total_tokens", None),
+        "reasoning_present": reasoning_present,
     }
     return content, meta
 
@@ -134,7 +139,7 @@ def _generate_with_retries(
                 time.sleep(args.retry_sleep)
         if not output:
             continue
-        if _has_nonempty_c(output):
+        if args.skip_c_check or _has_nonempty_c(output):
             return output, prompt_used, "", last_meta
     if last_exc is not None and args.fail_on_empty:
         raise last_exc
@@ -188,6 +193,7 @@ def main() -> None:
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
     parser.add_argument("--preview", type=int, default=10, help="Print first N outputs to stdout.")
     parser.add_argument("--format_retries", type=int, default=2, help="Retry when C line is missing.")
+    parser.add_argument("--skip_c_check", action="store_true", help="Do not enforce C line in output.")
     parser.add_argument("--fail_on_empty", action="store_true", help="Abort if output stays empty.")
     parser.add_argument("--error_file", type=str, default="", help="Optional jsonl to save error rows.")
     parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
@@ -257,16 +263,20 @@ def main() -> None:
                                 tqdm.write(prompt)
                                 tqdm.write(f"INPUT Transcript: {gold_text}")
                                 tqdm.write(f"INPUT Target JSON: {gold_json}")
-                                tqdm.write("OUTPUT:")
+                                tqdm.write(f"OUTPUT (raw content):")
                                 tqdm.write(row.get("rationale_text", ""))
+                                if row.get("api_meta"):
+                                    tqdm.write(f"TOKENS: {row['api_meta']}")
                             else:
                                 print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
                                 print("SYSTEM PROMPT (FULL):", flush=True)
                                 print(prompt, flush=True)
                                 print(f"INPUT Transcript: {gold_text}", flush=True)
                                 print(f"INPUT Target JSON: {gold_json}", flush=True)
-                                print("OUTPUT:", flush=True)
+                                print("OUTPUT (raw content):", flush=True)
                                 print(row.get("rationale_text", ""), flush=True)
+                                if row.get("api_meta"):
+                                    print(f"TOKENS: {row['api_meta']}", flush=True)
     else:
         iterator = items
         if tqdm is not None:
@@ -287,16 +297,20 @@ def main() -> None:
                     tqdm.write(prompt)
                     tqdm.write(f"INPUT Transcript: {gold_text}")
                     tqdm.write(f"INPUT Target JSON: {gold_json}")
-                    tqdm.write("OUTPUT:")
+                    tqdm.write("OUTPUT (raw content):")
                     tqdm.write(row.get("rationale_text", ""))
+                    if row.get("api_meta"):
+                        tqdm.write(f"TOKENS: {row['api_meta']}")
                 else:
                     print(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}", flush=True)
                     print("SYSTEM PROMPT (FULL):", flush=True)
                     print(prompt, flush=True)
                     print(f"INPUT Transcript: {gold_text}", flush=True)
                     print(f"INPUT Target JSON: {gold_json}", flush=True)
-                    print("OUTPUT:", flush=True)
+                    print("OUTPUT (raw content):", flush=True)
                     print(row.get("rationale_text", ""), flush=True)
+                    if row.get("api_meta"):
+                        print(f"TOKENS: {row['api_meta']}", flush=True)
 
     final_rows = [r for r in results if r is not None]
     write_jsonl(output_path, final_rows)
