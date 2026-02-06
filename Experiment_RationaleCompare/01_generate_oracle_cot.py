@@ -99,12 +99,33 @@ def _extract_crj(output: str) -> Tuple[str, bool]:
     if not output:
         return output, False
     lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-    c_line = next((ln for ln in lines if ln.startswith("C:")), "")
-    r_line = next((ln for ln in lines if ln.startswith("R:")), "")
-    j_line = next((ln for ln in lines if ln.startswith("J:")), "")
-    if c_line and r_line and j_line:
-        return "\n".join([c_line, r_line, j_line]), True
-    return output, False
+    if not lines:
+        return output, False
+
+    # Find the last valid C->R->J sequence in order.
+    c_idx = [i for i, ln in enumerate(lines) if re.match(r"^C:\s*", ln)]
+    r_idx = [i for i, ln in enumerate(lines) if re.match(r"^R:\s*", ln)]
+    j_idx = [i for i, ln in enumerate(lines) if re.match(r"^J:\s*", ln)]
+
+    best = None
+    for ci in c_idx:
+        r_after = [ri for ri in r_idx if ri > ci]
+        if not r_after:
+            continue
+        ri = r_after[0]
+        j_after = [ji for ji in j_idx if ji > ri]
+        if not j_after:
+            continue
+        ji = j_after[0]
+        best = (ci, ri, ji)
+    if best is None:
+        return output, False
+
+    ci, ri, ji = best
+    c_line = lines[ci]
+    r_line = lines[ri]
+    j_line = lines[ji]
+    return "\n".join([c_line, r_line, j_line]), True
 
 
 def _normalize_intent(value: str) -> str:
