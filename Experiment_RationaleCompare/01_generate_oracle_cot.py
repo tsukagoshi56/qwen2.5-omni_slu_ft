@@ -91,7 +91,7 @@ def _call_api(
 def _has_nonempty_c(output: str) -> bool:
     if not output:
         return False
-    match = re.search(r"(?m)^\\s*C:\\s*(\\S.+)$", output)
+    match = re.search(r"(?m)^\s*C:\s*(\S.+)$", output)
     return bool(match)
 
 
