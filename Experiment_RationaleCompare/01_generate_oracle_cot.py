@@ -35,6 +35,7 @@ from prompts import render_oracle_prompt
 
 
 _thread_local = threading.local()
+_error_lock = threading.Lock()
 
 
 def _build_client() -> Any:
@@ -85,6 +86,14 @@ def _has_nonempty_c(output: str) -> bool:
     return bool(match)
 
 
+def _log_error(message: str) -> None:
+    with _error_lock:
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
+
+
 def _generate_with_retries(
     prompt: str,
     args: argparse.Namespace,
@@ -113,11 +122,9 @@ def _generate_with_retries(
                 break
             except Exception as exc:
                 last_exc = exc
-                if args.debug:
-                    print(
-                        f"[ERROR] API call failed (attempt {attempt + 1}/{args.retry + 1}): {exc}",
-                        flush=True,
-                    )
+                _log_error(
+                    f"[ERROR] API call failed (attempt {attempt + 1}/{args.retry + 1}): {exc}"
+                )
                 if attempt >= args.retry:
                     output = ""
                     break
@@ -131,6 +138,7 @@ def _generate_with_retries(
     error_msg = "empty_output"
     if last_exc is not None:
         error_msg = f"api_error: {last_exc}"
+    _log_error(f"[ERROR] Output empty after retries: {error_msg}")
     return output, prompt, error_msg, last_meta
 
 
@@ -179,7 +187,7 @@ def main() -> None:
     parser.add_argument("--format_retries", type=int, default=2, help="Retry when C line is missing.")
     parser.add_argument("--fail_on_empty", action="store_true", help="Abort if output stays empty.")
     parser.add_argument("--error_file", type=str, default="", help="Optional jsonl to save error rows.")
-    parser.add_argument("--debug", action="store_true", help="Print API errors and debug info.")
+    parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=1)
@@ -235,6 +243,7 @@ def main() -> None:
                 results[idx] = row
                 if row.get("error"):
                     error_rows.append(row)
+                    _log_error(f"[ERROR] slurp_id={row.get('slurp_id')} error={row.get('error')}")
                 if preview_limit and idx < preview_limit:
                     with preview_lock:
                         if not preview_printed[idx]:
@@ -267,6 +276,7 @@ def main() -> None:
             results[idx] = row
             if row.get("error"):
                 error_rows.append(row)
+                _log_error(f"[ERROR] slurp_id={row.get('slurp_id')} error={row.get('error')}")
             if preview_limit and idx < preview_limit:
                 if tqdm is not None:
                     tqdm.write(f"[PREVIEW {idx + 1}] slurp_id={row.get('slurp_id')}")
