@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import random
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +66,53 @@ def _call_api(client: Any, prompt: str, model_name: str, max_tokens: int, temper
     return resp.choices[0].message.content or ""
 
 
+def _has_nonempty_c(output: str) -> bool:
+    if not output:
+        return False
+    match = re.search(r"(?m)^\\s*C:\\s*(\\S.+)$", output)
+    return bool(match)
+
+
+def _generate_with_retries(
+    prompt: str,
+    args: argparse.Namespace,
+) -> Tuple[str, str]:
+    last_exc: Optional[Exception] = None
+    for fmt_attempt in range(args.format_retries + 1):
+        prompt_used = prompt
+        if fmt_attempt > 0:
+            prompt_used = (
+                prompt
+                + \"\\n\\nReminder: Include a non-empty C line with at least one competing intent and one competing slot value.\"
+            )
+        output = \"\"
+        for attempt in range(args.retry + 1):
+            try:
+                client = _get_thread_client()
+                output = _call_api(
+                    client=client,
+                    prompt=prompt_used,
+                    model_name=args.model_name,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= args.retry:
+                    output = \"\"
+                    break
+                time.sleep(args.retry_sleep)
+        if not output:
+            continue
+        if _has_nonempty_c(output):
+            return output, prompt_used
+    if last_exc is not None:
+        raise last_exc
+    return output, prompt
+
+
 def _run_single(
     idx: int,
     record: Dict[str, Any],
@@ -78,23 +126,7 @@ def _run_single(
     gold_json = json.dumps(gold_label, ensure_ascii=False)
     prompt = render_oracle_prompt(db_definitions, gold_text, gold_json)
 
-    output = ""
-    for attempt in range(args.retry + 1):
-        try:
-            client = _get_thread_client()
-            output = _call_api(
-                client=client,
-                prompt=prompt,
-                model_name=args.model_name,
-                max_tokens=args.max_tokens,
-                temperature=args.temperature,
-                top_p=args.top_p,
-            )
-            break
-        except Exception:
-            if attempt >= args.retry:
-                raise
-            time.sleep(args.retry_sleep)
+    output, prompt_used = _generate_with_retries(prompt, args)
 
     result = {
         "slurp_id": record.get("slurp_id"),
@@ -105,7 +137,7 @@ def _run_single(
         "method": "or-cot",
         "mode": "text",
     }
-    return idx, result, prompt, gold_text, gold_json
+    return idx, result, prompt_used, gold_text, gold_json
 
 
 def main() -> None:
@@ -119,6 +151,7 @@ def main() -> None:
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent API requests.")
     parser.add_argument("--preview", type=int, default=10, help="Print first N outputs to stdout.")
+    parser.add_argument("--format_retries", type=int, default=2, help="Retry when C line is missing.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=1)
