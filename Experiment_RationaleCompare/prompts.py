@@ -10,7 +10,7 @@ J: [Target JSON]
 
 Rules:
 - Contrast similar/inclusive labels and ambiguous slot extractions (e.g., specific vs broader intent like alarm_set vs alarm_query).
-- C must include at least 3 competing intents and 2 competing slot values.
+- C must include the target label plus at least 3 competing intents and 2 competing slot values.
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
@@ -35,7 +35,7 @@ J: [Final JSON]
 
 Rules:
 - Compare candidates from DB before deciding.
-- C must include at least 3 competing intents and 2 competing slot values.
+- C must include the predicted label plus at least 3 competing intents and 2 competing slot values.
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
@@ -59,7 +59,7 @@ J: [Final JSON]
 
 Rules:
 - Compare candidates from DB before deciding.
-- C must include at least 3 competing intents and 2 competing slot values.
+- C must include the predicted label plus at least 3 competing intents and 2 competing slot values.
 - R must mention slot rationale (why a slot value is supported or rejected).
 - Cite specific evidence from audio.
 - Output exactly 3 lines (C, R, J) and nothing else.
