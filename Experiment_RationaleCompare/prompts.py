@@ -9,12 +9,12 @@ R: [Label]![Rejection Reason]; [Label]*[Adoption Reason]
 J: [Target JSON]
 
 Rules:
-- Contrast similar/inclusive labels and ambiguous slot extractions.
-- C must include at least one competing intent and one competing slot value.
+- Contrast similar/inclusive labels and ambiguous slot extractions (e.g., specific vs broader intent like alarm_set vs alarm_query).
+- C must include at least 3 competing intents and 2 competing slot values.
+- R must mention slot rationale (why a slot value is supported or rejected).
 - Cite DB rules vs transcript evidence.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
-- Use intent labels with '_' (e.g., alarm_query), never ':'.
 - No conversational filler.
 
 ---
@@ -35,11 +35,11 @@ J: [Final JSON]
 
 Rules:
 - Compare candidates from DB before deciding.
-- C must include at least one competing intent and one competing slot value.
+- C must include at least 3 competing intents and 2 competing slot values.
+- R must mention slot rationale (why a slot value is supported or rejected).
 - Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
-- Use intent labels with '_' (e.g., alarm_query), never ':'.
 - No conversational filler.
 
 ---
@@ -59,11 +59,11 @@ J: [Final JSON]
 
 Rules:
 - Compare candidates from DB before deciding.
-- C must include at least one competing intent and one competing slot value.
+- C must include at least 3 competing intents and 2 competing slot values.
+- R must mention slot rationale (why a slot value is supported or rejected).
 - Cite specific evidence from audio.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
-- Use intent labels with '_' (e.g., alarm_query), never ':'.
 - No conversational filler.
 
 ---
