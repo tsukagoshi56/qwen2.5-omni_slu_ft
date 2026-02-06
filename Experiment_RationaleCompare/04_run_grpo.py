@@ -17,6 +17,7 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
 from common import (
+    compare_labels,
     compute_reward,
     label_from_record,
     parse_j_from_output,
@@ -264,9 +265,118 @@ def _unwrap_model(model):
     return model.module if isinstance(model, DDP) else model
 
 
+def evaluate_model(
+    model,
+    processor: AutoProcessor,
+    items: List[GrpoItem],
+    device: torch.device,
+    max_new_tokens: int,
+    rank: int,
+    world_size: int,
+    debug: bool = False,
+    debug_max_chars: int = 1200,
+) -> Dict[str, float]:
+    eval_model = _unwrap_model(model)
+    was_training = eval_model.training
+    eval_model.eval()
+
+    local_items = items[rank::world_size] if world_size > 1 else items
+    local_count = 0.0
+    reward_sum = 0.0
+    scenario_sum = 0.0
+    action_sum = 0.0
+    intent_sum = 0.0
+    entity_f1_sum = 0.0
+
+    with torch.no_grad():
+        for idx, item in enumerate(local_items):
+            audio = None
+            if item.audio_path:
+                try:
+                    sr = processor.feature_extractor.sampling_rate
+                    audio, _ = librosa.load(item.audio_path, sr=sr)
+                except Exception:
+                    continue
+
+            prompt = build_grpo_prompt(item.mode, item.sentence)
+            text_input = build_chat_input(processor, prompt, audio is not None)
+            if audio is None:
+                inputs = processor(text=text_input, return_tensors="pt")
+            else:
+                sr = processor.feature_extractor.sampling_rate
+                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            output_ids = eval_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+                pad_token_id=processor.tokenizer.pad_token_id,
+            )
+            input_len = inputs["input_ids"].shape[1]
+            generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+
+            pred_obj = parse_j_from_output(generated_text) or {}
+            pred_label = {
+                "scenario": str(pred_obj.get("scenario", "")).strip(),
+                "action": str(pred_obj.get("action", "")).strip(),
+                "entities": pred_obj.get("entities", []) if isinstance(pred_obj.get("entities", []), list) else [],
+            }
+            reward, _ = compute_reward(pred_label, item.gold_label)
+            stats = compare_labels(pred_label, item.gold_label)
+
+            local_count += 1.0
+            reward_sum += float(reward)
+            scenario_sum += 1.0 if stats["scenario_ok"] else 0.0
+            action_sum += 1.0 if stats["action_ok"] else 0.0
+            intent_sum += 1.0 if stats["intent_ok"] else 0.0
+            entity_f1_sum += float(stats["entity_f1"])
+
+            if debug and rank == 0 and idx < 2:
+                print(f"[EVAL-DEBUG] mode={item.mode} slurp_id={item.slurp_id}")
+                print(f"[EVAL-DEBUG] gold={json.dumps(item.gold_label, ensure_ascii=False)}")
+                print(f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} reward={reward:.4f}")
+                print("[EVAL-DEBUG] raw:")
+                print(_shorten(generated_text, debug_max_chars))
+
+    metrics_tensor = torch.tensor(
+        [local_count, reward_sum, scenario_sum, action_sum, intent_sum, entity_f1_sum],
+        device=device,
+        dtype=torch.float32,
+    )
+    if world_size > 1 and _is_distributed():
+        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+
+    total = float(metrics_tensor[0].item())
+    if total <= 0:
+        result = {
+            "num_samples": 0.0,
+            "reward_mean": 0.0,
+            "scenario_acc": 0.0,
+            "action_acc": 0.0,
+            "intent_acc": 0.0,
+            "entity_f1_mean": 0.0,
+        }
+    else:
+        result = {
+            "num_samples": total,
+            "reward_mean": float(metrics_tensor[1].item() / total),
+            "scenario_acc": float(metrics_tensor[2].item() / total),
+            "action_acc": float(metrics_tensor[3].item() / total),
+            "intent_acc": float(metrics_tensor[4].item() / total),
+            "entity_f1_mean": float(metrics_tensor[5].item() / total),
+        }
+
+    if was_training:
+        eval_model.train()
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run GRPO fine-tuning after SF-CoT.")
     parser.add_argument("--train_file", type=str, required=True)
+    parser.add_argument("--eval_file", type=str, default="", help="Optional eval jsonl path.")
     parser.add_argument(
         "--metadata_file",
         type=str,
@@ -306,6 +416,8 @@ def main() -> None:
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--eval_every", type=int, default=0, help="Run eval every N global steps (0 disables).")
+    parser.add_argument("--eval_max_samples", type=int, default=None, help="Cap eval items for faster validation.")
     parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--kl_beta", type=float, default=0.01)
@@ -357,6 +469,11 @@ def main() -> None:
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     train_path = os.path.join(base_dir, args.train_file) if not os.path.isabs(args.train_file) else args.train_file
+    eval_path = (
+        os.path.join(base_dir, args.eval_file)
+        if (args.eval_file and not os.path.isabs(args.eval_file))
+        else args.eval_file
+    )
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     output_dir = os.path.join(base_dir, args.output_dir) if not os.path.isabs(args.output_dir) else args.output_dir
     if rank == 0:
@@ -380,6 +497,12 @@ def main() -> None:
         debug_output_path = ""
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
+    eval_items: List[GrpoItem] = []
+    if args.eval_file:
+        eval_items = build_items(eval_path, audio_dir, include_text=args.include_text)
+        if args.eval_max_samples is not None:
+            eval_items = eval_items[: max(0, args.eval_max_samples)]
+
     if args.debug and rank == 0:
         print("[DEBUG] ===== Run Config =====")
         print(f"[DEBUG] distributed={distributed} rank={rank} world_size={world_size} local_rank={local_rank}")
@@ -396,6 +519,11 @@ def main() -> None:
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"include_text={args.include_text}"
         )
+        if args.eval_file:
+            print(
+                f"[DEBUG] eval_file={eval_path} eval_items={len(eval_items)} "
+                f"eval_every={args.eval_every} eval_max_samples={args.eval_max_samples}"
+            )
         print(f"[DEBUG] debug_output_file={debug_output_path}")
         _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
 
@@ -424,6 +552,11 @@ def main() -> None:
             print(
                 f"[GRPO] only_grpo=True and model unspecified -> "
                 f"auto-selected model_name_or_path={args.model_name_or_path}"
+            )
+        if args.eval_file:
+            print(
+                f"[GRPO] eval enabled: eval_file={eval_path} "
+                f"eval_items={len(eval_items)} eval_every={args.eval_every}"
             )
 
     if distributed:
@@ -658,7 +791,53 @@ def main() -> None:
                 _unwrap_model(model).save_pretrained(ckpt_dir)
                 processor.save_pretrained(ckpt_dir)
 
+            if args.eval_file and args.eval_every > 0 and global_step > 0 and global_step % args.eval_every == 0:
+                eval_metrics = evaluate_model(
+                    model=model,
+                    processor=processor,
+                    items=eval_items,
+                    device=device,
+                    max_new_tokens=args.max_new_tokens,
+                    rank=rank,
+                    world_size=world_size,
+                    debug=args.debug,
+                    debug_max_chars=args.debug_max_chars,
+                )
+                if rank == 0:
+                    print(
+                        "[GRPO-EVAL] "
+                        f"step={global_step} n={int(eval_metrics['num_samples'])} "
+                        f"reward_mean={eval_metrics['reward_mean']:.4f} "
+                        f"intent_acc={eval_metrics['intent_acc']:.4f} "
+                        f"scenario_acc={eval_metrics['scenario_acc']:.4f} "
+                        f"action_acc={eval_metrics['action_acc']:.4f} "
+                        f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f}"
+                    )
+
             global_step += 1
+
+    if args.eval_file:
+        final_eval = evaluate_model(
+            model=model,
+            processor=processor,
+            items=eval_items,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+            rank=rank,
+            world_size=world_size,
+            debug=args.debug,
+            debug_max_chars=args.debug_max_chars,
+        )
+        if rank == 0:
+            print(
+                "[GRPO-EVAL-FINAL] "
+                f"n={int(final_eval['num_samples'])} "
+                f"reward_mean={final_eval['reward_mean']:.4f} "
+                f"intent_acc={final_eval['intent_acc']:.4f} "
+                f"scenario_acc={final_eval['scenario_acc']:.4f} "
+                f"action_acc={final_eval['action_acc']:.4f} "
+                f"entity_f1_mean={final_eval['entity_f1_mean']:.4f}"
+            )
 
     if distributed:
         dist.barrier()
