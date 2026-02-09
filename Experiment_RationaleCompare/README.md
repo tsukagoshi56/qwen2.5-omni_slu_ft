@@ -139,6 +139,8 @@ python Experiment_RationaleCompare/04_run_grpo.py \
 - Generates `group_size` samples per prompt and applies **GRPO** (group‑relative advantage).
 - Reward is computed from parsed `J:` label (scenario/action/entities).
 - KL penalty uses a frozen reference model.
+- Default prompt style is `C/R/J`. Add `--no-cot` to switch to a direct `J`-only output format.
+- In `--no-cot` mode, the experiment keeps the same System/DB/Input context and changes only the output format (for controlled comparison).
 
 ---
 

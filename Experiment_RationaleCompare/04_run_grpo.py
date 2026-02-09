@@ -27,7 +27,12 @@ from common import (
     read_jsonl,
     resolve_audio_path,
 )
-from prompts import render_infer_audio_prompt, render_infer_text_prompt
+from prompts import (
+    render_infer_audio_prompt,
+    render_infer_audio_prompt_no_cot,
+    render_infer_text_prompt,
+    render_infer_text_prompt_no_cot,
+)
 DEFAULT_ONLY_GRPO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
 
 
@@ -109,10 +114,14 @@ def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
     )
 
 
-def build_grpo_prompt(mode: str, sentence: str, db_definitions: str) -> str:
+def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: bool = False) -> str:
     if mode == "audio":
+        if no_cot:
+            return render_infer_audio_prompt_no_cot(db_definitions)
         return render_infer_audio_prompt(db_definitions)
     text = str(sentence or "").strip()
+    if no_cot:
+        return render_infer_text_prompt_no_cot(db_definitions, text)
     return render_infer_text_prompt(db_definitions, text)
 
 
@@ -250,6 +259,7 @@ def evaluate_model(
     processor: AutoProcessor,
     items: List[GrpoItem],
     db_definitions: str,
+    no_cot: bool,
     device: torch.device,
     max_new_tokens: int,
     rank: int,
@@ -283,7 +293,12 @@ def evaluate_model(
                 except Exception:
                     continue
 
-            prompt = build_grpo_prompt(item.mode, item.sentence, db_definitions=db_definitions)
+            prompt = build_grpo_prompt(
+                item.mode,
+                item.sentence,
+                db_definitions=db_definitions,
+                no_cot=no_cot,
+            )
             text_input = build_chat_input(processor, prompt, audio is not None)
             if audio is None:
                 inputs = processor(text=text_input, return_tensors="pt")
@@ -430,6 +445,13 @@ def main() -> None:
     )
     parser.add_argument("--output_dir", type=str, default="outputs/grpo")
     parser.add_argument(
+        "--no_cot",
+        "--no-cot",
+        dest="no_cot",
+        action="store_true",
+        help="Use direct J-only prompting (no C/R lines) for controlled GRPO comparison.",
+    )
+    parser.add_argument(
         "--include_text",
         dest="include_text",
         action="store_true",
@@ -482,7 +504,7 @@ def main() -> None:
     parser.add_argument("--smoke_train_samples", type=int, default=200)
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
-    parser.set_defaults(include_text=True)
+    parser.set_defaults(include_text=True, no_cot=False)
 
     # Accept both --snake_case and --kebab-case flags.
     normalized_argv: List[str] = []
@@ -610,7 +632,7 @@ def main() -> None:
             f"batch_size={args.batch_size} group_size={args.group_size} max_new_tokens={args.max_new_tokens} "
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
-            f"include_text={args.include_text} smoke={args.smoke}"
+            f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke}"
         )
         if args.eval_file:
             print(
@@ -648,6 +670,7 @@ def main() -> None:
             f"[GRPO] mode={mode_label} total_batches={total_batches} "
             f"grad_accum_steps={args.grad_accum_steps} optimizer_steps~={optimizer_steps}"
         )
+        print(f"[GRPO] prompt_style={'J_ONLY' if args.no_cot else 'C_R_J'}")
         if auto_model_from_only_grpo:
             print(
                 f"[GRPO] only_grpo=True and model unspecified -> "
@@ -728,7 +751,12 @@ def main() -> None:
                     sr = processor.feature_extractor.sampling_rate
                     audio, _ = librosa.load(item.audio_path, sr=sr)
 
-                prompt = build_grpo_prompt(item.mode, item.sentence, db_definitions=db_definitions)
+                prompt = build_grpo_prompt(
+                    item.mode,
+                    item.sentence,
+                    db_definitions=db_definitions,
+                    no_cot=args.no_cot,
+                )
 
                 debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
                 if debug_step:
@@ -902,6 +930,7 @@ def main() -> None:
                     processor=processor,
                     items=eval_items,
                     db_definitions=db_definitions,
+                    no_cot=args.no_cot,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -928,6 +957,7 @@ def main() -> None:
                     processor=processor,
                     items=test_items,
                     db_definitions=db_definitions,
+                    no_cot=args.no_cot,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -954,6 +984,7 @@ def main() -> None:
             processor=processor,
             items=eval_items,
             db_definitions=db_definitions,
+            no_cot=args.no_cot,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
@@ -980,6 +1011,7 @@ def main() -> None:
             processor=processor,
             items=test_items,
             db_definitions=db_definitions,
+            no_cot=args.no_cot,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,

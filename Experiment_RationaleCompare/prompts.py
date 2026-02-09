@@ -84,6 +84,48 @@ R: label1!reason1; label2!reason2; ...
 J: [Final JSON]
 """
 
+INFER_TEXT_TEMPLATE_NO_COT = """System: SLU Logic Analyst. Infer the intent and slots using "Transcript" and "DB Definitions".
+
+Rules:
+- Compare candidates from DB before deciding.
+- Consider plausible similar/inclusive alternatives and ambiguous slot values internally before finalizing J.
+- Cite specific evidence from transcript in your internal reasoning.
+- List candidates in the exact order they appear in DB Definitions when making internal comparisons.
+- Output exactly 1 line (J) and nothing else.
+- No conversational filler.
+
+---
+[DB Definitions]
+{db_definitions}
+
+[Input Data]
+- Transcript: {gold_text}
+
+Output Format:
+J: [Final JSON]
+"""
+
+INFER_AUDIO_TEMPLATE_NO_COT = """System: SLU Logic Analyst. Infer the intent and slots using "Audio" and "DB Definitions".
+
+Rules:
+- Compare candidates from DB before deciding.
+- Consider plausible similar/inclusive alternatives and ambiguous slot values internally before finalizing J.
+- Cite specific evidence from audio in your internal reasoning.
+- List candidates in the exact order they appear in DB Definitions when making internal comparisons.
+- Output exactly 1 line (J) and nothing else.
+- No conversational filler.
+
+---
+[DB Definitions]
+{db_definitions}
+
+[Input Data]
+- Audio: <AUDIO>
+
+Output Format:
+J: [Final JSON]
+"""
+
 
 def render_oracle_prompt(db_definitions: str, gold_text: str, gold_json: str) -> str:
     return ORACLE_TEMPLATE.format(
@@ -102,3 +144,14 @@ def render_infer_text_prompt(db_definitions: str, gold_text: str) -> str:
 
 def render_infer_audio_prompt(db_definitions: str) -> str:
     return INFER_AUDIO_TEMPLATE.format(db_definitions=db_definitions)
+
+
+def render_infer_text_prompt_no_cot(db_definitions: str, gold_text: str) -> str:
+    return INFER_TEXT_TEMPLATE_NO_COT.format(
+        db_definitions=db_definitions,
+        gold_text=gold_text,
+    )
+
+
+def render_infer_audio_prompt_no_cot(db_definitions: str) -> str:
+    return INFER_AUDIO_TEMPLATE_NO_COT.format(db_definitions=db_definitions)
