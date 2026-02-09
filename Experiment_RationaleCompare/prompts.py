@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 from typing import Dict
 
-ORACLE_TEMPLATE = """System: SLU Logic Analyst. Rationalize the "Target JSON" using "Transcript" and "DB Definitions".
+ORACLE_TEMPLATE = """System: SLU Logic Analyst. Infer the intent and slots using "Transcript", "DB Definitions", and "Target JSON".
 
 Rules:
-- Contrast similar/inclusive labels and ambiguous slot extractions (e.g., general_greet vs general_quirky, email_querycontact vs email_query).
+- Compare candidates from DB before deciding.
 - In C, list candidate intents: include the target label itself and all plausible similar/inclusive alternatives from DB.
 - When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
 - In C, list candidate slots (slot types). If a slot has 2+ plausible values, include value candidates as slot_type(value1|value2). If only one value, omit parentheses. If no slots, write (none).
 - R must list only rejection reasons for candidates in C (except the accepted label). Do not write adoption reasons.
 - The accepted label is the remaining one and should match J.
-- Cite DB rules vs transcript evidence.
+- Cite specific evidence from transcript.
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
-- J must exactly match the provided Target JSON (verbatim). Do not alter it.
 - No conversational filler.
+- J must exactly match the provided Target JSON (verbatim). Do not alter it.
 
 ---
 [DB Definitions]
