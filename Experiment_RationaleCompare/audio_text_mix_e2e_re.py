@@ -58,6 +58,25 @@ PROMPT_OUTPUT_FORMAT = (
 )
 
 
+def setup_file_logging(log_path: str) -> None:
+    if not log_path:
+        return
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    abs_log_path = os.path.abspath(log_path)
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            existing = os.path.abspath(getattr(handler, "baseFilename", ""))
+            if existing == abs_log_path:
+                return
+    file_handler = logging.FileHandler(abs_log_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root_logger.addHandler(file_handler)
+
+
 def format_nbest(candidates: List[str], max_items: int = 5) -> str:
     if not candidates:
         return "- (none)"
@@ -1634,6 +1653,24 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
+    parser.add_argument(
+        "--output_file",
+        "--output-file",
+        "--outpt_file",
+        "--outpt-file",
+        dest="output_file",
+        type=str,
+        default="",
+        help="Prediction output JSONL path (default: <output_dir>/prediction.jsonl).",
+    )
+    parser.add_argument(
+        "--log_file",
+        "--log-file",
+        dest="log_file",
+        type=str,
+        default="",
+        help="Training log file path (default: <output_dir>/train.log).",
+    )
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
@@ -1703,6 +1740,11 @@ def main():
         rank = 0
         world_size = 1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if rank == 0:
+        log_path = args.log_file.strip() if args.log_file.strip() else os.path.join(args.output_dir, "train.log")
+        setup_file_logging(log_path)
+        logger.info("File logging enabled: %s", os.path.abspath(log_path))
 
     if rank == 0:
         logger.info("Using minimal prompts (system prompt + output format, no DB definitions/rules).")
@@ -1830,9 +1872,13 @@ def main():
         strict_audio_missing=args.strict_audio_missing,
     )
 
-    output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
+    output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
+    output_parent = os.path.dirname(output_jsonl)
+    if output_parent:
+        os.makedirs(output_parent, exist_ok=True)
     if rank == 0:
         logger.info("Test inference DataLoader workers: %d", args.inference_num_workers)
+        logger.info("Prediction output file: %s", output_jsonl)
     run_distributed_inference(
         model=model,
         processor=processor,
@@ -1850,11 +1896,12 @@ def main():
         dist.barrier()
 
     if rank == 0 and args.export_label_eval:
-        label_only_path = os.path.join(args.output_dir, "prediction_labels_only.jsonl")
+        eval_output_dir = os.path.dirname(output_jsonl) or "."
+        label_only_path = os.path.join(eval_output_dir, "prediction_labels_only.jsonl")
         save_label_only_predictions(output_jsonl, label_only_path)
 
         metrics = evaluate_prediction_file(output_jsonl)
-        metrics_path = os.path.join(args.output_dir, "metrics_label_only.json")
+        metrics_path = os.path.join(eval_output_dir, "metrics_label_only.json")
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, ensure_ascii=False, indent=2)
 

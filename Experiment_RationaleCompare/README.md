@@ -110,11 +110,13 @@ python Experiment_RationaleFT/audio_text_mix_e2e_re.py \
   --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
   --test_file  slurp/dataset/slurp/test.jsonl \
   --audio_dir  slurp/slurp_real \
+  --output_file outputs/qwen_rationale_label_ft/prediction.jsonl \
   --add_text_only
 ```
 
 - `--add_text_only` lets the trainer include a text‑only copy of each audio sample.
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
+- Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
 
 ---
 
