@@ -611,7 +611,7 @@ def main() -> None:
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
-    parser.add_argument("--eval_every", type=int, default=10, help="Run eval every N global steps (0 disables).")
+    parser.add_argument("--eval_every", type=int, default=100, help="Run eval every N global steps (0 disables).")
     parser.add_argument(
         "--eval_max_samples",
         type=int,
@@ -625,7 +625,7 @@ def main() -> None:
         default=None,
         help="Cap test items for faster validation (default: use --smoke_test_samples even outside --smoke).",
     )
-    parser.add_argument("--grad_accum_steps", type=int, default=1)
+    parser.add_argument("--grad_accum_steps", type=int, default=4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--kl_beta", type=float, default=0.01)
     parser.add_argument("--advantage_normalize", action="store_true")
@@ -702,6 +702,8 @@ def main() -> None:
         raise ValueError("--early_stopping_patience must be >= 1")
     if args.early_stopping_min_epochs < 0:
         raise ValueError("--early_stopping_min_epochs must be >= 0")
+    if args.grad_accum_steps < 1:
+        raise ValueError("--grad_accum_steps must be >= 1")
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -916,6 +918,7 @@ def main() -> None:
         p.requires_grad_(False)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer.zero_grad(set_to_none=True)
 
     global_step = 0
     best_eval_metric = float("-inf")
@@ -924,7 +927,8 @@ def main() -> None:
     for epoch in range(args.num_train_epochs):
         if sampler is not None:
             sampler.set_epoch(epoch)
-        for batch in dataloader:
+        accum_steps = 0
+        for batch_idx, batch in enumerate(dataloader):
             batch_loss = torch.tensor(0.0, device=device)
             sample_count = 0
             reward_values: List[float] = []
@@ -1074,14 +1078,16 @@ def main() -> None:
             if sample_count == 0:
                 continue
             batch_loss = batch_loss / sample_count
-            batch_loss.backward()
+            (batch_loss / args.grad_accum_steps).backward()
+            accum_steps += 1
 
-            if args.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
-            if (global_step + 1) % args.grad_accum_steps == 0:
+            is_last_batch = batch_idx == (len(dataloader) - 1)
+            if accum_steps >= args.grad_accum_steps or (is_last_batch and accum_steps > 0):
+                if args.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
+                accum_steps = 0
 
             if rank == 0 and args.log_every and global_step % args.log_every == 0:
                 if reward_values:
