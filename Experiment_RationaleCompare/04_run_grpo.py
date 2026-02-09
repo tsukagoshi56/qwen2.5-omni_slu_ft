@@ -257,6 +257,8 @@ def evaluate_model(
     debug: bool = False,
     debug_max_chars: int = 1200,
     collect_predictions: bool = False,
+    preview_count: int = 0,
+    preview_prefix: str = "[EVAL-PREVIEW]",
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     eval_model = _unwrap_model(model)
     was_training = eval_model.training
@@ -343,6 +345,17 @@ def evaluate_model(
                 print(f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} reward={reward:.4f}")
                 print("[EVAL-DEBUG] raw:")
                 print(_shorten(generated_text, debug_max_chars))
+            if rank == 0 and idx < max(0, preview_count):
+                print(
+                    f"{preview_prefix} idx={idx} mode={item.mode} slurp_id={item.slurp_id} "
+                    f"reward={reward:.4f}"
+                )
+                print(f"{preview_prefix} input_prompt:")
+                print(_shorten(prompt, debug_max_chars))
+                print(f"{preview_prefix} output_raw:")
+                print(_shorten(generated_text, debug_max_chars))
+                print(f"{preview_prefix} gold={json.dumps(item.gold_label, ensure_ascii=False)}")
+                print(f"{preview_prefix} pred={json.dumps(pred_label, ensure_ascii=False)}")
 
     metrics_tensor = torch.tensor(
         [local_count, reward_sum, scenario_sum, action_sum, intent_sum, entity_f1_sum],
@@ -895,6 +908,8 @@ def main() -> None:
                     world_size=world_size,
                     debug=args.debug,
                     debug_max_chars=args.debug_max_chars,
+                    preview_count=(5 if args.smoke else 0),
+                    preview_prefix="[GRPO-EVAL-SMOKE]",
                 )
                 if rank == 0:
                     print(
@@ -945,6 +960,8 @@ def main() -> None:
             world_size=world_size,
             debug=args.debug,
             debug_max_chars=args.debug_max_chars,
+            preview_count=(5 if args.smoke else 0),
+            preview_prefix="[GRPO-EVAL-FINAL-SMOKE]",
         )
         if rank == 0:
             print(
