@@ -18,27 +18,16 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
 from common import (
+    build_db_definitions,
     compare_labels,
     compute_reward,
     label_from_record,
+    load_metadata,
     parse_j_from_output,
     read_jsonl,
     resolve_audio_path,
 )
-
-
-SYSTEM_PROMPT_TEXT = (
-    'System: SLU Logic Analyst. Infer the intent and slots using "Transcript".'
-)
-SYSTEM_PROMPT_AUDIO = (
-    'System: SLU Logic Analyst. Infer the intent and slots using "Audio".'
-)
-PROMPT_OUTPUT_FORMAT = (
-    "Output Format:\n"
-    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
-    "R: label1!reason1; label2!reason2; ...\n"
-    "J: [Final JSON]"
-)
+from prompts import render_infer_audio_prompt, render_infer_text_prompt
 DEFAULT_ONLY_GRPO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
 
 
@@ -120,21 +109,11 @@ def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
     )
 
 
-def build_grpo_prompt(mode: str, sentence: str) -> str:
+def build_grpo_prompt(mode: str, sentence: str, db_definitions: str) -> str:
     if mode == "audio":
-        return (
-            f"{SYSTEM_PROMPT_AUDIO}\n\n"
-            f"{PROMPT_OUTPUT_FORMAT}\n\n"
-            "[Input Data]\n"
-            "- Audio: <AUDIO>"
-        )
+        return render_infer_audio_prompt(db_definitions)
     text = str(sentence or "").strip()
-    return (
-        f"{SYSTEM_PROMPT_TEXT}\n\n"
-        f"{PROMPT_OUTPUT_FORMAT}\n\n"
-        "[Input Data]\n"
-        f"- Transcript: {text}"
-    )
+    return render_infer_text_prompt(db_definitions, text)
 
 
 def prepare_inputs(
@@ -270,6 +249,7 @@ def evaluate_model(
     model,
     processor: AutoProcessor,
     items: List[GrpoItem],
+    db_definitions: str,
     device: torch.device,
     max_new_tokens: int,
     rank: int,
@@ -301,7 +281,7 @@ def evaluate_model(
                 except Exception:
                     continue
 
-            prompt = build_grpo_prompt(item.mode, item.sentence)
+            prompt = build_grpo_prompt(item.mode, item.sentence, db_definitions=db_definitions)
             text_input = build_chat_input(processor, prompt, audio is not None)
             if audio is None:
                 inputs = processor(text=text_input, return_tensors="pt")
@@ -423,7 +403,7 @@ def main() -> None:
         "--metadata_file",
         type=str,
         default="Experiment_3/slurp_metadata.json",
-        help="Unused in current minimal-prompt mode (kept for backward compatibility).",
+        help="Metadata JSON used to build DB Definitions for prompts.",
     )
     parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
     parser.add_argument("--model_name_or_path", type=str, default="")
@@ -539,6 +519,11 @@ def main() -> None:
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     train_path = os.path.join(base_dir, args.train_file) if not os.path.isabs(args.train_file) else args.train_file
+    metadata_path = (
+        os.path.join(base_dir, args.metadata_file)
+        if (args.metadata_file and not os.path.isabs(args.metadata_file))
+        else args.metadata_file
+    )
     eval_path = (
         os.path.join(base_dir, args.eval_file)
         if (args.eval_file and not os.path.isabs(args.eval_file))
@@ -571,6 +556,11 @@ def main() -> None:
     else:
         debug_output_path = ""
 
+    metadata = load_metadata(metadata_path)
+    db_definitions = build_db_definitions(metadata)
+    if rank == 0 and (not os.path.exists(metadata_path)):
+        print(f"[WARN] metadata_file not found: {metadata_path} (DB Definitions will be empty)")
+
     items = build_items(train_path, audio_dir, include_text=args.include_text)
     if args.smoke:
         items = items[: max(1, args.smoke_train_samples)]
@@ -597,7 +587,7 @@ def main() -> None:
         print("[DEBUG] ===== Run Config =====")
         print(f"[DEBUG] distributed={distributed} rank={rank} world_size={world_size} local_rank={local_rank}")
         print(
-            f"[DEBUG] train_path={train_path} audio_dir={audio_dir} output_dir={output_dir}"
+            f"[DEBUG] train_path={train_path} metadata_path={metadata_path} audio_dir={audio_dir} output_dir={output_dir}"
         )
         print(
             f"[DEBUG] model={args.model_name_or_path} ref_model={args.ref_model_name_or_path or args.model_name_or_path}"
@@ -620,6 +610,8 @@ def main() -> None:
                 f"test_every={args.test_every} test_max_samples={args.test_max_samples}"
             )
         print(f"[DEBUG] debug_output_file={debug_output_path}")
+        print("[DEBUG] db_definitions:")
+        print(_shorten(db_definitions, args.debug_max_chars))
         _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
 
     dataset = GrpoDataset(items)
@@ -723,7 +715,7 @@ def main() -> None:
                     sr = processor.feature_extractor.sampling_rate
                     audio, _ = librosa.load(item.audio_path, sr=sr)
 
-                prompt = build_grpo_prompt(item.mode, item.sentence)
+                prompt = build_grpo_prompt(item.mode, item.sentence, db_definitions=db_definitions)
 
                 debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
                 if debug_step:
@@ -896,6 +888,7 @@ def main() -> None:
                     model=model,
                     processor=processor,
                     items=eval_items,
+                    db_definitions=db_definitions,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -919,6 +912,7 @@ def main() -> None:
                     model=model,
                     processor=processor,
                     items=test_items,
+                    db_definitions=db_definitions,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -944,6 +938,7 @@ def main() -> None:
             model=model,
             processor=processor,
             items=eval_items,
+            db_definitions=db_definitions,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
@@ -967,6 +962,7 @@ def main() -> None:
             model=model,
             processor=processor,
             items=test_items,
+            db_definitions=db_definitions,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
