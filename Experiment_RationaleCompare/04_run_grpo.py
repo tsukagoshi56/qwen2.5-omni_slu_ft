@@ -221,6 +221,111 @@ def _shorten(text: str, max_chars: int) -> str:
     return text[:max_chars] + "...(truncated)"
 
 
+def _levenshtein_distance(a: List[str], b: List[str]) -> int:
+    n, m = len(a), len(b)
+    if n == 0:
+        return m
+    if m == 0:
+        return n
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        ai = a[i - 1]
+        for j in range(1, m + 1):
+            cost = 0 if ai == b[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost,
+            )
+    return dp[n][m]
+
+
+def _word_distance(truth: str, hypothesis: str) -> float:
+    ref = [w for w in str(truth or "").strip().split() if w]
+    hyp = [w for w in str(hypothesis or "").strip().split() if w]
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    return float(_levenshtein_distance(ref, hyp)) / float(len(ref))
+
+
+def _char_distance(truth: str, hypothesis: str) -> float:
+    ref = list(str(truth or ""))
+    hyp = list(str(hypothesis or ""))
+    denom = max(len(ref), len(hyp))
+    if denom == 0:
+        return 0.0
+    return float(_levenshtein_distance(ref, hyp)) / float(denom)
+
+
+def _entity_label_filler(entity: Dict[str, Any]) -> Tuple[str, str]:
+    # Keep behavior aligned with scripts/evaluation/metrics/split_spans.
+    label = str(entity.get("type", "unknown"))
+    filler = str(entity.get("filler", ""))
+    return label, filler
+
+
+def _span_distance_counts(
+    gold_entities: List[Dict[str, Any]],
+    pred_entities: List[Dict[str, Any]],
+    distance_kind: str,
+) -> Tuple[float, float, float]:
+    if distance_kind == "word":
+        dist_fn = _word_distance
+    else:
+        dist_fn = _char_distance
+
+    gold_labels: List[str] = []
+    gold_fillers: List[str] = []
+    for ent in gold_entities:
+        lbl, fil = _entity_label_filler(ent if isinstance(ent, dict) else {})
+        gold_labels.append(lbl)
+        gold_fillers.append(fil)
+
+    pred_labels: List[str] = []
+    pred_fillers: List[str] = []
+    for ent in pred_entities:
+        lbl, fil = _entity_label_filler(ent if isinstance(ent, dict) else {})
+        pred_labels.append(lbl)
+        pred_fillers.append(fil)
+
+    tp = 0.0
+    fp = 0.0
+    fn = 0.0
+
+    for pred_label, pred_filler in zip(pred_labels, pred_fillers):
+        candidate_idxs = [i for i, lbl in enumerate(gold_labels) if lbl == pred_label]
+        if candidate_idxs:
+            best_idx = candidate_idxs[0]
+            best_dist = dist_fn(gold_fillers[best_idx], pred_filler)
+            for idx in candidate_idxs[1:]:
+                d = dist_fn(gold_fillers[idx], pred_filler)
+                if d < best_dist:
+                    best_idx = idx
+                    best_dist = d
+            tp += 1.0
+            fp += float(best_dist)
+            fn += float(best_dist)
+            gold_labels.pop(best_idx)
+            gold_fillers.pop(best_idx)
+        else:
+            fp += 1.0
+
+    fn += float(len(gold_labels))
+    return tp, fp, fn
+
+
+def _f1_from_counts(tp: float, fp: float, fn: float) -> float:
+    precision = 0.0 if (tp == 0.0 and fp == 0.0) else tp / (tp + fp)
+    recall = 0.0 if (tp == 0.0 and fn == 0.0) else tp / (tp + fn)
+    if precision == 0.0 and recall == 0.0:
+        return 0.0
+    return 2.0 * ((precision * recall) / (precision + recall))
+
+
 def _debug_write_jsonl(path: str, row: Dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -281,6 +386,9 @@ def evaluate_model(
     action_sum = 0.0
     intent_sum = 0.0
     entity_f1_sum = 0.0
+    slu_tp_sum = 0.0
+    slu_fp_sum = 0.0
+    slu_fn_sum = 0.0
     local_prediction_rows: List[Dict[str, Any]] = []
 
     with torch.no_grad():
@@ -332,6 +440,19 @@ def evaluate_model(
             action_sum += 1.0 if stats["action_ok"] else 0.0
             intent_sum += 1.0 if stats["intent_ok"] else 0.0
             entity_f1_sum += float(stats["entity_f1"])
+            w_tp, w_fp, w_fn = _span_distance_counts(
+                item.gold_label.get("entities", []) or [],
+                pred_label.get("entities", []) or [],
+                distance_kind="word",
+            )
+            c_tp, c_fp, c_fn = _span_distance_counts(
+                item.gold_label.get("entities", []) or [],
+                pred_label.get("entities", []) or [],
+                distance_kind="char",
+            )
+            slu_tp_sum += (w_tp + c_tp)
+            slu_fp_sum += (w_fp + c_fp)
+            slu_fn_sum += (w_fn + c_fn)
 
             if collect_predictions:
                 local_prediction_rows.append(
@@ -373,7 +494,17 @@ def evaluate_model(
                 print(f"{preview_prefix} pred={json.dumps(pred_label, ensure_ascii=False)}")
 
     metrics_tensor = torch.tensor(
-        [local_count, reward_sum, scenario_sum, action_sum, intent_sum, entity_f1_sum],
+        [
+            local_count,
+            reward_sum,
+            scenario_sum,
+            action_sum,
+            intent_sum,
+            entity_f1_sum,
+            slu_tp_sum,
+            slu_fp_sum,
+            slu_fn_sum,
+        ],
         device=device,
         dtype=torch.float32,
     )
@@ -389,8 +520,14 @@ def evaluate_model(
             "action_acc": 0.0,
             "intent_acc": 0.0,
             "entity_f1_mean": 0.0,
+            "slu_f1": 0.0,
         }
     else:
+        slu_f1_value = _f1_from_counts(
+            float(metrics_tensor[6].item()),
+            float(metrics_tensor[7].item()),
+            float(metrics_tensor[8].item()),
+        )
         result = {
             "num_samples": total,
             "reward_mean": float(metrics_tensor[1].item() / total),
@@ -398,6 +535,7 @@ def evaluate_model(
             "action_acc": float(metrics_tensor[3].item() / total),
             "intent_acc": float(metrics_tensor[4].item() / total),
             "entity_f1_mean": float(metrics_tensor[5].item() / total),
+            "slu_f1": float(slu_f1_value),
         }
 
     prediction_rows: List[Dict[str, Any]] = []
@@ -474,9 +612,19 @@ def main() -> None:
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--eval_every", type=int, default=10, help="Run eval every N global steps (0 disables).")
-    parser.add_argument("--eval_max_samples", type=int, default=None, help="Cap eval items for faster validation.")
+    parser.add_argument(
+        "--eval_max_samples",
+        type=int,
+        default=None,
+        help="Cap eval items for faster validation (default: use --smoke_eval_samples even outside --smoke).",
+    )
     parser.add_argument("--test_every", type=int, default=0, help="Run test every N global steps (0 disables).")
-    parser.add_argument("--test_max_samples", type=int, default=None, help="Cap test items for faster validation.")
+    parser.add_argument(
+        "--test_max_samples",
+        type=int,
+        default=None,
+        help="Cap test items for faster validation (default: use --smoke_test_samples even outside --smoke).",
+    )
     parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--kl_beta", type=float, default=0.01)
@@ -517,7 +665,7 @@ def main() -> None:
     parser.add_argument(
         "--early_stopping_metric",
         type=str,
-        choices=["reward_mean", "intent_acc", "scenario_acc", "action_acc", "entity_f1_mean"],
+        choices=["reward_mean", "intent_acc", "scenario_acc", "action_acc", "entity_f1_mean", "slu_f1"],
         default="intent_acc",
         help="Eval metric used for early stopping.",
     )
@@ -640,7 +788,7 @@ def main() -> None:
     if args.eval_file:
         eval_items = build_items(eval_path, audio_dir, include_text=args.include_text)
         eval_cap = args.eval_max_samples
-        if args.smoke and eval_cap is None:
+        if eval_cap is None:
             eval_cap = args.smoke_eval_samples
         if eval_cap is not None:
             eval_items = eval_items[: max(0, eval_cap)]
@@ -649,7 +797,7 @@ def main() -> None:
     if args.test_file:
         test_items = build_items(test_path, audio_dir, include_text=args.include_text)
         test_cap = args.test_max_samples
-        if args.smoke and test_cap is None:
+        if test_cap is None:
             test_cap = args.smoke_test_samples
         if test_cap is not None:
             test_items = test_items[: max(0, test_cap)]
@@ -989,7 +1137,8 @@ def main() -> None:
                         f"intent_acc={eval_metrics['intent_acc']:.4f} "
                         f"scenario_acc={eval_metrics['scenario_acc']:.4f} "
                         f"action_acc={eval_metrics['action_acc']:.4f} "
-                        f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f}"
+                        f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f} "
+                        f"slu_f1={eval_metrics['slu_f1']:.4f}"
                     )
                 if args.early_stopping:
                     metric_value = float(eval_metrics.get(args.early_stopping_metric, float("-inf")))
@@ -1040,7 +1189,8 @@ def main() -> None:
                         f"intent_acc={test_metrics['intent_acc']:.4f} "
                         f"scenario_acc={test_metrics['scenario_acc']:.4f} "
                         f"action_acc={test_metrics['action_acc']:.4f} "
-                        f"entity_f1_mean={test_metrics['entity_f1_mean']:.4f}"
+                        f"entity_f1_mean={test_metrics['entity_f1_mean']:.4f} "
+                        f"slu_f1={test_metrics['slu_f1']:.4f}"
                     )
 
             global_step += 1
@@ -1081,7 +1231,8 @@ def main() -> None:
                 f"intent_acc={final_eval['intent_acc']:.4f} "
                 f"scenario_acc={final_eval['scenario_acc']:.4f} "
                 f"action_acc={final_eval['action_acc']:.4f} "
-                f"entity_f1_mean={final_eval['entity_f1_mean']:.4f}"
+                f"entity_f1_mean={final_eval['entity_f1_mean']:.4f} "
+                f"slu_f1={final_eval['slu_f1']:.4f}"
             )
 
     if args.test_file:
@@ -1107,7 +1258,8 @@ def main() -> None:
                 f"intent_acc={final_test['intent_acc']:.4f} "
                 f"scenario_acc={final_test['scenario_acc']:.4f} "
                 f"action_acc={final_test['action_acc']:.4f} "
-                f"entity_f1_mean={final_test['entity_f1_mean']:.4f}"
+                f"entity_f1_mean={final_test['entity_f1_mean']:.4f} "
+                f"slu_f1={final_test['slu_f1']:.4f}"
             )
             prediction_path = os.path.join(output_dir, "prediction.jsonl")
             with open(prediction_path, "w", encoding="utf-8") as f:
