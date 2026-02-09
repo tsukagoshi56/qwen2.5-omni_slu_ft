@@ -473,7 +473,7 @@ def main() -> None:
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
-    parser.add_argument("--eval_every", type=int, default=0, help="Run eval every N global steps (0 disables).")
+    parser.add_argument("--eval_every", type=int, default=10, help="Run eval every N global steps (0 disables).")
     parser.add_argument("--eval_max_samples", type=int, default=None, help="Cap eval items for faster validation.")
     parser.add_argument("--test_every", type=int, default=0, help="Run test every N global steps (0 disables).")
     parser.add_argument("--test_max_samples", type=int, default=None, help="Cap test items for faster validation.")
