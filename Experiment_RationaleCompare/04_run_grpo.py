@@ -489,6 +489,38 @@ def main() -> None:
     parser.add_argument("--reward_w_action", type=float, default=1.0)
     parser.add_argument("--reward_w_intent", type=float, default=0.5)
     parser.add_argument("--reward_w_entity", type=float, default=1.0)
+    parser.add_argument(
+        "--early_stopping",
+        dest="early_stopping",
+        action="store_true",
+        help="Enable early stopping based on eval metric.",
+    )
+    parser.add_argument(
+        "--no_early_stopping",
+        "--no-early-stopping",
+        dest="early_stopping",
+        action="store_false",
+        help="Disable early stopping.",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=3,
+        help="Stop after N consecutive evals without improvement.",
+    )
+    parser.add_argument(
+        "--early_stopping_min_epochs",
+        type=int,
+        default=1,
+        help="Run at least this many epochs before early stopping can trigger.",
+    )
+    parser.add_argument(
+        "--early_stopping_metric",
+        type=str,
+        choices=["reward_mean", "intent_acc", "scenario_acc", "action_acc", "entity_f1_mean"],
+        default="intent_acc",
+        help="Eval metric used for early stopping.",
+    )
     parser.add_argument("--debug", action="store_true", help="Print rich debug information.")
     parser.add_argument("--debug_preview_items", type=int, default=5, help="Dataset preview rows in debug.")
     parser.add_argument("--debug_preview_steps", type=int, default=3, help="Training steps to trace in debug.")
@@ -504,7 +536,7 @@ def main() -> None:
     parser.add_argument("--smoke_train_samples", type=int, default=200)
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
-    parser.set_defaults(include_text=True, no_cot=False)
+    parser.set_defaults(include_text=True, no_cot=False, early_stopping=True)
 
     # Accept both --snake_case and --kebab-case flags.
     normalized_argv: List[str] = []
@@ -518,6 +550,10 @@ def main() -> None:
         normalized_argv.append(token)
 
     args = parser.parse_args(normalized_argv)
+    if args.early_stopping_patience < 1:
+        raise ValueError("--early_stopping_patience must be >= 1")
+    if args.early_stopping_min_epochs < 0:
+        raise ValueError("--early_stopping_min_epochs must be >= 0")
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -632,7 +668,9 @@ def main() -> None:
             f"batch_size={args.batch_size} group_size={args.group_size} max_new_tokens={args.max_new_tokens} "
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
-            f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke}"
+            f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke} "
+            f"early_stopping={args.early_stopping} es_metric={args.early_stopping_metric} "
+            f"es_patience={args.early_stopping_patience} es_min_epochs={args.early_stopping_min_epochs}"
         )
         if args.eval_file:
             print(
@@ -732,6 +770,9 @@ def main() -> None:
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     global_step = 0
+    best_eval_metric = float("-inf")
+    no_improve_count = 0
+    early_stopped = False
     for epoch in range(args.num_train_epochs):
         if sampler is not None:
             sampler.set_epoch(epoch)
@@ -950,6 +991,32 @@ def main() -> None:
                         f"action_acc={eval_metrics['action_acc']:.4f} "
                         f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f}"
                     )
+                if args.early_stopping:
+                    metric_value = float(eval_metrics.get(args.early_stopping_metric, float("-inf")))
+                    improved = metric_value > best_eval_metric
+                    if improved:
+                        best_eval_metric = metric_value
+                        no_improve_count = 0
+                    else:
+                        if (epoch + 1) > args.early_stopping_min_epochs:
+                            no_improve_count += 1
+                    if rank == 0:
+                        stage = (
+                            "warmup"
+                            if (epoch + 1) <= args.early_stopping_min_epochs
+                            else "active"
+                        )
+                        print(
+                            "[GRPO-ES] "
+                            f"metric={args.early_stopping_metric} value={metric_value:.4f} "
+                            f"best={best_eval_metric:.4f} no_improve={no_improve_count} "
+                            f"patience={args.early_stopping_patience} stage={stage} epoch={epoch + 1}"
+                        )
+                    if (
+                        (epoch + 1) > args.early_stopping_min_epochs
+                        and no_improve_count >= args.early_stopping_patience
+                    ):
+                        early_stopped = True
 
             if args.test_file and args.test_every > 0 and global_step > 0 and global_step % args.test_every == 0:
                 test_metrics, _ = evaluate_model(
@@ -977,6 +1044,18 @@ def main() -> None:
                     )
 
             global_step += 1
+            if early_stopped:
+                break
+
+        if early_stopped:
+            break
+
+    if rank == 0 and early_stopped:
+        print(
+            "[GRPO] Early stopping triggered "
+            f"(metric={args.early_stopping_metric}, patience={args.early_stopping_patience}, "
+            f"min_epochs={args.early_stopping_min_epochs}, best={best_eval_metric:.4f})"
+        )
 
     if args.eval_file:
         final_eval, _ = evaluate_model(

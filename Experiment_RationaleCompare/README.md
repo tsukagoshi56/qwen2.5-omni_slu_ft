@@ -141,6 +141,8 @@ python Experiment_RationaleCompare/04_run_grpo.py \
 - KL penalty uses a frozen reference model.
 - Default prompt style is `C/R/J`. Add `--no-cot` to switch to a direct `J`-only output format.
 - In `--no-cot` mode, the experiment keeps the same System/DB/Input context and changes only the output format (for controlled comparison).
+- Early stopping is enabled by default: after at least 1 epoch, training stops if eval does not improve for 3 consecutive evaluations (`--early_stopping_metric intent_acc`).
+- Override with `--early_stopping_patience`, `--early_stopping_min_epochs`, `--early_stopping_metric`, or disable via `--no-early-stopping`.
 
 ---
 
