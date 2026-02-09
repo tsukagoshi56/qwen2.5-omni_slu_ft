@@ -262,9 +262,13 @@ def _char_distance(truth: str, hypothesis: str) -> float:
 
 
 def _entity_label_filler(entity: Dict[str, Any]) -> Tuple[str, str]:
-    # Keep behavior aligned with scripts/evaluation/metrics/split_spans.
-    label = str(entity.get("type", "unknown"))
-    filler = str(entity.get("filler", ""))
+    # Align with the label normalization used by compare_labels/entity_f1.
+    # This avoids artificial zero SLU-F1 caused by case/whitespace/key-format drift.
+    label = str(entity.get("type", "unknown")).strip().lower() or "unknown"
+    filler = entity.get("filler")
+    if filler is None:
+        filler = entity.get("filter", "")
+    filler = " ".join(str(filler).strip().lower().split())
     return label, filler
 
 
