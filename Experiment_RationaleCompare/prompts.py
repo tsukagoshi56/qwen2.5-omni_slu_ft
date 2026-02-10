@@ -43,6 +43,11 @@ Rules:
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
 - No conversational filler.
+- J must be a single-line valid JSON object (no markdown, no code fence).
+- J must use this schema exactly:
+  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+- Use double quotes for all JSON keys/strings.
 
 ---
 [DB Definitions]
@@ -54,7 +59,7 @@ Rules:
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
 R: label1!reason1; label2!reason2; ...
-J: [Final JSON]
+J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 INFER_AUDIO_TEMPLATE = """System: SLU Logic Analyst. Infer the intent and slots using "Audio" and "DB Definitions".
@@ -70,6 +75,11 @@ Rules:
 - Output exactly 3 lines (C, R, J) and nothing else.
 - List candidates in the exact order they appear in DB Definitions.
 - No conversational filler.
+- J must be a single-line valid JSON object (no markdown, no code fence).
+- J must use this schema exactly:
+  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+- Use double quotes for all JSON keys/strings.
 
 ---
 [DB Definitions]
@@ -81,7 +91,7 @@ Rules:
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
 R: label1!reason1; label2!reason2; ...
-J: [Final JSON]
+J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 INFER_TEXT_TEMPLATE_NO_COT = """System: SLU Logic Analyst. Infer the intent and slots using "Transcript" and "DB Definitions".
@@ -93,6 +103,11 @@ Rules:
 - List candidates in the exact order they appear in DB Definitions when making internal comparisons.
 - Output exactly 1 line (J) and nothing else.
 - No conversational filler.
+- J must be a single-line valid JSON object (no markdown, no code fence).
+- J must use this schema exactly:
+  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+- Use double quotes for all JSON keys/strings.
 
 ---
 [DB Definitions]
@@ -102,7 +117,7 @@ Rules:
 - Transcript: {gold_text}
 
 Output Format:
-J: [Final JSON]
+J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 INFER_AUDIO_TEMPLATE_NO_COT = """System: SLU Logic Analyst. Infer the intent and slots using "Audio" and "DB Definitions".
@@ -114,6 +129,11 @@ Rules:
 - List candidates in the exact order they appear in DB Definitions when making internal comparisons.
 - Output exactly 1 line (J) and nothing else.
 - No conversational filler.
+- J must be a single-line valid JSON object (no markdown, no code fence).
+- J must use this schema exactly:
+  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+- Use double quotes for all JSON keys/strings.
 
 ---
 [DB Definitions]
@@ -123,7 +143,7 @@ Rules:
 - Audio: <AUDIO>
 
 Output Format:
-J: [Final JSON]
+J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 
