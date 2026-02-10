@@ -929,7 +929,7 @@ def main() -> None:
     parser.add_argument("--smoke_train_samples", type=int, default=200)
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
-    parser.set_defaults(include_text=True, no_cot=False, early_stopping=True)
+    parser.set_defaults(include_text=True, no_cot=False, early_stopping=False)
 
     # Accept both --snake_case and --kebab-case flags.
     normalized_argv: List[str] = []
