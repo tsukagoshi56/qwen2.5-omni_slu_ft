@@ -1036,6 +1036,11 @@ def main() -> None:
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
     parser.add_argument(
+        "--skip_split_check",
+        action="store_true",
+        help="Skip startup existence check for slurp train/devel/test split files.",
+    )
+    parser.add_argument(
         "--allow_empty_db",
         action="store_true",
         help="Allow empty/missing DB Definitions (default: disabled; DB is required).",
@@ -1129,6 +1134,29 @@ def main() -> None:
     )
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
     output_dir = os.path.join(base_dir, args.output_dir) if not os.path.isabs(args.output_dir) else args.output_dir
+
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(f"train_file not found: {train_path}")
+
+    if not args.skip_split_check:
+        default_splits = {
+            "train": os.path.join(base_dir, "slurp/dataset/slurp/train.jsonl"),
+            "devel": os.path.join(base_dir, "slurp/dataset/slurp/devel.jsonl"),
+            "test": os.path.join(base_dir, "slurp/dataset/slurp/test.jsonl"),
+        }
+        missing = [name for name, path in default_splits.items() if not os.path.exists(path)]
+        if missing:
+            detail = ", ".join(f"{name}={default_splits[name]}" for name in missing)
+            raise FileNotFoundError(
+                "Required SLURP split files are missing at startup: "
+                f"{detail} (set --skip_split_check to bypass)."
+            )
+        if rank == 0:
+            print(
+                "[CHECK] dataset splits found: "
+                + ", ".join(f"{name}={path}" for name, path in default_splits.items())
+            )
+
     if rank == 0:
         os.makedirs(output_dir, exist_ok=True)
     if distributed:
