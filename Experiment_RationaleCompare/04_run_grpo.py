@@ -1033,7 +1033,7 @@ def main() -> None:
         "--test_max_samples",
         type=int,
         default=None,
-        help="Cap test items for faster validation (default: use --smoke_test_samples even outside --smoke).",
+        help="Cap test items for faster validation (default: full test set; in --smoke use --smoke_test_samples).",
     )
     parser.add_argument("--grad_accum_steps", type=int, default=4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
@@ -1309,7 +1309,7 @@ def main() -> None:
             # Test should use audio-only inputs for final report comparability.
             test_items = build_items(test_path, audio_dir, include_text=False)
             test_cap = args.test_max_samples
-            if test_cap is None:
+            if test_cap is None and args.smoke:
                 test_cap = args.smoke_test_samples
             if test_cap is not None:
                 test_items = test_items[: max(0, test_cap)]
