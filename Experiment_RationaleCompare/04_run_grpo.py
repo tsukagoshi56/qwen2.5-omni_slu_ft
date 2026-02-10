@@ -359,6 +359,8 @@ def model_forward(model: Qwen2AudioForConditionalGeneration, inputs: Dict[str, t
     kwargs = {
         "input_ids": inputs["input_ids"],
         "attention_mask": inputs.get("attention_mask"),
+        # Disable KV cache for training/logprob passes to reduce memory.
+        "use_cache": False,
     }
     if "input_features" in inputs:
         kwargs["input_features"] = inputs["input_features"]

@@ -33,6 +33,7 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
+from common import build_db_definitions, load_metadata
 
 try:
     import jiwer
@@ -56,6 +57,13 @@ PROMPT_OUTPUT_FORMAT = (
     "R: label1!reason1; label2!reason2; ...\n"
     "J: [Final JSON]"
 )
+PROMPT_DB_DEFINITIONS = "Intents: (none)\nSlot Types: (none)"
+
+
+def set_prompt_db_definitions(db_definitions: str) -> None:
+    global PROMPT_DB_DEFINITIONS
+    text = str(db_definitions or "").strip()
+    PROMPT_DB_DEFINITIONS = text if text else "Intents: (none)\nSlot Types: (none)"
 
 
 def setup_file_logging(log_path: str) -> None:
@@ -119,12 +127,16 @@ def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) ->
     if include_transcript and transcript:
         return (
             f"{SYSTEM_PROMPT_TEXT}\n\n"
+            "[DB Definitions]\n"
+            f"{PROMPT_DB_DEFINITIONS}\n\n"
             f"{PROMPT_OUTPUT_FORMAT}\n\n"
             "[Input Data]\n"
             f"- Transcript: {transcript}"
         )
     return (
         f"{SYSTEM_PROMPT_AUDIO}\n\n"
+        "[DB Definitions]\n"
+        f"{PROMPT_DB_DEFINITIONS}\n\n"
         f"{PROMPT_OUTPUT_FORMAT}\n\n"
         "[Input Data]\n"
         "- Audio: <AUDIO>"
@@ -1649,6 +1661,12 @@ def main():
         type=str,
         default="/lustre/home/71200138/INTERSPEECH/experiment1/slurp/audio/slurp_real",
     )
+    parser.add_argument(
+        "--metadata_file",
+        type=str,
+        default="Experiment_3/slurp_metadata.json",
+        help="Metadata JSON used to build DB Definitions for prompts.",
+    )
 
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
@@ -1681,7 +1699,7 @@ def main():
         default=None,
         help="Cap eval set size to speed up validation (None means no extra cap).",
     )
-    parser.add_argument("--max_new_tokens", type=int, default=2048)
+    parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument(
         "--inference_num_workers",
         type=int,
@@ -1746,8 +1764,13 @@ def main():
         setup_file_logging(log_path)
         logger.info("File logging enabled: %s", os.path.abspath(log_path))
 
+    metadata = load_metadata(args.metadata_file)
+    db_definitions = build_db_definitions(metadata)
+    set_prompt_db_definitions(db_definitions)
     if rank == 0:
-        logger.info("Using minimal prompts (system prompt + output format, no DB definitions/rules).")
+        logger.info("Using prompts with DB Definitions from: %s", args.metadata_file)
+        if not os.path.exists(args.metadata_file):
+            logger.warning("metadata_file not found: %s (using empty DB Definitions)", args.metadata_file)
         if args.text_only:
             logger.info("text_only=True: all splits will use text-only items.")
 

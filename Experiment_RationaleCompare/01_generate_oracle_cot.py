@@ -178,6 +178,15 @@ def _normalize_intent(value: str) -> str:
     return value.replace(":", "_").strip()
 
 
+def _strip_prefix(text: str, prefixes: List[str]) -> str:
+    value = text.strip()
+    lower = value.lower()
+    for prefix in prefixes:
+        if lower.startswith(prefix.lower()):
+            return value[len(prefix):].strip()
+    return value
+
+
 def _reorder_candidates(values: List[str], order: List[str]) -> List[str]:
     order_map = {v: i for i, v in enumerate(order)}
     known = [v for v in values if v in order_map]
@@ -194,6 +203,15 @@ def _reorder_c_line(c_line: str, intent_order: List[str], slot_order: List[str])
     intent_part = parts[0] if parts else ""
     slot_part = parts[1] if len(parts) > 1 else ""
 
+    intent_part = _strip_prefix(
+        intent_part,
+        ["Intent candidates:", "Intent candidate:", "Intent:", "Intents:"],
+    )
+    slot_part = _strip_prefix(
+        slot_part,
+        ["Slot candidates:", "Slot candidate:", "Slot:", "Slots:"],
+    )
+
     intents_raw = [x.strip() for x in intent_part.split("|") if x.strip()]
     intents_norm = [_normalize_intent(x) for x in intents_raw]
     intents_norm = _reorder_candidates(intents_norm, intent_order)
@@ -202,16 +220,14 @@ def _reorder_c_line(c_line: str, intent_order: List[str], slot_order: List[str])
     slot_part_new = slot_part
     if slot_part:
         # If multiple slot types are present, reorder by slot_order.
-        slot_chunks = [s.strip() for s in slot_part.split(",") if s.strip()]
+        slot_chunks = [s.strip() for s in slot_part.split("|") if s.strip()]
         if len(slot_chunks) > 1:
-            def slot_key(chunk: str) -> str:
-                return chunk.split(":", 1)[0].strip()
-            slot_chunks = _reorder_candidates(slot_chunks, slot_order=[s for s in slot_order])
-            slot_part_new = ", ".join(slot_chunks)
+            slot_chunks = _reorder_candidates(slot_chunks, slot_order)
+            slot_part_new = " | ".join(slot_chunks)
 
     if slot_part_new:
-        return f"C: {intent_part_new}; {slot_part_new}"
-    return f"C: {intent_part_new}"
+        return f"C: Intent candidates: {intent_part_new}; Slot candidates: {slot_part_new}"
+    return f"C: Intent candidates: {intent_part_new}"
 
 
 def _log_error(message: str) -> None:
