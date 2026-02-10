@@ -1035,7 +1035,7 @@ def main() -> None:
     parser.add_argument("--group_size", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
