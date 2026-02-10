@@ -1178,7 +1178,8 @@ def main() -> None:
 
     eval_items: List[GrpoItem] = []
     if args.eval_file:
-        eval_items = build_items(eval_path, audio_dir, include_text=args.include_text)
+        # Eval should use audio-only inputs for consistent ASR+SLU validation.
+        eval_items = build_items(eval_path, audio_dir, include_text=False)
         eval_cap = args.eval_max_samples
         if eval_cap is None:
             eval_cap = args.smoke_eval_samples
@@ -1187,7 +1188,8 @@ def main() -> None:
 
     test_items: List[GrpoItem] = []
     if args.test_file:
-        test_items = build_items(test_path, audio_dir, include_text=args.include_text)
+        # Test should use audio-only inputs for final report comparability.
+        test_items = build_items(test_path, audio_dir, include_text=False)
         test_cap = args.test_max_samples
         if test_cap is None:
             test_cap = args.smoke_test_samples
