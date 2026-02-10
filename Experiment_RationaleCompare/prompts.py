@@ -45,8 +45,9 @@ Rules:
 - No conversational filler.
 - J must be a single-line valid JSON object (no markdown, no code fence).
 - J must use this schema exactly:
-  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
-- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+  {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- The Intent value must follow the DB intent format (same label style as [DB Definitions] Intents).
+- If there are no entities, use: {{"Intent": "<scenario>_<action>", "entities": []}}
 - Use double quotes for all JSON keys/strings.
 
 ---
@@ -59,7 +60,7 @@ Rules:
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
 R: label1!reason1; label2!reason2; ...
-J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+J: {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 INFER_AUDIO_TEMPLATE = """System: SLU Logic Analyst. Infer the intent and slots using "Audio" and "DB Definitions".
@@ -77,8 +78,9 @@ Rules:
 - No conversational filler.
 - J must be a single-line valid JSON object (no markdown, no code fence).
 - J must use this schema exactly:
-  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
-- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+  {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- The Intent value must follow the DB intent format (same label style as [DB Definitions] Intents).
+- If there are no entities, use: {{"Intent": "<scenario>_<action>", "entities": []}}
 - Use double quotes for all JSON keys/strings.
 
 ---
@@ -91,7 +93,7 @@ Rules:
 Output Format:
 C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
 R: label1!reason1; label2!reason2; ...
-J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+J: {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 INFER_TEXT_TEMPLATE_NO_COT = """System: SLU Logic Analyst. Infer the intent and slots using "Transcript" and "DB Definitions".
@@ -105,8 +107,9 @@ Rules:
 - No conversational filler.
 - J must be a single-line valid JSON object (no markdown, no code fence).
 - J must use this schema exactly:
-  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
-- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+  {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- The Intent value must follow the DB intent format (same label style as [DB Definitions] Intents).
+- If there are no entities, use: {{"Intent": "<scenario>_<action>", "entities": []}}
 - Use double quotes for all JSON keys/strings.
 
 ---
@@ -117,7 +120,7 @@ Rules:
 - Transcript: {gold_text}
 
 Output Format:
-J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+J: {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 INFER_AUDIO_TEMPLATE_NO_COT = """System: SLU Logic Analyst. Infer the intent and slots using "Audio" and "DB Definitions".
@@ -131,8 +134,9 @@ Rules:
 - No conversational filler.
 - J must be a single-line valid JSON object (no markdown, no code fence).
 - J must use this schema exactly:
-  {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
-- If there are no entities, use: {{"scenario": "<string>", "action": "<string>", "entities": []}}
+  {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+- The Intent value must follow the DB intent format (same label style as [DB Definitions] Intents).
+- If there are no entities, use: {{"Intent": "<scenario>_<action>", "entities": []}}
 - Use double quotes for all JSON keys/strings.
 
 ---
@@ -143,7 +147,7 @@ Rules:
 - Audio: <AUDIO>
 
 Output Format:
-J: {{"scenario": "<string>", "action": "<string>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
+J: {{"Intent": "<scenario>_<action>", "entities": [{{"type": "<entity_type>", "filler": "<entity_value>"}}, ...]}}
 """
 
 

@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -23,9 +24,11 @@ from common import (
     compute_reward,
     label_from_record,
     load_metadata,
+    normalize_intent_label,
     parse_j_from_output,
     read_jsonl,
     resolve_audio_path,
+    split_intent,
     write_jsonl,
 )
 from prompts import render_infer_audio_prompt, render_infer_text_prompt
@@ -206,6 +209,85 @@ def _log_debug(message: str) -> None:
     print(message, flush=True)
 
 
+def _normalize_pred_label(pred_obj: Any) -> Dict[str, Any]:
+    if not isinstance(pred_obj, dict):
+        pred_obj = {}
+    raw_intent = pred_obj.get("intent")
+    if raw_intent is None:
+        raw_intent = pred_obj.get("Intent")
+    intent = normalize_intent_label(str(raw_intent or "").strip())
+    scenario = str(pred_obj.get("scenario", "")).strip()
+    action = str(pred_obj.get("action", "")).strip()
+    if (not scenario or not action) and intent:
+        scenario2, action2 = split_intent(intent)
+        scenario = scenario or scenario2
+        action = action or action2
+    if not intent and (scenario or action):
+        intent = normalize_intent_label(f"{scenario}_{action}".strip("_"))
+
+    entities: List[Dict[str, str]] = []
+    raw_entities = pred_obj.get("entities", [])
+    if isinstance(raw_entities, list):
+        for ent in raw_entities:
+            if not isinstance(ent, dict):
+                continue
+            ent_type = str(ent.get("type", "")).strip()
+            filler = ent.get("filler")
+            if filler is None:
+                filler = ent.get("filter")
+            if filler is None:
+                filler = ent.get("value")
+            if not ent_type:
+                # Accept compact entity form: {"slot_type": "slot_value"}.
+                compact_items = [
+                    (str(k).strip(), v)
+                    for k, v in ent.items()
+                    if str(k).strip() and str(k).strip().lower() not in {"type", "filler", "filter", "value"}
+                ]
+                if compact_items:
+                    ent_type, filler = compact_items[0]
+            filler = "" if filler is None else str(filler).strip()
+            entities.append({"type": ent_type, "filler": filler})
+    return {
+        "intent": intent,
+        "scenario": scenario,
+        "action": action,
+        "entities": entities,
+    }
+
+
+def _extract_prefixed_line(text: str, prefix: str) -> str:
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    target = prefix.upper()
+    for ln in lines:
+        if re.match(rf"^{re.escape(target)}\s*", ln.upper()):
+            body = ln.split(":", 1)[1].strip() if ":" in ln else ""
+            if body:
+                return f"{prefix} {body}"
+            break
+    return f"{prefix} (none)"
+
+
+def _format_model_output(raw_output: str, no_cot: bool = False) -> Tuple[str, Dict[str, Any], bool]:
+    pred_obj = parse_j_from_output(raw_output)
+    pred_label = _normalize_pred_label(pred_obj)
+    j_obj = {
+        "Intent": pred_label.get("intent", ""),
+        "entities": pred_label.get("entities", []),
+    }
+    j_line = "J: " + json.dumps(j_obj, ensure_ascii=False)
+    has_j = pred_obj is not None
+    if no_cot:
+        return j_line, pred_label, has_j
+
+    c_line = _extract_prefixed_line(raw_output, "C:")
+    r_line = _extract_prefixed_line(raw_output, "R:")
+    has_c = c_line != "C: (none)"
+    has_r = r_line != "R: (none)"
+    formatted = "\n".join([c_line, r_line, j_line])
+    return formatted, pred_label, (has_c and has_r and has_j)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Success-Filtered CoT (text and audio).")
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
@@ -322,6 +404,7 @@ def main() -> None:
 
         for mode in modes:
             output = ""
+            formatted_output = ""
             if mode == "text":
                 if not gold_text:
                     continue
@@ -366,24 +449,21 @@ def main() -> None:
             else:
                 continue
 
-            pred_obj = parse_j_from_output(output) or {}
-            pred_label = {
-                "scenario": str(pred_obj.get("scenario", "")).strip(),
-                "action": str(pred_obj.get("action", "")).strip(),
-                "entities": pred_obj.get("entities", []) if isinstance(pred_obj.get("entities", []), list) else [],
-            }
+            formatted_output, pred_label, format_ok = _format_model_output(output, no_cot=False)
             stats = compare_labels(pred_label, gold_label)
-            is_ok = _success_match_ok(args.success_match, stats)
+            is_ok = format_ok and _success_match_ok(args.success_match, stats)
             reward, _ = compute_reward(pred_label, gold_label)
 
             if args.debug:
                 word_count = len((output or "").split())
                 _log_debug(
                     f"[DEBUG] slurp_id={record.get('slurp_id')} mode={mode} words={word_count} "
-                    f"correct={bool(is_ok)} reward={reward:.3f}"
+                    f"format_ok={bool(format_ok)} correct={bool(is_ok)} reward={reward:.3f}"
                 )
                 _log_debug("[DEBUG] raw_output:")
                 _log_debug(output or "")
+                _log_debug("[DEBUG] formatted_output:")
+                _log_debug(formatted_output or "")
 
             raw_row = {
                 "slurp_id": record.get("slurp_id"),
@@ -391,7 +471,9 @@ def main() -> None:
                 "recordings": recordings,
                 "mode": mode,
                 "method": "sf-cot",
-                "rationale_text": output.strip(),
+                "rationale_text": formatted_output.strip(),
+                "raw_output": output.strip(),
+                "format_ok": bool(format_ok),
                 "pred_label": pred_label,
                 "gold_label": gold_label,
                 "correct": bool(is_ok),
@@ -404,7 +486,7 @@ def main() -> None:
                     "slurp_id": record.get("slurp_id"),
                     "sentence": gold_text,
                     "final": gold_label,
-                    "rationale_text": output.strip(),
+                    "rationale_text": formatted_output.strip(),
                     "mode": mode,
                     "method": "sf-cot",
                 }

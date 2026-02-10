@@ -184,10 +184,18 @@ def entity_f1(pred_entities: List[Dict[str, Any]], gold_entities: List[Dict[str,
 
 
 def compare_labels(pred: Dict[str, Any], gold: Dict[str, Any]) -> Dict[str, Any]:
-    pred_scenario = str(pred.get("scenario", "")).strip()
-    pred_action = str(pred.get("action", "")).strip()
-    gold_scenario = str(gold.get("scenario", "")).strip()
-    gold_action = str(gold.get("action", "")).strip()
+    def unpack(label: Dict[str, Any]) -> Tuple[str, str]:
+        scenario = str(label.get("scenario", "")).strip()
+        action = str(label.get("action", "")).strip()
+        intent = str(label.get("intent", "")).strip()
+        if (not scenario or not action) and intent:
+            scenario2, action2 = split_intent(intent)
+            scenario = scenario or scenario2
+            action = action or action2
+        return scenario, action
+
+    pred_scenario, pred_action = unpack(pred if isinstance(pred, dict) else {})
+    gold_scenario, gold_action = unpack(gold if isinstance(gold, dict) else {})
 
     scenario_ok = pred_scenario == gold_scenario
     action_ok = pred_action == gold_action

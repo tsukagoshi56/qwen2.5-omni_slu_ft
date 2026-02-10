@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -24,9 +25,11 @@ from common import (
     compute_reward,
     label_from_record,
     load_metadata,
+    normalize_intent_label,
     parse_j_from_output,
     read_jsonl,
     resolve_audio_path,
+    split_intent,
 )
 from prompts import (
     render_infer_audio_prompt,
@@ -427,6 +430,85 @@ def _shorten(text: str, max_chars: int) -> str:
     return text[:max_chars] + "...(truncated)"
 
 
+def _normalize_pred_label(pred_obj: Any) -> Dict[str, Any]:
+    if not isinstance(pred_obj, dict):
+        pred_obj = {}
+    raw_intent = pred_obj.get("intent")
+    if raw_intent is None:
+        raw_intent = pred_obj.get("Intent")
+    intent = normalize_intent_label(str(raw_intent or "").strip())
+    scenario = str(pred_obj.get("scenario", "")).strip()
+    action = str(pred_obj.get("action", "")).strip()
+    if (not scenario or not action) and intent:
+        scenario2, action2 = split_intent(intent)
+        scenario = scenario or scenario2
+        action = action or action2
+    if not intent and (scenario or action):
+        intent = normalize_intent_label(f"{scenario}_{action}".strip("_"))
+
+    entities: List[Dict[str, str]] = []
+    raw_entities = pred_obj.get("entities", [])
+    if isinstance(raw_entities, list):
+        for ent in raw_entities:
+            if not isinstance(ent, dict):
+                continue
+            ent_type = str(ent.get("type", "")).strip()
+            filler = ent.get("filler")
+            if filler is None:
+                filler = ent.get("filter")
+            if filler is None:
+                filler = ent.get("value")
+            if not ent_type:
+                # Accept compact entity form: {"slot_type": "slot_value"}.
+                compact_items = [
+                    (str(k).strip(), v)
+                    for k, v in ent.items()
+                    if str(k).strip() and str(k).strip().lower() not in {"type", "filler", "filter", "value"}
+                ]
+                if compact_items:
+                    ent_type, filler = compact_items[0]
+            filler = "" if filler is None else str(filler).strip()
+            entities.append({"type": ent_type, "filler": filler})
+    return {
+        "intent": intent,
+        "scenario": scenario,
+        "action": action,
+        "entities": entities,
+    }
+
+
+def _extract_prefixed_line(text: str, prefix: str) -> str:
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    target = prefix.upper()
+    for ln in lines:
+        if re.match(rf"^{re.escape(target)}\s*", ln.upper()):
+            body = ln.split(":", 1)[1].strip() if ":" in ln else ""
+            if body:
+                return f"{prefix} {body}"
+            break
+    return f"{prefix} (none)"
+
+
+def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, Any], bool]:
+    pred_obj = parse_j_from_output(raw_output)
+    pred_label = _normalize_pred_label(pred_obj)
+    j_obj = {
+        "Intent": pred_label.get("intent", ""),
+        "entities": pred_label.get("entities", []),
+    }
+    j_line = "J: " + json.dumps(j_obj, ensure_ascii=False)
+    has_j = pred_obj is not None
+    if no_cot:
+        return j_line, pred_label, has_j
+
+    c_line = _extract_prefixed_line(raw_output, "C:")
+    r_line = _extract_prefixed_line(raw_output, "R:")
+    has_c = c_line != "C: (none)"
+    has_r = r_line != "R: (none)"
+    formatted = "\n".join([c_line, r_line, j_line])
+    return formatted, pred_label, (has_c and has_r and has_j)
+
+
 def _levenshtein_distance(a: List[str], b: List[str]) -> int:
     n, m = len(a), len(b)
     if n == 0:
@@ -640,13 +722,7 @@ def evaluate_model(
             )
             input_len = inputs["input_ids"].shape[1]
             generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-
-            pred_obj = parse_j_from_output(generated_text) or {}
-            pred_label = {
-                "scenario": str(pred_obj.get("scenario", "")).strip(),
-                "action": str(pred_obj.get("action", "")).strip(),
-                "entities": pred_obj.get("entities", []) if isinstance(pred_obj.get("entities", []), list) else [],
-            }
+            formatted_text, pred_label, format_ok = _format_model_output(generated_text, no_cot=no_cot)
             reward, _ = compute_reward(pred_label, item.gold_label)
             stats = compare_labels(pred_label, item.gold_label)
 
@@ -683,7 +759,8 @@ def evaluate_model(
                         "wer": 0.0,
                         "transcript": item.sentence,
                         "candidates": [],
-                        "rationale_text": "",
+                        "rationale_text": formatted_text,
+                        "format_ok": bool(format_ok),
                         "raw_output": generated_text,
                         "target": "",
                         "target_label": item.gold_label,
@@ -695,8 +772,12 @@ def evaluate_model(
                 print(f"[EVAL-DEBUG] mode={item.mode} slurp_id={item.slurp_id}")
                 _print_debug_section("eval.input_prompt", prompt)
                 _print_debug_section("eval.output_raw", generated_text)
+                _print_debug_section("eval.output_formatted", formatted_text)
                 print(f"[EVAL-DEBUG] gold={json.dumps(item.gold_label, ensure_ascii=False)}")
-                print(f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} reward={reward:.4f}")
+                print(
+                    f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} "
+                    f"format_ok={bool(format_ok)} reward={reward:.4f}"
+                )
             if rank == 0 and idx < max(0, preview_count):
                 print(
                     f"{preview_prefix} idx={idx} mode={item.mode} slurp_id={item.slurp_id} "
@@ -706,6 +787,8 @@ def evaluate_model(
                 print(_shorten(prompt, debug_max_chars))
                 print(f"{preview_prefix} output_raw:")
                 print(_shorten(generated_text, debug_max_chars))
+                print(f"{preview_prefix} output_formatted:")
+                print(_shorten(formatted_text, debug_max_chars))
                 print(f"{preview_prefix} gold={json.dumps(item.gold_label, ensure_ascii=False)}")
                 print(f"{preview_prefix} pred={json.dumps(pred_label, ensure_ascii=False)}")
 
@@ -795,7 +878,11 @@ def main() -> None:
         "--only-grpo",
         dest="only_grpo",
         action="store_true",
-        help="Run GRPO directly from the specified base model (no SFT prerequisite in this script).",
+        help=(
+            "Run GRPO directly from the original base model "
+            f"({DEFAULT_ONLY_GRPO_MODEL}) for both policy and ref "
+            "(no SFT prerequisite in this script)."
+        ),
     )
     parser.add_argument("--output_dir", type=str, default="outputs/grpo")
     parser.add_argument(
@@ -971,9 +1058,17 @@ def main() -> None:
         if args.test_file and args.test_every <= 0:
             args.test_every = 10
 
-    auto_model_from_only_grpo = args.only_grpo and not str(args.model_name_or_path).strip()
-    if auto_model_from_only_grpo:
+    forced_only_grpo_base = False
+    if args.only_grpo:
+        requested_policy = str(args.model_name_or_path).strip()
+        requested_ref = str(args.ref_model_name_or_path).strip()
+        forced_only_grpo_base = (
+            (requested_policy not in ("", DEFAULT_ONLY_GRPO_MODEL))
+            or (requested_ref not in ("", DEFAULT_ONLY_GRPO_MODEL))
+        )
+        # In only-GRPO mode, always start both policy/ref from the original base model.
         args.model_name_or_path = DEFAULT_ONLY_GRPO_MODEL
+        args.ref_model_name_or_path = DEFAULT_ONLY_GRPO_MODEL
     if not str(args.model_name_or_path).strip():
         raise ValueError(
             "--model_name_or_path is required unless --only-grpo is set "
@@ -1157,11 +1252,16 @@ def main() -> None:
             f"grad_accum_steps={args.grad_accum_steps} optimizer_steps~={optimizer_steps}"
         )
         print(f"[GRPO] prompt_style={'J_ONLY' if args.no_cot else 'C_R_J'}")
-        if auto_model_from_only_grpo:
+        if args.only_grpo:
             print(
-                f"[GRPO] only_grpo=True and model unspecified -> "
-                f"auto-selected model_name_or_path={args.model_name_or_path}"
+                f"[GRPO] only_grpo=True -> force base model for both policy/ref: "
+                f"{DEFAULT_ONLY_GRPO_MODEL}"
             )
+            if forced_only_grpo_base:
+                print(
+                    "[GRPO] note: user-specified --model_name_or_path / "
+                    "--ref_model_name_or_path were ignored in only_grpo mode."
+                )
         if args.eval_file:
             print(
                 f"[GRPO] eval enabled: eval_file={eval_path} "
@@ -1274,13 +1374,10 @@ def main() -> None:
 
                 rewards: List[float] = []
                 pred_labels: List[Dict[str, Any]] = []
+                formatted_samples: List[str] = []
+                format_ok_values: List[bool] = []
                 for text in samples:
-                    pred_obj = parse_j_from_output(text) or {}
-                    pred_label = {
-                        "scenario": str(pred_obj.get("scenario", "")).strip(),
-                        "action": str(pred_obj.get("action", "")).strip(),
-                        "entities": pred_obj.get("entities", []) if isinstance(pred_obj.get("entities", []), list) else [],
-                    }
+                    formatted_text, pred_label, format_ok = _format_model_output(text, no_cot=args.no_cot)
                     reward, _ = compute_reward(
                         pred_label,
                         item.gold_label,
@@ -1292,15 +1389,19 @@ def main() -> None:
                     rewards.append(reward)
                     reward_values.append(float(reward))
                     pred_labels.append(pred_label)
+                    formatted_samples.append(formatted_text)
+                    format_ok_values.append(bool(format_ok))
 
                 if debug_step:
                     preview_n = min(args.debug_preview_samples, len(samples))
                     for i in range(preview_n):
                         print(
                             f"[DEBUG][step={global_step}] sample#{i} reward={rewards[i]:.4f} "
+                            f"format_ok={format_ok_values[i]} "
                             f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
                         )
                         _print_debug_section(f"train.sample_raw#{i}", samples[i])
+                        _print_debug_section(f"train.sample_formatted#{i}", formatted_samples[i])
 
                 mean_reward = sum(rewards) / max(len(rewards), 1)
                 if args.advantage_normalize:
@@ -1360,8 +1461,14 @@ def main() -> None:
                             "loss": float(loss.item()),
                             "gold_label": item.gold_label,
                             "pred_label": pred_labels[sample_idx] if sample_idx < len(pred_labels) else {},
+                            "format_ok": bool(format_ok_values[sample_idx]) if sample_idx < len(format_ok_values) else False,
                             "prompt": _shorten(prompt, args.debug_max_chars),
                             "sample_raw": _shorten(sample_text, args.debug_max_chars),
+                            "sample_formatted": _shorten(
+                                formatted_samples[sample_idx], args.debug_max_chars
+                            )
+                            if sample_idx < len(formatted_samples)
+                            else "",
                         }
                         _debug_write_jsonl(debug_output_path, trace_row)
                         print(
