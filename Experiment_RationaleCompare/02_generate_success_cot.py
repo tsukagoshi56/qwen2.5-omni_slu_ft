@@ -608,7 +608,14 @@ def main() -> None:
     parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
-    parser.add_argument("--do_sample", action="store_true")
+    parser.add_argument("--do_sample", dest="do_sample", action="store_true", help="Enable sampling.")
+    parser.add_argument(
+        "--no_do_sample",
+        "--no-do-sample",
+        dest="do_sample",
+        action="store_false",
+        help="Disable sampling.",
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=1)
@@ -630,6 +637,7 @@ def main() -> None:
     )
     parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
+    parser.set_defaults(do_sample=True)
     args = parser.parse_args()
 
     args.text_model_name = _canonicalize_model_name(args.text_model_name)

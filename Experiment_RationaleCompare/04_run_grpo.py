@@ -1036,7 +1036,14 @@ def main() -> None:
     parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--do_sample", action="store_true")
+    parser.add_argument("--do_sample", dest="do_sample", action="store_true", help="Enable sampling.")
+    parser.add_argument(
+        "--no_do_sample",
+        "--no-do-sample",
+        dest="do_sample",
+        action="store_false",
+        help="Disable sampling.",
+    )
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
@@ -1129,7 +1136,13 @@ def main() -> None:
         action="store_true",
         help="Allow empty/missing DB Definitions (default: disabled; DB is required).",
     )
-    parser.set_defaults(include_text=True, no_cot=False, early_stopping=False, shuffle_train=False)
+    parser.set_defaults(
+        include_text=True,
+        no_cot=False,
+        early_stopping=False,
+        shuffle_train=False,
+        do_sample=True,
+    )
 
     # Accept both --snake_case and --kebab-case flags.
     normalized_argv: List[str] = []
