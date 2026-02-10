@@ -12,6 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import librosa
 import torch
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 try:
     from openai import OpenAI
@@ -397,7 +401,19 @@ def main() -> None:
     raw_rows: List[Dict[str, Any]] = []
     filtered_rows: List[Dict[str, Any]] = []
 
-    for record in items:
+    record_iter = items
+    if tqdm is not None:
+        desc = "02_generate_success_cot"
+        if args.num_workers > 1:
+            desc = f"{desc} [w{args.worker_rank}/{args.num_workers}]"
+        record_iter = tqdm(
+            items,
+            total=len(items),
+            desc=desc,
+            disable=(args.num_workers > 1 and args.worker_rank != 0),
+        )
+
+    for record in record_iter:
         gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
         gold_label = label_from_record(record)
         recordings = record.get("recordings", []) if isinstance(record.get("recordings"), list) else []
