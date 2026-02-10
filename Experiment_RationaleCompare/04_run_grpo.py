@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import gc
 import json
 import math
 import os
@@ -659,6 +660,19 @@ def _unwrap_model(model):
     return model.module if isinstance(model, DDP) else model
 
 
+def _is_oom_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    if not isinstance(exc, RuntimeError):
+        return False
+    return "out of memory" in msg or "cuda out of memory" in msg
+
+
+def _recover_from_oom() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def evaluate_model(
     model,
     processor: AutoProcessor,
@@ -690,43 +704,55 @@ def evaluate_model(
     slu_fp_sum = 0.0
     slu_fn_sum = 0.0
     local_prediction_rows: List[Dict[str, Any]] = []
+    local_oom_skips = 0.0
 
     with torch.no_grad():
         for idx, item in enumerate(local_items):
-            audio = None
-            if item.audio_path:
-                try:
+            try:
+                audio = None
+                if item.audio_path:
+                    try:
+                        sr = processor.feature_extractor.sampling_rate
+                        audio, _ = librosa.load(item.audio_path, sr=sr)
+                    except Exception:
+                        continue
+
+                prompt = build_grpo_prompt(
+                    item.mode,
+                    item.sentence,
+                    db_definitions=db_definitions,
+                    no_cot=no_cot,
+                )
+                text_input = build_chat_input(processor, prompt, audio is not None)
+                if audio is None:
+                    inputs = processor(text=text_input, return_tensors="pt")
+                else:
                     sr = processor.feature_extractor.sampling_rate
-                    audio, _ = librosa.load(item.audio_path, sr=sr)
-                except Exception:
+                    inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                output_ids = eval_model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    use_cache=True,
+                    pad_token_id=processor.tokenizer.pad_token_id,
+                )
+                input_len = inputs["input_ids"].shape[1]
+                generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                formatted_text, pred_label, format_ok = _format_model_output(generated_text, no_cot=no_cot)
+                reward, _ = compute_reward(pred_label, item.gold_label)
+                stats = compare_labels(pred_label, item.gold_label)
+            except RuntimeError as exc:
+                if _is_oom_error(exc):
+                    local_oom_skips += 1.0
+                    _recover_from_oom()
+                    if rank == 0:
+                        print(
+                            f"[WARN][EVAL-OOM] skipped sample slurp_id={item.slurp_id} mode={item.mode}: {exc}"
+                        )
                     continue
-
-            prompt = build_grpo_prompt(
-                item.mode,
-                item.sentence,
-                db_definitions=db_definitions,
-                no_cot=no_cot,
-            )
-            text_input = build_chat_input(processor, prompt, audio is not None)
-            if audio is None:
-                inputs = processor(text=text_input, return_tensors="pt")
-            else:
-                sr = processor.feature_extractor.sampling_rate
-                inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-
-            output_ids = eval_model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                use_cache=True,
-                pad_token_id=processor.tokenizer.pad_token_id,
-            )
-            input_len = inputs["input_ids"].shape[1]
-            generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-            formatted_text, pred_label, format_ok = _format_model_output(generated_text, no_cot=no_cot)
-            reward, _ = compute_reward(pred_label, item.gold_label)
-            stats = compare_labels(pred_label, item.gold_label)
+                raise
 
             local_count += 1.0
             reward_sum += float(reward)
@@ -811,6 +837,12 @@ def evaluate_model(
     )
     if world_size > 1 and _is_distributed():
         dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+    oom_tensor = torch.tensor([local_oom_skips], device=device, dtype=torch.float32)
+    if world_size > 1 and _is_distributed():
+        dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
+    total_oom_skips = int(oom_tensor[0].item())
+    if rank == 0 and total_oom_skips > 0:
+        print(f"[WARN][EVAL-OOM] skipped {total_oom_skips} samples due to OOM")
 
     total = float(metrics_tensor[0].item())
     if total <= 0:
@@ -1410,6 +1442,7 @@ def main() -> None:
                 break
             batch_loss = torch.tensor(0.0, device=device)
             sample_count = 0
+            batch_had_oom = False
             reward_values: List[float] = []
             advantage_values: List[float] = []
             kl_values: List[float] = []
@@ -1418,147 +1451,171 @@ def main() -> None:
             sample_loss_values: List[float] = []
 
             for item in batch:
-                audio = None
-                if item.audio_path:
-                    sr = processor.feature_extractor.sampling_rate
-                    audio, _ = librosa.load(item.audio_path, sr=sr)
+                try:
+                    audio = None
+                    if item.audio_path:
+                        sr = processor.feature_extractor.sampling_rate
+                        audio, _ = librosa.load(item.audio_path, sr=sr)
 
-                prompt = build_grpo_prompt(
-                    item.mode,
-                    item.sentence,
-                    db_definitions=db_definitions,
-                    no_cot=args.no_cot,
-                )
-
-                debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
-                if debug_step:
-                    chat_prompt = build_chat_input(processor, prompt, audio is not None)
-                    print(
-                        f"[DEBUG][step={global_step}] item slurp_id={item.slurp_id} mode={item.mode} "
-                        f"audio_used={audio is not None}"
+                    prompt = build_grpo_prompt(
+                        item.mode,
+                        item.sentence,
+                        db_definitions=db_definitions,
+                        no_cot=args.no_cot,
                     )
-                    _print_debug_section("train.prompt_raw", prompt)
-                    _print_debug_section("train.chat_prompt_raw", chat_prompt)
 
-                samples = generate_samples(
-                    model=_unwrap_model(model),
-                    processor=processor,
-                    prompt_text=prompt,
-                    audio=audio,
-                    device=device,
-                    group_size=args.group_size,
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                    do_sample=args.do_sample,
-                )
-
-                rewards: List[float] = []
-                pred_labels: List[Dict[str, Any]] = []
-                formatted_samples: List[str] = []
-                format_ok_values: List[bool] = []
-                for text in samples:
-                    formatted_text, pred_label, format_ok = _format_model_output(text, no_cot=args.no_cot)
-                    reward, _ = compute_reward(
-                        pred_label,
-                        item.gold_label,
-                        w_scenario=args.reward_w_scenario,
-                        w_action=args.reward_w_action,
-                        w_intent=args.reward_w_intent,
-                        w_entity=args.reward_w_entity,
-                    )
-                    rewards.append(reward)
-                    reward_values.append(float(reward))
-                    pred_labels.append(pred_label)
-                    formatted_samples.append(formatted_text)
-                    format_ok_values.append(bool(format_ok))
-
-                if debug_step:
-                    preview_n = min(args.debug_preview_samples, len(samples))
-                    for i in range(preview_n):
+                    debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
+                    if debug_step:
+                        chat_prompt = build_chat_input(processor, prompt, audio is not None)
                         print(
-                            f"[DEBUG][step={global_step}] sample#{i} reward={rewards[i]:.4f} "
-                            f"format_ok={format_ok_values[i]} "
-                            f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
+                            f"[DEBUG][step={global_step}] item slurp_id={item.slurp_id} mode={item.mode} "
+                            f"audio_used={audio is not None}"
                         )
-                        _print_debug_section(f"train.sample_raw#{i}", samples[i])
-                        _print_debug_section(f"train.sample_formatted#{i}", formatted_samples[i])
+                        _print_debug_section("train.prompt_raw", prompt)
+                        _print_debug_section("train.chat_prompt_raw", chat_prompt)
 
-                mean_reward = sum(rewards) / max(len(rewards), 1)
-                if args.advantage_normalize:
-                    variance = sum((r - mean_reward) ** 2 for r in rewards) / max(len(rewards), 1)
-                    std = math.sqrt(variance) if variance > 0 else 1.0
-                else:
-                    std = 1.0
-
-                for sample_idx, (sample_text, reward) in enumerate(zip(samples, rewards)):
-                    advantage = (reward - mean_reward) / (std + 1e-6)
-                    advantage_values.append(float(advantage))
-                    prompt_text = build_chat_input(processor, prompt, audio is not None)
-                    full_text = prompt_text + sample_text
-
-                    inputs = prepare_inputs(
+                    samples = generate_samples(
+                        model=_unwrap_model(model),
                         processor=processor,
-                        prompt_text=prompt_text,
-                        full_text=full_text,
+                        prompt_text=prompt,
                         audio=audio,
                         device=device,
+                        group_size=args.group_size,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        do_sample=args.do_sample,
                     )
-                    logprob = compute_logprob_sum(model, inputs)
 
-                    with torch.no_grad():
-                        ref_inputs = prepare_inputs(
+                    rewards: List[float] = []
+                    pred_labels: List[Dict[str, Any]] = []
+                    formatted_samples: List[str] = []
+                    format_ok_values: List[bool] = []
+                    for text in samples:
+                        formatted_text, pred_label, format_ok = _format_model_output(text, no_cot=args.no_cot)
+                        reward, _ = compute_reward(
+                            pred_label,
+                            item.gold_label,
+                            w_scenario=args.reward_w_scenario,
+                            w_action=args.reward_w_action,
+                            w_intent=args.reward_w_intent,
+                            w_entity=args.reward_w_entity,
+                        )
+                        rewards.append(reward)
+                        reward_values.append(float(reward))
+                        pred_labels.append(pred_label)
+                        formatted_samples.append(formatted_text)
+                        format_ok_values.append(bool(format_ok))
+
+                    if debug_step:
+                        preview_n = min(args.debug_preview_samples, len(samples))
+                        for i in range(preview_n):
+                            print(
+                                f"[DEBUG][step={global_step}] sample#{i} reward={rewards[i]:.4f} "
+                                f"format_ok={format_ok_values[i]} "
+                                f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
+                            )
+                            _print_debug_section(f"train.sample_raw#{i}", samples[i])
+                            _print_debug_section(f"train.sample_formatted#{i}", formatted_samples[i])
+
+                    mean_reward = sum(rewards) / max(len(rewards), 1)
+                    if args.advantage_normalize:
+                        variance = sum((r - mean_reward) ** 2 for r in rewards) / max(len(rewards), 1)
+                        std = math.sqrt(variance) if variance > 0 else 1.0
+                    else:
+                        std = 1.0
+
+                    for sample_idx, (sample_text, reward) in enumerate(zip(samples, rewards)):
+                        advantage = (reward - mean_reward) / (std + 1e-6)
+                        advantage_values.append(float(advantage))
+                        prompt_text = build_chat_input(processor, prompt, audio is not None)
+                        full_text = prompt_text + sample_text
+
+                        inputs = prepare_inputs(
                             processor=processor,
                             prompt_text=prompt_text,
                             full_text=full_text,
                             audio=audio,
                             device=device,
                         )
-                        ref_logprob = compute_logprob_sum(ref_model, ref_inputs)
+                        logprob = compute_logprob_sum(model, inputs)
 
-                    kl = logprob - ref_logprob
-                    loss = -(advantage * logprob) + args.kl_beta * kl
-                    batch_loss += loss
-                    sample_count += 1
-                    logprob_values.append(float(logprob.item()))
-                    ref_logprob_values.append(float(ref_logprob.item()))
-                    kl_values.append(float(kl.item()))
-                    sample_loss_values.append(float(loss.item()))
-
-                    if debug_step and sample_idx < args.debug_preview_samples:
-                        trace_row = {
-                            "global_step": global_step,
-                            "epoch": epoch,
-                            "slurp_id": item.slurp_id,
-                            "mode": item.mode,
-                            "sample_idx": sample_idx,
-                            "reward": float(reward),
-                            "mean_reward": float(mean_reward),
-                            "std_reward": float(std),
-                            "advantage": float(advantage),
-                            "logprob": float(logprob.item()),
-                            "ref_logprob": float(ref_logprob.item()),
-                            "kl": float(kl.item()),
-                            "loss": float(loss.item()),
-                            "gold_label": item.gold_label,
-                            "pred_label": pred_labels[sample_idx] if sample_idx < len(pred_labels) else {},
-                            "format_ok": bool(format_ok_values[sample_idx]) if sample_idx < len(format_ok_values) else False,
-                            "prompt": _shorten(prompt, args.debug_max_chars),
-                            "sample_raw": _shorten(sample_text, args.debug_max_chars),
-                            "sample_formatted": _shorten(
-                                formatted_samples[sample_idx], args.debug_max_chars
+                        with torch.no_grad():
+                            ref_inputs = prepare_inputs(
+                                processor=processor,
+                                prompt_text=prompt_text,
+                                full_text=full_text,
+                                audio=audio,
+                                device=device,
                             )
-                            if sample_idx < len(formatted_samples)
-                            else "",
-                        }
-                        _debug_write_jsonl(debug_output_path, trace_row)
-                        print(
-                            f"[DEBUG][step={global_step}] sample#{sample_idx} "
-                            f"adv={advantage:.4f} logprob={logprob.item():.4f} "
-                            f"ref={ref_logprob.item():.4f} kl={kl.item():.4f} loss={loss.item():.4f}"
-                        )
+                            ref_logprob = compute_logprob_sum(ref_model, ref_inputs)
 
-            if sample_count == 0:
+                        kl = logprob - ref_logprob
+                        loss = -(advantage * logprob) + args.kl_beta * kl
+                        batch_loss += loss
+                        sample_count += 1
+                        logprob_values.append(float(logprob.item()))
+                        ref_logprob_values.append(float(ref_logprob.item()))
+                        kl_values.append(float(kl.item()))
+                        sample_loss_values.append(float(loss.item()))
+
+                        if debug_step and sample_idx < args.debug_preview_samples:
+                            trace_row = {
+                                "global_step": global_step,
+                                "epoch": epoch,
+                                "slurp_id": item.slurp_id,
+                                "mode": item.mode,
+                                "sample_idx": sample_idx,
+                                "reward": float(reward),
+                                "mean_reward": float(mean_reward),
+                                "std_reward": float(std),
+                                "advantage": float(advantage),
+                                "logprob": float(logprob.item()),
+                                "ref_logprob": float(ref_logprob.item()),
+                                "kl": float(kl.item()),
+                                "loss": float(loss.item()),
+                                "gold_label": item.gold_label,
+                                "pred_label": pred_labels[sample_idx] if sample_idx < len(pred_labels) else {},
+                                "format_ok": bool(format_ok_values[sample_idx]) if sample_idx < len(format_ok_values) else False,
+                                "prompt": _shorten(prompt, args.debug_max_chars),
+                                "sample_raw": _shorten(sample_text, args.debug_max_chars),
+                                "sample_formatted": _shorten(
+                                    formatted_samples[sample_idx], args.debug_max_chars
+                                )
+                                if sample_idx < len(formatted_samples)
+                                else "",
+                            }
+                            _debug_write_jsonl(debug_output_path, trace_row)
+                            print(
+                                f"[DEBUG][step={global_step}] sample#{sample_idx} "
+                                f"adv={advantage:.4f} logprob={logprob.item():.4f} "
+                                f"ref={ref_logprob.item():.4f} kl={kl.item():.4f} loss={loss.item():.4f}"
+                            )
+                except RuntimeError as exc:
+                    if _is_oom_error(exc):
+                        batch_had_oom = True
+                        _recover_from_oom()
+                        if rank == 0:
+                            print(
+                                f"[WARN][TRAIN-OOM] step={global_step} batch_idx={batch_idx} "
+                                f"slurp_id={item.slurp_id} mode={item.mode} -> skip batch"
+                            )
+                        break
+                    raise
+
+            skip_batch = batch_had_oom or (sample_count == 0)
+            if world_size > 1 and _is_distributed():
+                skip_tensor = torch.tensor([1 if skip_batch else 0], device=device, dtype=torch.int32)
+                dist.all_reduce(skip_tensor, op=dist.ReduceOp.MAX)
+                skip_batch = bool(skip_tensor[0].item())
+            if skip_batch:
+                optimizer.zero_grad(set_to_none=True)
+                _recover_from_oom()
+                if rank == 0 and (not batch_had_oom):
+                    print(
+                        f"[WARN][TRAIN-OOM] step={global_step} batch_idx={batch_idx} "
+                        "skipped because another rank reported OOM."
+                    )
                 continue
             batch_loss = batch_loss / sample_count
             (batch_loss / args.grad_accum_steps).backward()
