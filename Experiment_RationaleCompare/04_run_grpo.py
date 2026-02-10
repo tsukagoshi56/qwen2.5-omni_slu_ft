@@ -818,7 +818,7 @@ def main() -> None:
         "--balanced-train-records",
         dest="balanced_train_records",
         type=int,
-        default=2000,
+        default=0,
         help=(
             "If >0, pick a balanced training subset by slurp_id count "
             "(intent/slot coverage aware) before training. Set 0 to disable."
