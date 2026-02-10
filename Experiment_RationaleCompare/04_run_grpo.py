@@ -706,6 +706,22 @@ def _recover_from_oom() -> None:
         torch.cuda.empty_cache()
 
 
+def _pick_param_debug_eval_items(
+    items: List[GrpoItem],
+    *,
+    enabled: bool,
+    sample_size: int,
+    seed: int,
+    eval_index: int,
+) -> List[GrpoItem]:
+    if not enabled:
+        return items
+    if sample_size <= 0 or len(items) <= sample_size:
+        return items
+    rng = random.Random(f"param_debug_eval:{seed}:{eval_index}")
+    return rng.sample(items, sample_size)
+
+
 def evaluate_model(
     model,
     processor: AutoProcessor,
@@ -1117,6 +1133,13 @@ def main() -> None:
     parser.add_argument("--debug_preview_samples", type=int, default=3, help="Generated samples to show per item.")
     parser.add_argument("--debug_max_chars", type=int, default=1200, help="Max chars per debug text field.")
     parser.add_argument(
+        "--param_debug",
+        "--param-debug",
+        dest="param_debug",
+        action="store_true",
+        help="Quick GRPO parameter-debug preset: eval every 50 steps with random 50 eval samples.",
+    )
+    parser.add_argument(
         "--debug_output_file",
         type=str,
         default="",
@@ -1142,6 +1165,7 @@ def main() -> None:
         early_stopping=False,
         shuffle_train=False,
         do_sample=True,
+        param_debug=False,
     )
 
     # Accept both --snake_case and --kebab-case flags.
@@ -1179,6 +1203,11 @@ def main() -> None:
             args.eval_every = 10
         if args.test_file and args.test_every <= 0:
             args.test_every = 10
+    if args.param_debug:
+        if args.eval_file:
+            args.eval_every = 50
+        # Keep full eval pool; each eval call will draw random 50 samples.
+        args.eval_max_samples = None
 
     forced_only_grpo_base = False
     if args.only_grpo:
@@ -1333,7 +1362,9 @@ def main() -> None:
             # Eval should use audio-only inputs for consistent ASR+SLU validation.
             eval_items = build_items(eval_path, audio_dir, include_text=False)
             eval_cap = args.eval_max_samples
-            if eval_cap is None:
+            if args.param_debug:
+                eval_cap = None
+            elif eval_cap is None:
                 eval_cap = args.smoke_eval_samples
             if eval_cap is not None:
                 eval_items = eval_items[: max(0, eval_cap)]
@@ -1368,6 +1399,7 @@ def main() -> None:
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke} "
+            f"param_debug={args.param_debug} "
             f"shuffle_train={args.shuffle_train} "
             f"balanced_train_records={args.balanced_train_records} "
             f"balanced_per_intent={args.balanced_per_intent} "
@@ -1378,7 +1410,8 @@ def main() -> None:
         if args.eval_file:
             print(
                 f"[DEBUG] eval_file={eval_path} eval_items={len(eval_items)} "
-                f"eval_every={args.eval_every} eval_max_samples={args.eval_max_samples}"
+                f"eval_every={args.eval_every} eval_max_samples={args.eval_max_samples} "
+                f"param_debug_random_eval50={args.param_debug}"
             )
         if args.test_file:
             print(
@@ -1428,6 +1461,8 @@ def main() -> None:
                 f"[GRPO] eval enabled: eval_file={eval_path} "
                 f"eval_items={len(eval_items)} eval_every={args.eval_every}"
             )
+            if args.param_debug:
+                print("[GRPO] param_debug=True -> eval uses random 50 items every 50 steps")
         if args.test_file:
             print(
                 f"[GRPO] test enabled: test_file={test_path} "
@@ -1485,10 +1520,17 @@ def main() -> None:
     early_stopped = False
     reached_max_steps = False
     if args.eval_file:
+        init_eval_items = _pick_param_debug_eval_items(
+            eval_items,
+            enabled=args.param_debug,
+            sample_size=50,
+            seed=args.seed,
+            eval_index=-1,
+        )
         init_eval_metrics, _ = evaluate_model(
             model=model,
             processor=processor,
-            items=eval_items,
+            items=init_eval_items,
             db_definitions=db_definitions,
             no_cot=args.no_cot,
             device=device,
@@ -1511,6 +1553,8 @@ def main() -> None:
                 f"entity_f1_mean={init_eval_metrics['entity_f1_mean']:.4f} "
                 f"slu_f1={init_eval_metrics['slu_f1']:.4f}"
             )
+            if args.param_debug:
+                print(f"[GRPO-EVAL-INIT] param_debug_subset={len(init_eval_items)}")
         if args.early_stopping:
             init_metric_value = float(
                 init_eval_metrics.get(args.early_stopping_metric, float("-inf"))
@@ -1779,10 +1823,17 @@ def main() -> None:
                 processor.save_pretrained(ckpt_dir)
 
             if args.eval_file and args.eval_every > 0 and global_step > 0 and global_step % args.eval_every == 0:
+                eval_items_step = _pick_param_debug_eval_items(
+                    eval_items,
+                    enabled=args.param_debug,
+                    sample_size=50,
+                    seed=args.seed,
+                    eval_index=global_step,
+                )
                 eval_metrics, _ = evaluate_model(
                     model=model,
                     processor=processor,
-                    items=eval_items,
+                    items=eval_items_step,
                     db_definitions=db_definitions,
                     no_cot=args.no_cot,
                     device=device,
@@ -1805,6 +1856,8 @@ def main() -> None:
                         f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f} "
                         f"slu_f1={eval_metrics['slu_f1']:.4f}"
                     )
+                    if args.param_debug:
+                        print(f"[GRPO-EVAL] step={global_step} param_debug_subset={len(eval_items_step)}")
                 if args.early_stopping:
                     metric_value = float(eval_metrics.get(args.early_stopping_metric, float("-inf")))
                     improved = metric_value > best_eval_metric
@@ -1882,10 +1935,17 @@ def main() -> None:
         print(f"[GRPO] Reached max_steps={args.max_steps}; stopping training loop.")
 
     if args.eval_file:
+        final_eval_items = _pick_param_debug_eval_items(
+            eval_items,
+            enabled=args.param_debug,
+            sample_size=50,
+            seed=args.seed,
+            eval_index=10**9,
+        )
         final_eval, _ = evaluate_model(
             model=model,
             processor=processor,
-            items=eval_items,
+            items=final_eval_items,
             db_definitions=db_definitions,
             no_cot=args.no_cot,
             device=device,
@@ -1908,6 +1968,8 @@ def main() -> None:
                 f"entity_f1_mean={final_eval['entity_f1_mean']:.4f} "
                 f"slu_f1={final_eval['slu_f1']:.4f}"
             )
+            if args.param_debug:
+                print(f"[GRPO-EVAL-FINAL] param_debug_subset={len(final_eval_items)}")
 
     if args.test_file:
         final_test, prediction_rows = evaluate_model(
