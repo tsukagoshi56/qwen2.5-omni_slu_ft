@@ -541,6 +541,12 @@ def _debug_write_jsonl(path: str, row: Dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _print_debug_section(title: str, content: str) -> None:
+    print(f"[DEBUG-SECTION-BEGIN] {title}")
+    print(content if content is not None else "")
+    print(f"[DEBUG-SECTION-END] {title}")
+
+
 def _debug_print_dataset(items: List[GrpoItem], preview_items: int) -> None:
     audio_count = sum(1 for x in items if x.mode == "audio")
     text_count = sum(1 for x in items if x.mode == "text")
@@ -687,10 +693,8 @@ def evaluate_model(
 
             if debug and rank == 0 and idx < 2:
                 print(f"[EVAL-DEBUG] mode={item.mode} slurp_id={item.slurp_id}")
-                print("[EVAL-DEBUG] input_prompt:")
-                print(prompt)
-                print("[EVAL-DEBUG] output_raw:")
-                print(generated_text)
+                _print_debug_section("eval.input_prompt", prompt)
+                _print_debug_section("eval.output_raw", generated_text)
                 print(f"[EVAL-DEBUG] gold={json.dumps(item.gold_label, ensure_ascii=False)}")
                 print(f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} reward={reward:.4f}")
             if rank == 0 and idx < max(0, preview_count):
@@ -1252,10 +1256,8 @@ def main() -> None:
                         f"[DEBUG][step={global_step}] item slurp_id={item.slurp_id} mode={item.mode} "
                         f"audio_used={audio is not None}"
                     )
-                    print("[DEBUG] prompt_raw:")
-                    print(prompt)
-                    print("[DEBUG] chat_prompt_raw:")
-                    print(chat_prompt)
+                    _print_debug_section("train.prompt_raw", prompt)
+                    _print_debug_section("train.chat_prompt_raw", chat_prompt)
 
                 samples = generate_samples(
                     model=_unwrap_model(model),
@@ -1298,8 +1300,7 @@ def main() -> None:
                             f"[DEBUG][step={global_step}] sample#{i} reward={rewards[i]:.4f} "
                             f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
                         )
-                        print("[DEBUG] sample_raw:")
-                        print(samples[i])
+                        _print_debug_section(f"train.sample_raw#{i}", samples[i])
 
                 mean_reward = sum(rewards) / max(len(rewards), 1)
                 if args.advantage_normalize:
