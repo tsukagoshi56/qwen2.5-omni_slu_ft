@@ -865,7 +865,12 @@ def main() -> None:
         help="Training data path (default: slurp/dataset/slurp/training.json).",
     )
     parser.add_argument("--eval_file", type=str, default="", help="Optional eval jsonl path.")
-    parser.add_argument("--test_file", type=str, default="", help="Optional test jsonl path.")
+    parser.add_argument(
+        "--test_file",
+        type=str,
+        default="slurp/dataset/slurp/test.jsonl",
+        help="Test jsonl path used for final audio-only evaluation and prediction.jsonl export.",
+    )
     parser.add_argument(
         "--metadata_file",
         type=str,
@@ -1205,23 +1210,33 @@ def main() -> None:
 
     eval_items: List[GrpoItem] = []
     if args.eval_file:
-        # Eval should use audio-only inputs for consistent ASR+SLU validation.
-        eval_items = build_items(eval_path, audio_dir, include_text=False)
-        eval_cap = args.eval_max_samples
-        if eval_cap is None:
-            eval_cap = args.smoke_eval_samples
-        if eval_cap is not None:
-            eval_items = eval_items[: max(0, eval_cap)]
+        if not os.path.exists(eval_path):
+            if rank == 0:
+                print(f"[WARN] eval_file not found: {eval_path} (skip eval)")
+            args.eval_file = ""
+        else:
+            # Eval should use audio-only inputs for consistent ASR+SLU validation.
+            eval_items = build_items(eval_path, audio_dir, include_text=False)
+            eval_cap = args.eval_max_samples
+            if eval_cap is None:
+                eval_cap = args.smoke_eval_samples
+            if eval_cap is not None:
+                eval_items = eval_items[: max(0, eval_cap)]
 
     test_items: List[GrpoItem] = []
     if args.test_file:
-        # Test should use audio-only inputs for final report comparability.
-        test_items = build_items(test_path, audio_dir, include_text=False)
-        test_cap = args.test_max_samples
-        if test_cap is None:
-            test_cap = args.smoke_test_samples
-        if test_cap is not None:
-            test_items = test_items[: max(0, test_cap)]
+        if not os.path.exists(test_path):
+            if rank == 0:
+                print(f"[WARN] test_file not found: {test_path} (skip final test/prediction export)")
+            args.test_file = ""
+        else:
+            # Test should use audio-only inputs for final report comparability.
+            test_items = build_items(test_path, audio_dir, include_text=False)
+            test_cap = args.test_max_samples
+            if test_cap is None:
+                test_cap = args.smoke_test_samples
+            if test_cap is not None:
+                test_items = test_items[: max(0, test_cap)]
 
     if args.debug and rank == 0:
         print("[DEBUG] ===== Run Config =====")
