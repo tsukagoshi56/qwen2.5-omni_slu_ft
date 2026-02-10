@@ -34,6 +34,18 @@ from prompts import render_infer_audio_prompt, render_infer_text_prompt
 _DEBUG = False
 
 
+def _canonicalize_model_name(model_name: str) -> str:
+    value = str(model_name or "").strip()
+    lower = value.lower()
+    aliases = {
+        "gpt4.1-mini": "gpt-4.1-mini",
+        "gpt4.1": "gpt-4.1",
+        "gpt4o-mini": "gpt-4o-mini",
+        "gpt4o": "gpt-4o",
+    }
+    return aliases.get(lower, value)
+
+
 def _is_deepseek_model(model_name: str) -> bool:
     return "deepseek" in str(model_name or "").strip().lower()
 
@@ -48,10 +60,23 @@ def _build_client(model_name: str) -> Any:
             raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
         return OpenAI(api_key=api_key, base_url=base_url)
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL")
+    # Non-DeepSeek models: support OpenAI-compatible gateways (e.g., Bedrock proxy)
+    # by allowing the same endpoint/key style used in DeepSeek mode.
+    api_key = (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("BEDROCK_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+    )
+    base_url = (
+        os.environ.get("API_ENDPOINT")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("DEEPSEEK_BASE_URL")
+    )
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+        raise RuntimeError(
+            "No API key found for non-DeepSeek model. "
+            "Set one of OPENAI_API_KEY / BEDROCK_API_KEY / DEEPSEEK_API_KEY."
+        )
     if base_url:
         return OpenAI(api_key=api_key, base_url=base_url)
     return OpenAI(api_key=api_key)
@@ -213,7 +238,8 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
 
-    if str(args.text_model_name).strip() == "deepseekr1":
+    args.text_model_name = _canonicalize_model_name(args.text_model_name)
+    if str(args.text_model_name).strip().lower() == "deepseekr1":
         args.text_model_name = "deepseek-r1"
 
     global _DEBUG
