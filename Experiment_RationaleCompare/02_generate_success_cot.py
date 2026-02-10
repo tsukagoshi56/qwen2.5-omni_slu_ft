@@ -402,6 +402,16 @@ def _raw_sort_key(row: Dict[str, Any]) -> Tuple[int, float, float]:
     )
 
 
+def _difficulty_sort_key(row: Dict[str, Any]) -> Tuple[float, float, int]:
+    # Hard-first ordering for analysis:
+    # lower success score -> lower reward -> incorrect first
+    return (
+        float(row.get("success_score", 0.0)),
+        float(row.get("reward", 0.0)),
+        0 if not bool(row.get("correct")) else 1,
+    )
+
+
 def _make_filtered_row(raw_row: Dict[str, Any], coverage_fallback: bool = False) -> Dict[str, Any]:
     filtered_row = {
         "slurp_id": raw_row.get("slurp_id"),
@@ -579,6 +589,12 @@ def main() -> None:
     parser.add_argument("--output_file", type=str, default=DEFAULT_OUTPUT_FILE)
     parser.add_argument("--filtered_file", type=str, default=DEFAULT_FILTERED_FILE)
     parser.add_argument(
+        "--difficulty_file",
+        type=str,
+        default="",
+        help="(rescore mode) Save an additional hard-first JSONL sorted by low success_score.",
+    )
+    parser.add_argument(
         "--rescore_raw_file",
         type=str,
         default=None,
@@ -651,17 +667,36 @@ def main() -> None:
         base_filtered_path = f"{root}.rescored.filtered{ext or '.jsonl'}"
     else:
         base_filtered_path = os.path.join(base_dir, args.filtered_file) if not os.path.isabs(args.filtered_file) else args.filtered_file
+
+    if args.difficulty_file.strip():
+        base_difficulty_path = (
+            os.path.join(base_dir, args.difficulty_file)
+            if not os.path.isabs(args.difficulty_file)
+            else args.difficulty_file
+        )
+    elif args.rescore_raw_file:
+        root, ext = os.path.splitext(base_output_path)
+        base_difficulty_path = f"{root}.hard_first{ext or '.jsonl'}"
+    else:
+        base_difficulty_path = ""
+
     output_path = base_output_path
     filtered_path = base_filtered_path
+    difficulty_path = base_difficulty_path
     if args.append_worker_suffix and args.num_workers > 1:
         root, ext = os.path.splitext(base_output_path)
         output_path = f"{root}.w{args.worker_rank}of{args.num_workers}{ext or '.jsonl'}"
         root, ext = os.path.splitext(base_filtered_path)
         filtered_path = f"{root}.w{args.worker_rank}of{args.num_workers}{ext or '.jsonl'}"
+        if base_difficulty_path:
+            root, ext = os.path.splitext(base_difficulty_path)
+            difficulty_path = f"{root}.w{args.worker_rank}of{args.num_workers}{ext or '.jsonl'}"
 
     if args.merge_only:
         _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
         _merge_worker_outputs(base_filtered_path, args.num_workers, cleanup=args.merge_cleanup)
+        if base_difficulty_path:
+            _merge_worker_outputs(base_difficulty_path, args.num_workers, cleanup=args.merge_cleanup)
         return
 
     if args.rescore_raw_file:
@@ -688,12 +723,17 @@ def main() -> None:
         raw_rows = [_enrich_raw_row_for_success(row, args.success_match) for row in row_iter]
         raw_rows.sort(key=_raw_sort_key, reverse=True)
         filtered_rows = _build_filtered_rows(raw_rows)
+        difficulty_rows = sorted(raw_rows, key=_difficulty_sort_key)
         write_jsonl(output_path, raw_rows)
         write_jsonl(filtered_path, filtered_rows)
+        if difficulty_path:
+            write_jsonl(difficulty_path, difficulty_rows)
 
         if args.merge_workers and args.num_workers > 1 and args.append_worker_suffix and args.worker_rank == 0:
             _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
             _merge_worker_outputs(base_filtered_path, args.num_workers, cleanup=args.merge_cleanup)
+            if base_difficulty_path:
+                _merge_worker_outputs(base_difficulty_path, args.num_workers, cleanup=args.merge_cleanup)
         return
 
     worker_procs: List[subprocess.Popen] = []

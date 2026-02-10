@@ -41,6 +41,7 @@ python Experiment_RationaleCompare/01_generate_oracle_cot.py \
 
 - **Input**: gold transcript + gold JSON + DB definitions
 - **Output**: `rationale_text=C/R/J`, `final=gold JSON`
+- `--asr_transcript` を付けると、text入力に `asr_hypotheses[0].text`（1-best）を使います。
 
 ---
 
@@ -62,6 +63,7 @@ python Experiment_RationaleCompare/02_generate_success_cot.py \
 - Success scoring uses a single scalar:
   - `success_score = format_ok + match_ok + has_gold_intent_candidate + slot_candidate_coverage` (0.0 to 4.0)
   - `correct` is `success_score >= 4.0`
+- `--asr_transcript` を付けると、text入力に `asr_hypotheses[0].text`（1-best）を使います。
 
 By default, **text‑mode filtered samples omit `recordings`** to force text‑only inputs in SFT.
 
@@ -77,6 +79,9 @@ python Experiment_RationaleCompare/02_generate_success_cot.py \
 - If `--output_file` / `--filtered_file` are omitted in rescore mode, outputs are auto-written as:
   - `<raw>.rescored.jsonl`
   - `<raw>.rescored.filtered.jsonl`
+- 同時に「難しい順（低スコア順）」のファイルも出力されます:
+  - `<raw>.rescored.hard_first.jsonl`
+- 低スコア順ファイルの出力先は `--difficulty_file` で上書きできます。
 - You can override paths explicitly with `--output_file` and `--filtered_file`.
 
 ---
