@@ -687,10 +687,12 @@ def evaluate_model(
 
             if debug and rank == 0 and idx < 2:
                 print(f"[EVAL-DEBUG] mode={item.mode} slurp_id={item.slurp_id}")
+                print("[EVAL-DEBUG] input_prompt:")
+                print(prompt)
+                print("[EVAL-DEBUG] output_raw:")
+                print(generated_text)
                 print(f"[EVAL-DEBUG] gold={json.dumps(item.gold_label, ensure_ascii=False)}")
                 print(f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} reward={reward:.4f}")
-                print("[EVAL-DEBUG] raw:")
-                print(_shorten(generated_text, debug_max_chars))
             if rank == 0 and idx < max(0, preview_count):
                 print(
                     f"{preview_prefix} idx={idx} mode={item.mode} slurp_id={item.slurp_id} "
@@ -1251,9 +1253,9 @@ def main() -> None:
                         f"audio_used={audio is not None}"
                     )
                     print("[DEBUG] prompt_raw:")
-                    print(_shorten(prompt, args.debug_max_chars))
+                    print(prompt)
                     print("[DEBUG] chat_prompt_raw:")
-                    print(_shorten(chat_prompt, args.debug_max_chars))
+                    print(chat_prompt)
 
                 samples = generate_samples(
                     model=_unwrap_model(model),
@@ -1297,7 +1299,7 @@ def main() -> None:
                             f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
                         )
                         print("[DEBUG] sample_raw:")
-                        print(_shorten(samples[i], args.debug_max_chars))
+                        print(samples[i])
 
                 mean_reward = sum(rewards) / max(len(rewards), 1)
                 if args.advantage_normalize:
