@@ -1384,6 +1384,17 @@ def main() -> None:
             if test_cap is not None:
                 test_items = test_items[: max(0, test_cap)]
 
+    # In --param_debug mode, keep one fixed 50-sample eval subset for the whole run.
+    param_debug_eval_items = eval_items
+    if args.eval_file and args.param_debug:
+        param_debug_eval_items = _pick_param_debug_eval_items(
+            eval_items,
+            enabled=True,
+            sample_size=50,
+            seed=args.seed,
+            eval_index=0,
+        )
+
     if args.debug and rank == 0:
         print("[DEBUG] ===== Run Config =====")
         print(f"[DEBUG] distributed={distributed} rank={rank} world_size={world_size} local_rank={local_rank}")
@@ -1462,7 +1473,10 @@ def main() -> None:
                 f"eval_items={len(eval_items)} eval_every={args.eval_every}"
             )
             if args.param_debug:
-                print("[GRPO] param_debug=True -> eval uses random 50 items every 50 steps")
+                print(
+                    "[GRPO] param_debug=True -> eval uses one fixed random subset "
+                    f"for this run: n={len(param_debug_eval_items)}"
+                )
         if args.test_file:
             print(
                 f"[GRPO] test enabled: test_file={test_path} "
@@ -1520,13 +1534,7 @@ def main() -> None:
     early_stopped = False
     reached_max_steps = False
     if args.eval_file:
-        init_eval_items = _pick_param_debug_eval_items(
-            eval_items,
-            enabled=args.param_debug,
-            sample_size=50,
-            seed=args.seed,
-            eval_index=-1,
-        )
+        init_eval_items = param_debug_eval_items if args.param_debug else eval_items
         init_eval_metrics, _ = evaluate_model(
             model=model,
             processor=processor,
@@ -1823,13 +1831,7 @@ def main() -> None:
                 processor.save_pretrained(ckpt_dir)
 
             if args.eval_file and args.eval_every > 0 and global_step > 0 and global_step % args.eval_every == 0:
-                eval_items_step = _pick_param_debug_eval_items(
-                    eval_items,
-                    enabled=args.param_debug,
-                    sample_size=50,
-                    seed=args.seed,
-                    eval_index=global_step,
-                )
+                eval_items_step = param_debug_eval_items if args.param_debug else eval_items
                 eval_metrics, _ = evaluate_model(
                     model=model,
                     processor=processor,
@@ -1935,13 +1937,7 @@ def main() -> None:
         print(f"[GRPO] Reached max_steps={args.max_steps}; stopping training loop.")
 
     if args.eval_file:
-        final_eval_items = _pick_param_debug_eval_items(
-            eval_items,
-            enabled=args.param_debug,
-            sample_size=50,
-            seed=args.seed,
-            eval_index=10**9,
-        )
+        final_eval_items = param_debug_eval_items if args.param_debug else eval_items
         final_eval, _ = evaluate_model(
             model=model,
             processor=processor,
