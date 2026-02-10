@@ -951,6 +951,12 @@ def main() -> None:
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=0,
+        help="Maximum number of GRPO training steps. 0 means no step cap (use epochs only).",
+    )
     parser.add_argument("--eval_every", type=int, default=100, help="Run eval every N global steps (0 disables).")
     parser.add_argument(
         "--eval_max_samples",
@@ -1024,6 +1030,11 @@ def main() -> None:
     parser.add_argument("--smoke_train_samples", type=int, default=200)
     parser.add_argument("--smoke_eval_samples", type=int, default=32)
     parser.add_argument("--smoke_test_samples", type=int, default=32)
+    parser.add_argument(
+        "--allow_empty_db",
+        action="store_true",
+        help="Allow empty/missing DB Definitions (default: disabled; DB is required).",
+    )
     parser.set_defaults(include_text=True, no_cot=False, early_stopping=False)
 
     # Accept both --snake_case and --kebab-case flags.
@@ -1050,6 +1061,8 @@ def main() -> None:
         raise ValueError("--balanced_per_intent must be >= 0")
     if args.balanced_per_intent_slot_combo < 0:
         raise ValueError("--balanced_per_intent_slot_combo must be >= 0")
+    if args.max_steps < 0:
+        raise ValueError("--max_steps must be >= 0")
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -1131,9 +1144,21 @@ def main() -> None:
     else:
         debug_output_path = ""
 
+    metadata_exists = bool(metadata_path) and os.path.exists(metadata_path)
+    if not metadata_exists and not args.allow_empty_db:
+        raise FileNotFoundError(
+            f"metadata_file not found: {metadata_path}. "
+            "DB Definitions are required by default. "
+            "If you intentionally want no DB, set --allow_empty_db."
+        )
     metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
-    if rank == 0 and (not os.path.exists(metadata_path)):
+    if not str(db_definitions or "").strip() and not args.allow_empty_db:
+        raise ValueError(
+            "DB Definitions is empty. "
+            "Provide a valid --metadata_file or set --allow_empty_db."
+        )
+    if rank == 0 and (not metadata_exists):
         print(f"[WARN] metadata_file not found: {metadata_path} (DB Definitions will be empty)")
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
@@ -1249,10 +1274,12 @@ def main() -> None:
     )
     if rank == 0:
         total_batches = len(dataloader) * args.num_train_epochs
-        optimizer_steps = math.ceil(total_batches / max(1, args.grad_accum_steps))
+        effective_total_steps = min(total_batches, args.max_steps) if args.max_steps > 0 else total_batches
+        optimizer_steps = math.ceil(effective_total_steps / max(1, args.grad_accum_steps))
         mode_label = "ONLY_GRPO" if args.only_grpo else "SFT_INIT+GRPO"
         print(
             f"[GRPO] mode={mode_label} total_batches={total_batches} "
+            f"effective_steps={effective_total_steps} max_steps={args.max_steps} "
             f"grad_accum_steps={args.grad_accum_steps} optimizer_steps~={optimizer_steps}"
         )
         print(f"[GRPO] prompt_style={'J_ONLY' if args.no_cot else 'C_R_J'}")
@@ -1326,11 +1353,18 @@ def main() -> None:
     best_eval_metric = float("-inf")
     no_improve_count = 0
     early_stopped = False
+    reached_max_steps = False
     for epoch in range(args.num_train_epochs):
+        if args.max_steps > 0 and global_step >= args.max_steps:
+            reached_max_steps = True
+            break
         if sampler is not None:
             sampler.set_epoch(epoch)
         accum_steps = 0
         for batch_idx, batch in enumerate(dataloader):
+            if args.max_steps > 0 and global_step >= args.max_steps:
+                reached_max_steps = True
+                break
             batch_loss = torch.tensor(0.0, device=device)
             sample_count = 0
             reward_values: List[float] = []
@@ -1606,10 +1640,15 @@ def main() -> None:
                     )
 
             global_step += 1
+            if args.max_steps > 0 and global_step >= args.max_steps:
+                reached_max_steps = True
+                break
             if early_stopped:
                 break
 
         if early_stopped:
+            break
+        if reached_max_steps:
             break
 
     if rank == 0 and early_stopped:
@@ -1618,6 +1657,8 @@ def main() -> None:
             f"(metric={args.early_stopping_metric}, patience={args.early_stopping_patience}, "
             f"min_epochs={args.early_stopping_min_epochs}, best={best_eval_metric:.4f})"
         )
+    if rank == 0 and reached_max_steps:
+        print(f"[GRPO] Reached max_steps={args.max_steps}; stopping training loop.")
 
     if args.eval_file:
         final_eval, _ = evaluate_model(
