@@ -1060,7 +1060,7 @@ def main() -> None:
         action="store_false",
         help="Disable sampling.",
     )
-    parser.add_argument("--learning_rate", type=float, default=3e-6)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
