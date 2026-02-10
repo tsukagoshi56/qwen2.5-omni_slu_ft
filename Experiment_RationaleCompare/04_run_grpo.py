@@ -1484,6 +1484,45 @@ def main() -> None:
     no_improve_count = 0
     early_stopped = False
     reached_max_steps = False
+    if args.eval_file:
+        init_eval_metrics, _ = evaluate_model(
+            model=model,
+            processor=processor,
+            items=eval_items,
+            db_definitions=db_definitions,
+            no_cot=args.no_cot,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+            rank=rank,
+            world_size=world_size,
+            debug=args.debug,
+            debug_max_chars=args.debug_max_chars,
+            preview_count=(5 if args.smoke else 0),
+            preview_prefix="[GRPO-EVAL-INIT-SMOKE]",
+        )
+        if rank == 0:
+            print(
+                "[GRPO-EVAL-INIT] "
+                f"n={int(init_eval_metrics['num_samples'])} "
+                f"reward_mean={init_eval_metrics['reward_mean']:.4f} "
+                f"intent_acc={init_eval_metrics['intent_acc']:.4f} "
+                f"scenario_acc={init_eval_metrics['scenario_acc']:.4f} "
+                f"action_acc={init_eval_metrics['action_acc']:.4f} "
+                f"entity_f1_mean={init_eval_metrics['entity_f1_mean']:.4f} "
+                f"slu_f1={init_eval_metrics['slu_f1']:.4f}"
+            )
+        if args.early_stopping:
+            init_metric_value = float(
+                init_eval_metrics.get(args.early_stopping_metric, float("-inf"))
+            )
+            if math.isfinite(init_metric_value):
+                best_eval_metric = init_metric_value
+                no_improve_count = 0
+                if rank == 0:
+                    print(
+                        "[GRPO-ES] "
+                        f"initial metric={args.early_stopping_metric} value={init_metric_value:.4f}"
+                    )
     for epoch in range(args.num_train_epochs):
         if args.max_steps > 0 and global_step >= args.max_steps:
             reached_max_steps = True
