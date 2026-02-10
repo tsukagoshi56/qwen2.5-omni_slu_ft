@@ -136,6 +136,7 @@ def _expand_items_by_intent_slot_combo(
     items: List[GrpoItem],
     per_combo_count: int,
     seed: int,
+    shuffle_output: bool = True,
 ) -> Tuple[List[GrpoItem], Dict[str, int]]:
     if per_combo_count <= 0:
         return items, {
@@ -181,7 +182,8 @@ def _expand_items_by_intent_slot_combo(
         for _ in range(count):
             expanded_items.extend(record_items)
 
-    rng.shuffle(expanded_items)
+    if shuffle_output:
+        rng.shuffle(expanded_items)
     stats = {
         "num_combos": len(combo_to_records),
         "requested_per_combo": per_combo_count,
@@ -983,6 +985,19 @@ def main() -> None:
     )
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
+        "--shuffle_train",
+        dest="shuffle_train",
+        action="store_true",
+        help="Shuffle training order each epoch (default: disabled; keep top-to-bottom order).",
+    )
+    parser.add_argument(
+        "--no_shuffle_train",
+        "--no-shuffle-train",
+        dest="shuffle_train",
+        action="store_false",
+        help="Disable training shuffle and consume samples in file order.",
+    )
+    parser.add_argument(
         "--balanced_train_records",
         "--balanced-train-records",
         dest="balanced_train_records",
@@ -1114,7 +1129,7 @@ def main() -> None:
         action="store_true",
         help="Allow empty/missing DB Definitions (default: disabled; DB is required).",
     )
-    parser.set_defaults(include_text=True, no_cot=False, early_stopping=False)
+    parser.set_defaults(include_text=True, no_cot=False, early_stopping=False, shuffle_train=False)
 
     # Accept both --snake_case and --kebab-case flags.
     normalized_argv: List[str] = []
@@ -1260,6 +1275,7 @@ def main() -> None:
             items=items,
             per_combo_count=args.balanced_per_intent_slot_combo,
             seed=args.seed,
+            shuffle_output=args.shuffle_train,
         )
         if rank == 0:
             print(
@@ -1339,6 +1355,7 @@ def main() -> None:
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke} "
+            f"shuffle_train={args.shuffle_train} "
             f"balanced_train_records={args.balanced_train_records} "
             f"balanced_per_intent={args.balanced_per_intent} "
             f"balanced_per_intent_slot_combo={args.balanced_per_intent_slot_combo} "
@@ -1361,14 +1378,14 @@ def main() -> None:
 
     dataset = GrpoDataset(items)
     sampler = (
-        DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=args.shuffle_train)
         if distributed
         else None
     )
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=(sampler is None),
+        shuffle=(sampler is None and args.shuffle_train),
         sampler=sampler,
         collate_fn=collate_grpo_items,
     )
@@ -1458,7 +1475,7 @@ def main() -> None:
         if args.max_steps > 0 and global_step >= args.max_steps:
             reached_max_steps = True
             break
-        if sampler is not None:
+        if sampler is not None and args.shuffle_train:
             sampler.set_epoch(epoch)
         accum_steps = 0
         for batch_idx, batch in enumerate(dataloader):
