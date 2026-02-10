@@ -1618,7 +1618,32 @@ def main() -> None:
                     )
                 continue
             batch_loss = batch_loss / sample_count
-            (batch_loss / args.grad_accum_steps).backward()
+            backward_had_oom = False
+            try:
+                (batch_loss / args.grad_accum_steps).backward()
+            except RuntimeError as exc:
+                if _is_oom_error(exc):
+                    backward_had_oom = True
+                    _recover_from_oom()
+                    if rank == 0:
+                        print(
+                            f"[WARN][TRAIN-OOM] step={global_step} batch_idx={batch_idx} "
+                            "OOM during backward -> skip batch"
+                        )
+                else:
+                    raise
+
+            if world_size > 1 and _is_distributed():
+                bw_oom_tensor = torch.tensor([1 if backward_had_oom else 0], device=device, dtype=torch.int32)
+                dist.all_reduce(bw_oom_tensor, op=dist.ReduceOp.MAX)
+                backward_had_oom = bool(bw_oom_tensor[0].item())
+
+            if backward_had_oom:
+                optimizer.zero_grad(set_to_none=True)
+                accum_steps = 0
+                _recover_from_oom()
+                continue
+
             accum_steps += 1
 
             is_last_batch = batch_idx == (len(dataloader) - 1)
