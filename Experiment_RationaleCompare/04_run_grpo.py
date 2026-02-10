@@ -5,6 +5,7 @@ import math
 import os
 import random
 import sys
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -97,6 +98,211 @@ def build_items(input_file: str, audio_dir: str, include_text: bool) -> List[Grp
             )
 
     return items
+
+
+def _record_key(item: GrpoItem, fallback_idx: int) -> Any:
+    return item.slurp_id if item.slurp_id is not None else f"__row_{fallback_idx}"
+
+
+def _label_intent_key(gold_label: Dict[str, Any]) -> str:
+    scenario = str(gold_label.get("scenario", "")).strip().lower()
+    action = str(gold_label.get("action", "")).strip().lower()
+    key = f"{scenario}_{action}".strip("_")
+    return key or "unknown_intent"
+
+
+def _label_slot_types(gold_label: Dict[str, Any]) -> List[str]:
+    slots: List[str] = []
+    entities = gold_label.get("entities", []) if isinstance(gold_label, dict) else []
+    if isinstance(entities, list):
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            slot = str(ent.get("type", "")).strip().lower()
+            if slot:
+                slots.append(slot)
+    if not slots:
+        slots.append("__none__")
+    return slots
+
+
+def _label_intent_slot_combos(gold_label: Dict[str, Any]) -> List[Tuple[str, str]]:
+    intent = _label_intent_key(gold_label if isinstance(gold_label, dict) else {})
+    slot_types = _label_slot_types(gold_label if isinstance(gold_label, dict) else {})
+    return sorted({(intent, slot) for slot in slot_types})
+
+
+def _expand_items_by_intent_slot_combo(
+    items: List[GrpoItem],
+    per_combo_count: int,
+    seed: int,
+) -> Tuple[List[GrpoItem], Dict[str, int]]:
+    if per_combo_count <= 0:
+        return items, {
+            "num_combos": 0,
+            "requested_per_combo": 0,
+            "selected_record_instances": 0,
+            "selected_unique_records": 0,
+            "total_items_after": len(items),
+        }
+
+    record_to_items: Dict[Any, List[GrpoItem]] = defaultdict(list)
+    record_to_gold: Dict[Any, Dict[str, Any]] = {}
+    for idx, item in enumerate(items):
+        key = _record_key(item, idx)
+        record_to_items[key].append(item)
+        if key not in record_to_gold:
+            record_to_gold[key] = item.gold_label if isinstance(item.gold_label, dict) else {}
+
+    combo_to_records: Dict[Tuple[str, str], List[Any]] = defaultdict(list)
+    for key, gold_label in record_to_gold.items():
+        combos = _label_intent_slot_combos(gold_label)
+        for combo in combos:
+            combo_to_records[combo].append(key)
+
+    rng = random.Random(seed)
+    selected_record_counts: Counter = Counter()
+    for combo in sorted(combo_to_records.keys()):
+        record_keys = combo_to_records[combo]
+        if not record_keys:
+            continue
+        if len(record_keys) >= per_combo_count:
+            chosen = rng.sample(record_keys, per_combo_count)
+        else:
+            # Do not oversample rare buckets; keep all available examples as-is.
+            chosen = list(record_keys)
+        selected_record_counts.update(chosen)
+
+    expanded_items: List[GrpoItem] = []
+    for key, count in selected_record_counts.items():
+        record_items = record_to_items.get(key, [])
+        if not record_items:
+            continue
+        for _ in range(count):
+            expanded_items.extend(record_items)
+
+    rng.shuffle(expanded_items)
+    stats = {
+        "num_combos": len(combo_to_records),
+        "requested_per_combo": per_combo_count,
+        "selected_record_instances": int(sum(selected_record_counts.values())),
+        "selected_unique_records": int(len(selected_record_counts)),
+        "total_items_after": len(expanded_items),
+    }
+    return expanded_items, stats
+
+
+def _select_balanced_record_keys(
+    items: List[GrpoItem],
+    target_records: int,
+    seed: int,
+    per_intent_limit: int = 0,
+) -> set:
+    groups: Dict[Any, Dict[str, Any]] = {}
+    for idx, item in enumerate(items):
+        key = _record_key(item, idx)
+        if key not in groups:
+            intent = _label_intent_key(item.gold_label if isinstance(item.gold_label, dict) else {})
+            slot_types = _label_slot_types(item.gold_label if isinstance(item.gold_label, dict) else {})
+            groups[key] = {
+                "intent": intent,
+                "slot_types": list(set(slot_types)),
+            }
+
+    intent_freq = Counter(group["intent"] for group in groups.values())
+    total_records = len(groups)
+    if per_intent_limit > 0:
+        max_by_intent = sum(min(per_intent_limit, cnt) for cnt in intent_freq.values())
+        if target_records <= 0:
+            target_records = max_by_intent
+        else:
+            target_records = min(target_records, max_by_intent)
+    if target_records <= 0 or target_records >= total_records:
+        return set(groups.keys())
+
+    slot_freq: Counter = Counter()
+    for group in groups.values():
+        slot_freq.update(group["slot_types"])
+
+    rng = random.Random(seed)
+    remaining = set(groups.keys())
+    selected: set = set()
+    selected_intent_counts: Counter = Counter()
+    uncovered_intents = set(intent_freq.keys())
+    uncovered_slots = set(slot_freq.keys())
+
+    # Phase 1: greedy minimum coverage over intents and slot types.
+    while (uncovered_intents or uncovered_slots) and remaining and len(selected) < target_records:
+        best_score = None
+        best_keys: List[Any] = []
+        for key in remaining:
+            group = groups[key]
+            if per_intent_limit > 0 and selected_intent_counts[group["intent"]] >= per_intent_limit:
+                continue
+            new_intent = 1 if group["intent"] in uncovered_intents else 0
+            new_slots = len(set(group["slot_types"]) & uncovered_slots)
+            rarity_bonus = (1.0 / max(1, intent_freq[group["intent"]])) + sum(
+                1.0 / max(1, slot_freq[s]) for s in group["slot_types"]
+            )
+            score = (1000.0 * new_intent) + (100.0 * new_slots) + rarity_bonus
+            if best_score is None or score > best_score:
+                best_score = score
+                best_keys = [key]
+            elif score == best_score:
+                best_keys.append(key)
+        if not best_keys:
+            break
+        chosen = rng.choice(best_keys)
+        selected.add(chosen)
+        remaining.remove(chosen)
+        group = groups[chosen]
+        selected_intent_counts[group["intent"]] += 1
+        uncovered_intents.discard(group["intent"])
+        uncovered_slots.difference_update(group["slot_types"])
+
+    # Phase 2: expand with balanced intent counts and slot coverage smoothing.
+    selected_slot_counts: Counter = Counter()
+    for key in selected:
+        selected_slot_counts.update(groups[key]["slot_types"])
+
+    while len(selected) < target_records and remaining:
+        intents_to_keys: Dict[str, List[Any]] = defaultdict(list)
+        for key in remaining:
+            intent = groups[key]["intent"]
+            if per_intent_limit > 0 and selected_intent_counts[intent] >= per_intent_limit:
+                continue
+            intents_to_keys[intent].append(key)
+        if not intents_to_keys:
+            break
+
+        min_intent_count = min(selected_intent_counts[intent] for intent in intents_to_keys.keys())
+        candidate_intents = [i for i in intents_to_keys.keys() if selected_intent_counts[i] == min_intent_count]
+        max_pool = max(len(intents_to_keys[i]) for i in candidate_intents)
+        candidate_intents = [i for i in candidate_intents if len(intents_to_keys[i]) == max_pool]
+        chosen_intent = rng.choice(candidate_intents)
+
+        best_score = None
+        best_keys = []
+        for key in intents_to_keys[chosen_intent]:
+            group = groups[key]
+            slot_balance_gain = sum(1.0 / (1.0 + selected_slot_counts[s]) for s in group["slot_types"])
+            slot_rarity_bonus = sum(1.0 / max(1, slot_freq[s]) for s in group["slot_types"])
+            score = slot_balance_gain + (0.1 * slot_rarity_bonus)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_keys = [key]
+            elif score == best_score:
+                best_keys.append(key)
+        if not best_keys:
+            break
+        chosen = rng.choice(best_keys)
+        selected.add(chosen)
+        remaining.remove(chosen)
+        group = groups[chosen]
+        selected_intent_counts[group["intent"]] += 1
+        selected_slot_counts.update(group["slot_types"])
+
+    return selected
 
 
 def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
@@ -607,6 +813,41 @@ def main() -> None:
         help="Disable text-mode samples and train with audio-mode samples only.",
     )
     parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument(
+        "--balanced_train_records",
+        "--balanced-train-records",
+        dest="balanced_train_records",
+        type=int,
+        default=2000,
+        help=(
+            "If >0, pick a balanced training subset by slurp_id count "
+            "(intent/slot coverage aware) before training. Set 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--balanced_per_intent",
+        "--balanced-per-intent",
+        dest="balanced_per_intent",
+        type=int,
+        default=0,
+        help=(
+            "If >0, select roughly N records per intent (slot-aware), "
+            "instead of controlling by global record count."
+        ),
+    )
+    parser.add_argument(
+        "--balanced_per_intent_slot_combo",
+        "--balanced-per-intent-slot-combo",
+        "--per_combo",
+        "--per-combo",
+        dest="balanced_per_intent_slot_combo",
+        type=int,
+        default=0,
+        help=(
+            "If >0, treat each (intent, slot_type) pair as one bucket and use up to N records "
+            "per bucket (rare buckets keep all available records, no oversampling)."
+        ),
+    )
     parser.add_argument("--group_size", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -708,6 +949,12 @@ def main() -> None:
         raise ValueError("--early_stopping_min_epochs must be >= 0")
     if args.grad_accum_steps < 1:
         raise ValueError("--grad_accum_steps must be >= 1")
+    if args.balanced_train_records < 0:
+        raise ValueError("--balanced_train_records must be >= 0")
+    if args.balanced_per_intent < 0:
+        raise ValueError("--balanced_per_intent must be >= 0")
+    if args.balanced_per_intent_slot_combo < 0:
+        raise ValueError("--balanced_per_intent_slot_combo must be >= 0")
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -787,6 +1034,44 @@ def main() -> None:
         print(f"[WARN] metadata_file not found: {metadata_path} (DB Definitions will be empty)")
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
+    if args.balanced_per_intent_slot_combo > 0:
+        total_items_before = len(items)
+        unique_records_before = len({_record_key(x, i) for i, x in enumerate(items)})
+        items, combo_stats = _expand_items_by_intent_slot_combo(
+            items=items,
+            per_combo_count=args.balanced_per_intent_slot_combo,
+            seed=args.seed,
+        )
+        if rank == 0:
+            print(
+                "[GRPO] intent-slot combo balancing enabled: "
+                f"per_combo={args.balanced_per_intent_slot_combo} "
+                f"combos={combo_stats['num_combos']} "
+                f"record_instances={combo_stats['selected_record_instances']} "
+                f"unique_records={combo_stats['selected_unique_records']}/{unique_records_before} "
+                f"items={combo_stats['total_items_after']}/{total_items_before}"
+            )
+    elif args.balanced_train_records > 0 or args.balanced_per_intent > 0:
+        total_items_before = len(items)
+        unique_records_before = len({_record_key(x, i) for i, x in enumerate(items)})
+        # When per-intent mode is requested, let per_intent_limit determine effective size.
+        effective_target_records = 0 if args.balanced_per_intent > 0 else args.balanced_train_records
+        selected_keys = _select_balanced_record_keys(
+            items=items,
+            target_records=effective_target_records,
+            seed=args.seed,
+            per_intent_limit=args.balanced_per_intent,
+        )
+        items = [x for i, x in enumerate(items) if _record_key(x, i) in selected_keys]
+        if rank == 0:
+            unique_records_after = len({_record_key(x, i) for i, x in enumerate(items)})
+            print(
+                "[GRPO] balanced subset enabled: "
+                f"requested_total={args.balanced_train_records} "
+                f"per_intent={args.balanced_per_intent} "
+                f"selected_records={unique_records_after}/{unique_records_before} "
+                f"items={len(items)}/{total_items_before}"
+            )
     if args.smoke:
         items = items[: max(1, args.smoke_train_samples)]
 
@@ -823,6 +1108,9 @@ def main() -> None:
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke} "
+            f"balanced_train_records={args.balanced_train_records} "
+            f"balanced_per_intent={args.balanced_per_intent} "
+            f"balanced_per_intent_slot_combo={args.balanced_per_intent_slot_combo} "
             f"early_stopping={args.early_stopping} es_metric={args.early_stopping_metric} "
             f"es_patience={args.early_stopping_patience} es_min_epochs={args.early_stopping_min_epochs}"
         )
