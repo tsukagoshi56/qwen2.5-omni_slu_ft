@@ -1830,14 +1830,14 @@ def main():
         trust_remote_code=True,
     ).to(device)
 
-    # Keep the original lightweight FT setup by default.
-    model.audio_tower.requires_grad_(args.train_audio_encoder)
-    model.multi_modal_projector.requires_grad_(False)
+    # Match the original FT behavior: train both audio tower and multimodal projector.
+    model.audio_tower.requires_grad_(True)
+    model.multi_modal_projector.requires_grad_(True)
     if rank == 0:
         logger.info(
             "Trainability | audio_tower=%s, multi_modal_projector=%s",
-            args.train_audio_encoder,
-            False,
+            True,
+            True,
         )
 
     training_args = TrainingArguments(

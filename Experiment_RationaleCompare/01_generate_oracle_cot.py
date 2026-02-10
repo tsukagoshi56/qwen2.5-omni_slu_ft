@@ -300,6 +300,31 @@ def _spawn_workers(num_workers: int, base_args: List[str]) -> List[subprocess.Po
     return procs
 
 
+def _extract_asr_1best_text(record: Dict[str, Any]) -> str:
+    hyps = record.get("asr_hypotheses")
+    if not isinstance(hyps, list) or not hyps:
+        return ""
+    first = hyps[0]
+    if isinstance(first, str):
+        return first.strip()
+    if not isinstance(first, dict):
+        return ""
+    for key in ("text", "transcript", "hypothesis", "value"):
+        value = first.get(key)
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def _select_input_text(record: Dict[str, Any], use_asr_transcript: bool) -> Tuple[str, str]:
+    if use_asr_transcript:
+        return _extract_asr_1best_text(record), "asr_1best"
+    text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
+    return text, "gold_transcript"
+
+
 def _generate_with_retries(
     prompt: str,
     args: argparse.Namespace,
@@ -355,7 +380,7 @@ def _run_single(
     slot_order: List[str],
     args: argparse.Namespace,
 ) -> Optional[Tuple[int, Dict[str, Any], str, str, str]]:
-    gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
+    gold_text, text_source = _select_input_text(record, args.asr_transcript)
     if not gold_text:
         return None
     gold_label = label_from_record(record)
@@ -388,6 +413,7 @@ def _run_single(
         "rationale_text": output.strip(),
         "method": "or-cot",
         "mode": "text",
+        "input_text_source": text_source,
         "model_name": args.model_name,
         "provider": "deepseek" if _is_deepseek_model(args.model_name) else "openai",
     }
@@ -427,6 +453,13 @@ def main() -> None:
     parser.add_argument("--no_spawn_workers", action="store_true", help="Do not auto-spawn worker processes.")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
+    parser.add_argument(
+        "--asr_transcript",
+        "--asr-transcript",
+        dest="asr_transcript",
+        action="store_true",
+        help='Use asr_hypotheses[0]["text"] (1-best) as text input instead of sentence/text.',
+    )
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
     args.model_name = _canonicalize_model_name(args.model_name)

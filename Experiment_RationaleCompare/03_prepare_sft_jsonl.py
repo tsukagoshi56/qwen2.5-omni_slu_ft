@@ -4,6 +4,10 @@ import os
 from typing import Any, Dict, List, Tuple
 
 from common import label_from_record, read_jsonl, write_jsonl
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 
 def _key_for_dedup(row: Dict[str, Any]) -> Tuple[str, str, str]:
@@ -21,6 +25,7 @@ def main() -> None:
     parser.add_argument("--method", type=str, default="auto", help="auto|vanilla|or-cot|sf-cot")
     parser.add_argument("--dedup", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--no_tqdm", action="store_true", help="Disable tqdm progress bars.")
     args = parser.parse_args()
 
     files = [p.strip() for p in args.input_files.split(",") if p.strip()]
@@ -28,7 +33,15 @@ def main() -> None:
 
     for path in files:
         items = read_jsonl(path)
-        for record in items:
+        record_iter = items
+        if tqdm is not None and not args.no_tqdm:
+            record_iter = tqdm(
+                items,
+                total=len(items),
+                desc=f"03_prepare_sft [{os.path.basename(path)}]",
+                unit="row",
+            )
+        for record in record_iter:
             gold_label = record.get("gold_label")
             if isinstance(gold_label, dict):
                 final_label = gold_label
@@ -60,7 +73,10 @@ def main() -> None:
     if args.dedup:
         seen = set()
         deduped = []
-        for row in rows:
+        row_iter = rows
+        if tqdm is not None and not args.no_tqdm:
+            row_iter = tqdm(rows, total=len(rows), desc="03_prepare_sft [dedup]", unit="row")
+        for row in row_iter:
             key = _key_for_dedup(row)
             if key in seen:
                 continue

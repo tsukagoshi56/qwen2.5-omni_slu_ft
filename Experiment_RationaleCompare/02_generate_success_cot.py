@@ -162,6 +162,31 @@ def _spawn_workers(num_workers: int, base_args: List[str]) -> List[subprocess.Po
     return procs
 
 
+def _extract_asr_1best_text(record: Dict[str, Any]) -> str:
+    hyps = record.get("asr_hypotheses")
+    if not isinstance(hyps, list) or not hyps:
+        return ""
+    first = hyps[0]
+    if isinstance(first, str):
+        return first.strip()
+    if not isinstance(first, dict):
+        return ""
+    for key in ("text", "transcript", "hypothesis", "value"):
+        value = first.get(key)
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def _select_input_text(record: Dict[str, Any], use_asr_transcript: bool) -> Tuple[str, str]:
+    if use_asr_transcript:
+        return _extract_asr_1best_text(record), "asr_1best"
+    text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
+    return text, "gold_transcript"
+
+
 def _generate_audio_local(
     processor: AutoProcessor,
     model: Qwen2AudioForConditionalGeneration,
@@ -580,6 +605,13 @@ def main() -> None:
     parser.add_argument("--success_match", type=str, choices=["full", "scenario_action", "intent"], default="full")
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--retry_sleep", type=float, default=2.0)
+    parser.add_argument(
+        "--asr_transcript",
+        "--asr-transcript",
+        dest="asr_transcript",
+        action="store_true",
+        help='Use asr_hypotheses[0]["text"] (1-best) for text-mode input instead of sentence/text.',
+    )
     parser.add_argument("--debug", action="store_true", help="Print extra debug info.")
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
@@ -721,7 +753,7 @@ def main() -> None:
         )
 
     for record in record_iter:
-        gold_text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
+        gold_text, text_source = _select_input_text(record, args.asr_transcript)
         gold_label = label_from_record(record)
         recordings = record.get("recordings", []) if isinstance(record.get("recordings"), list) else []
 
@@ -803,6 +835,7 @@ def main() -> None:
             raw_row = {
                 "slurp_id": record.get("slurp_id"),
                 "sentence": gold_text,
+                "input_text_source": text_source,
                 "recordings": recordings,
                 "mode": mode,
                 "method": "sf-cot",
