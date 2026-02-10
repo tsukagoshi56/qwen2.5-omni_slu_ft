@@ -19,6 +19,10 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
 
 from common import (
     compare_labels,
@@ -715,6 +719,8 @@ def evaluate_model(
     collect_predictions: bool = False,
     preview_count: int = 0,
     preview_prefix: str = "[EVAL-PREVIEW]",
+    show_progress: bool = False,
+    progress_desc: str = "eval",
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     eval_model = _unwrap_model(model)
     was_training = eval_model.training
@@ -733,8 +739,12 @@ def evaluate_model(
     local_prediction_rows: List[Dict[str, Any]] = []
     local_oom_skips = 0.0
 
+    iterable = local_items
+    if show_progress and rank == 0 and tqdm is not None:
+        iterable = tqdm(local_items, desc=progress_desc, unit="sample")
+
     with torch.no_grad():
-        for idx, item in enumerate(local_items):
+        for idx, item in enumerate(iterable):
             try:
                 audio = None
                 if item.audio_path:
@@ -1766,6 +1776,8 @@ def main() -> None:
                     world_size=world_size,
                     debug=args.debug,
                     debug_max_chars=args.debug_max_chars,
+                    show_progress=True,
+                    progress_desc=f"test@step{global_step}",
                 )
                 if rank == 0:
                     print(
@@ -1842,6 +1854,8 @@ def main() -> None:
             debug=args.debug,
             debug_max_chars=args.debug_max_chars,
             collect_predictions=True,
+            show_progress=True,
+            progress_desc="test-final",
         )
         if rank == 0:
             print(
