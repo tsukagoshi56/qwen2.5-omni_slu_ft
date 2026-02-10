@@ -59,8 +59,25 @@ python Experiment_RationaleCompare/02_generate_success_cot.py \
 - **Text mode**: uses gold transcript only (DeepSeek API default, same decoding defaults as 01)
 - **Audio mode**: uses audio only (local Qwen2Audio). Enable with `--modes text,audio`.
 - **Filtered** file keeps only correct predictions (configurable via `--success_match`)
+- Success scoring uses a single scalar:
+  - `success_score = format_ok + match_ok + has_gold_intent_candidate + slot_candidate_coverage` (0.0 to 4.0)
+  - `correct` is `success_score >= 4.0`
 
 By default, **text‑mode filtered samples omit `recordings`** to force text‑only inputs in SFT.
+
+### Re-score from existing raw output
+
+If you already generated `success_cot_raw.jsonl`, you can recompute success metrics (including intent/slot candidates) without re-calling models:
+
+```bash
+python Experiment_RationaleCompare/02_generate_success_cot.py \
+  --rescore_raw_file Experiment_RationaleCompare/success_cot_raw.jsonl
+```
+
+- If `--output_file` / `--filtered_file` are omitted in rescore mode, outputs are auto-written as:
+  - `<raw>.rescored.jsonl`
+  - `<raw>.rescored.filtered.jsonl`
+- You can override paths explicitly with `--output_file` and `--filtered_file`.
 
 ---
 

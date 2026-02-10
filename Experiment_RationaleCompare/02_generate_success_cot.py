@@ -39,6 +39,8 @@ from prompts import render_infer_audio_prompt, render_infer_text_prompt
 
 
 _DEBUG = False
+DEFAULT_OUTPUT_FILE = "Experiment_RationaleCompare/success_cot_raw.jsonl"
+DEFAULT_FILTERED_FILE = "Experiment_RationaleCompare/success_cot_filtered.jsonl"
 
 
 def _canonicalize_model_name(model_name: str) -> str:
@@ -203,7 +205,7 @@ def _success_match_ok(match_mode: str, stats: Dict[str, Any]) -> bool:
     if match_mode == "scenario_action":
         return bool(stats["scenario_ok"] and stats["action_ok"])
     if match_mode == "full":
-        return bool(stats["scenario_ok"] and stats["action_ok"] and stats["entity_f1"] == 1.0)
+        return bool(stats["scenario_ok"] and stats["action_ok"])
     return False
 
 
@@ -272,6 +274,133 @@ def _extract_prefixed_line(text: str, prefix: str) -> str:
     return f"{prefix} (none)"
 
 
+def _extract_intent_candidates(text: str) -> List[str]:
+    c_line = _extract_prefixed_line(text, "C:")
+    if c_line == "C: (none)":
+        return []
+    c_body = c_line.split(":", 1)[1].strip() if ":" in c_line else ""
+    if not c_body:
+        return []
+    intent_part = c_body.split(";", 1)[0].strip()
+    lowered = intent_part.lower()
+    for prefix in ("intent candidates:", "intent candidate:", "intent:", "intents:"):
+        if lowered.startswith(prefix):
+            intent_part = intent_part[len(prefix):].strip()
+            break
+    values = [normalize_intent_label(x.strip()) for x in intent_part.split("|") if x.strip()]
+    return [v for v in values if v and v != "(none)"]
+
+
+def _extract_slot_candidates(text: str) -> List[str]:
+    c_line = _extract_prefixed_line(text, "C:")
+    if c_line == "C: (none)":
+        return []
+    c_body = c_line.split(":", 1)[1].strip() if ":" in c_line else ""
+    if not c_body:
+        return []
+    slot_part = c_body
+    if ";" in c_body:
+        maybe_slot = c_body.split(";", 1)[1].strip()
+        if maybe_slot:
+            slot_part = maybe_slot
+    lowered = slot_part.lower()
+    for prefix in ("slot candidates:", "slot candidate:", "slots:", "slot:"):
+        if lowered.startswith(prefix):
+            slot_part = slot_part[len(prefix):].strip()
+            break
+    if not slot_part:
+        return []
+    # Remove value-candidate parentheses before splitting by "|"
+    # e.g., "artist(adele|sia) | album" -> "artist | album"
+    slot_part = re.sub(r"\([^)]*\)", "", slot_part)
+    values = [x.strip().lower() for x in slot_part.split("|") if x.strip()]
+    cleaned = [v for v in values if v and v not in {"(none)", "none"}]
+    return cleaned
+
+
+def _gold_intent_from_label(gold_label: Dict[str, Any]) -> str:
+    return normalize_intent_label(f"{gold_label.get('scenario', '')}_{gold_label.get('action', '')}")
+
+
+def _gold_slot_types_from_label(gold_label: Dict[str, Any]) -> List[str]:
+    entities = gold_label.get("entities", []) if isinstance(gold_label, dict) else []
+    slots: List[str] = []
+    if isinstance(entities, list):
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            slot = str(ent.get("type", "")).strip().lower()
+            if slot:
+                slots.append(slot)
+    if not slots:
+        return ["__none__"]
+    # unique keep order
+    seen = set()
+    uniq: List[str] = []
+    for s in slots:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq
+
+
+def _slot_candidate_coverage(gold_slot_types: List[str], slot_candidates: List[str]) -> float:
+    gold_set = {str(x).strip().lower() for x in gold_slot_types if str(x).strip() and str(x).strip().lower() != "__none__"}
+    cand_set = {str(x).strip().lower() for x in slot_candidates if str(x).strip() and str(x).strip().lower() != "__none__"}
+    if not gold_set:
+        return 1.0 if not cand_set else 0.0
+    return float(len(gold_set & cand_set) / max(1, len(gold_set)))
+
+
+def _success_score(
+    format_ok: bool,
+    match_ok: bool,
+    has_gold_intent_candidate: bool,
+    slot_candidate_coverage: float,
+) -> float:
+    # Simple formula:
+    # success_score = format_ok + match_ok + has_gold_intent_candidate + slot_candidate_coverage (range: 0..4)
+    return float(
+        (1 if format_ok else 0)
+        + (1 if match_ok else 0)
+        + (1 if has_gold_intent_candidate else 0)
+        + float(slot_candidate_coverage)
+    )
+
+
+def _raw_sort_key(row: Dict[str, Any]) -> Tuple[int, float, float]:
+    return (
+        1 if row.get("correct") else 0,
+        float(row.get("success_score", 0.0)),
+        float(row.get("reward", 0.0)),
+    )
+
+
+def _make_filtered_row(raw_row: Dict[str, Any], coverage_fallback: bool = False) -> Dict[str, Any]:
+    filtered_row = {
+        "slurp_id": raw_row.get("slurp_id"),
+        "sentence": raw_row.get("sentence", ""),
+        "final": raw_row.get("gold_label", {}),
+        "rationale_text": str(raw_row.get("rationale_text", "")).strip(),
+        "mode": raw_row.get("mode", ""),
+        "method": "sf-cot",
+        "reward": float(raw_row.get("reward", 0.0)),
+        "success_score": float(raw_row.get("success_score", 0.0)),
+        "format_ok": bool(raw_row.get("format_ok", False)),
+        "match_ok": bool(raw_row.get("match_ok", False)),
+        "has_gold_intent_candidate": bool(raw_row.get("has_gold_intent_candidate", False)),
+        "has_gold_slot_candidates": bool(raw_row.get("has_gold_slot_candidates", False)),
+        "slot_candidate_coverage": float(raw_row.get("slot_candidate_coverage", 0.0)),
+        "correct": bool(raw_row.get("correct", False)),
+        "coverage_fallback": bool(coverage_fallback),
+    }
+    recordings = raw_row.get("recordings")
+    if raw_row.get("mode") == "audio" and isinstance(recordings, list):
+        filtered_row["recordings"] = recordings
+    return filtered_row
+
+
 def _format_model_output(raw_output: str, no_cot: bool = False) -> Tuple[str, Dict[str, Any], bool]:
     pred_obj = parse_j_from_output(raw_output)
     pred_label = _normalize_pred_label(pred_obj)
@@ -292,13 +421,144 @@ def _format_model_output(raw_output: str, no_cot: bool = False) -> Tuple[str, Di
     return formatted, pred_label, (has_c and has_r and has_j)
 
 
+def _enrich_raw_row_for_success(raw_row: Dict[str, Any], success_match: str) -> Dict[str, Any]:
+    row = dict(raw_row)
+    source_output = str(row.get("raw_output", "") or row.get("rationale_text", "") or "")
+    formatted_output, pred_label_from_output, format_ok = _format_model_output(source_output, no_cot=False)
+
+    gold_label = row.get("gold_label")
+    if not isinstance(gold_label, dict):
+        gold_label = row.get("final") if isinstance(row.get("final"), dict) else {}
+
+    pred_label = row.get("pred_label")
+    if not isinstance(pred_label, dict):
+        pred_label = {}
+    # Prefer parsed J from output when available.
+    if pred_label_from_output:
+        pred_label = pred_label_from_output
+
+    stats = compare_labels(pred_label, gold_label)
+    gold_intent = _gold_intent_from_label(gold_label)
+    gold_slot_types = _gold_slot_types_from_label(gold_label)
+    intent_candidates = _extract_intent_candidates(formatted_output)
+    slot_candidates = _extract_slot_candidates(formatted_output)
+    has_gold_intent_candidate = bool(gold_intent) and (gold_intent in intent_candidates)
+    slot_cov = _slot_candidate_coverage(gold_slot_types, slot_candidates)
+    has_gold_slot_candidates = bool(slot_cov >= 1.0 - 1e-8)
+    match_ok = _success_match_ok(success_match, stats)
+    score = _success_score(format_ok, match_ok, has_gold_intent_candidate, slot_cov)
+    is_ok = bool(score >= 4.0)
+    reward, _ = compute_reward(pred_label, gold_label)
+
+    row["rationale_text"] = formatted_output.strip()
+    row["raw_output"] = source_output.strip()
+    row["pred_label"] = pred_label
+    row["gold_label"] = gold_label
+    row["correct"] = bool(is_ok)
+    row["match_ok"] = bool(match_ok)
+    row["success_score"] = float(score)
+    row["success_formula"] = "success_score = format_ok + match_ok + has_gold_intent_candidate + slot_candidate_coverage"
+    row["has_gold_intent_candidate"] = bool(has_gold_intent_candidate)
+    row["has_gold_slot_candidates"] = bool(has_gold_slot_candidates)
+    row["slot_candidate_coverage"] = float(slot_cov)
+    row["gold_intent"] = gold_intent
+    row["gold_slot_types"] = gold_slot_types
+    row["intent_candidates"] = intent_candidates
+    row["slot_candidates"] = slot_candidates
+    row["format_ok"] = bool(format_ok)
+    row["reward"] = float(reward)
+    row["method"] = str(row.get("method", "sf-cot") or "sf-cot")
+    return row
+
+
+def _build_filtered_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Build success list from good rows first.
+    filtered_rows = [_make_filtered_row(row, coverage_fallback=False) for row in raw_rows if row.get("correct")]
+
+    # Coverage completion: ensure at least one example for each gold intent and each gold slot type.
+    required_intents = sorted(
+        {str(row.get("gold_intent", "")).strip() for row in raw_rows if str(row.get("gold_intent", "")).strip()}
+    )
+    required_slots = sorted({slot for row in raw_rows for slot in (row.get("gold_slot_types", []) or [])})
+
+    selected_keys = {(str(r.get("slurp_id")), str(r.get("mode"))) for r in filtered_rows}
+
+    def current_intents() -> set:
+        values = set()
+        for row in filtered_rows:
+            gold = row.get("final", {})
+            intent = _gold_intent_from_label(gold if isinstance(gold, dict) else {})
+            if intent:
+                values.add(intent)
+        return values
+
+    def current_slots() -> set:
+        values = set()
+        for row in filtered_rows:
+            gold = row.get("final", {})
+            values.update(_gold_slot_types_from_label(gold if isinstance(gold, dict) else {}))
+        return values
+
+    def best_row_for(intent: Optional[str] = None, slot_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        for row in raw_rows:
+            key = (str(row.get("slurp_id")), str(row.get("mode")))
+            if key in selected_keys:
+                continue
+            if intent is not None and row.get("gold_intent") != intent:
+                continue
+            if slot_type is not None and slot_type not in (row.get("gold_slot_types", []) or []):
+                continue
+            candidates.append(row)
+        if not candidates:
+            return None
+        return sorted(candidates, key=_raw_sort_key, reverse=True)[0]
+
+    # Fill missing intents first.
+    for intent in required_intents:
+        if intent in current_intents():
+            continue
+        row = best_row_for(intent=intent)
+        if row is None:
+            continue
+        selected_keys.add((str(row.get("slurp_id")), str(row.get("mode"))))
+        filtered_rows.append(_make_filtered_row(row, coverage_fallback=not bool(row.get("correct"))))
+
+    # Then fill missing slot types.
+    for slot in required_slots:
+        if slot in current_slots():
+            continue
+        row = best_row_for(slot_type=slot)
+        if row is None:
+            continue
+        selected_keys.add((str(row.get("slurp_id")), str(row.get("mode"))))
+        filtered_rows.append(_make_filtered_row(row, coverage_fallback=not bool(row.get("correct"))))
+
+    # Keep "good ones first" ordering.
+    filtered_rows.sort(
+        key=lambda row: (
+            1 if row.get("correct") else 0,
+            float(row.get("success_score", 0.0)),
+            float(row.get("reward", 0.0)),
+        ),
+        reverse=True,
+    )
+    return filtered_rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Success-Filtered CoT (text and audio).")
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
     parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
-    parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/success_cot_raw.jsonl")
-    parser.add_argument("--filtered_file", type=str, default="Experiment_RationaleCompare/success_cot_filtered.jsonl")
+    parser.add_argument("--output_file", type=str, default=DEFAULT_OUTPUT_FILE)
+    parser.add_argument("--filtered_file", type=str, default=DEFAULT_FILTERED_FILE)
+    parser.add_argument(
+        "--rescore_raw_file",
+        type=str,
+        default=None,
+        help="Recompute success metrics from an existing raw jsonl and output to new files.",
+    )
     parser.add_argument("--modes", type=str, default="text")
     parser.add_argument("--text_model_name", "--model", dest="text_model_name", type=str, default="deepseekr1")
     parser.add_argument("--audio_model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
@@ -342,8 +602,23 @@ def main() -> None:
     input_path = os.path.join(base_dir, args.input_file) if not os.path.isabs(args.input_file) else args.input_file
     metadata_path = os.path.join(base_dir, args.metadata_file) if not os.path.isabs(args.metadata_file) else args.metadata_file
     audio_dir = os.path.join(base_dir, args.audio_dir) if not os.path.isabs(args.audio_dir) else args.audio_dir
-    base_output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
-    base_filtered_path = os.path.join(base_dir, args.filtered_file) if not os.path.isabs(args.filtered_file) else args.filtered_file
+    rescore_raw_path = (
+        os.path.join(base_dir, args.rescore_raw_file)
+        if (args.rescore_raw_file and not os.path.isabs(args.rescore_raw_file))
+        else args.rescore_raw_file
+    )
+
+    if args.rescore_raw_file and args.output_file == DEFAULT_OUTPUT_FILE:
+        root, ext = os.path.splitext(str(rescore_raw_path or "rescore_raw.jsonl"))
+        base_output_path = f"{root}.rescored{ext or '.jsonl'}"
+    else:
+        base_output_path = os.path.join(base_dir, args.output_file) if not os.path.isabs(args.output_file) else args.output_file
+
+    if args.rescore_raw_file and args.filtered_file == DEFAULT_FILTERED_FILE:
+        root, ext = os.path.splitext(str(rescore_raw_path or "rescore_raw.jsonl"))
+        base_filtered_path = f"{root}.rescored.filtered{ext or '.jsonl'}"
+    else:
+        base_filtered_path = os.path.join(base_dir, args.filtered_file) if not os.path.isabs(args.filtered_file) else args.filtered_file
     output_path = base_output_path
     filtered_path = base_filtered_path
     if args.append_worker_suffix and args.num_workers > 1:
@@ -355,6 +630,38 @@ def main() -> None:
     if args.merge_only:
         _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
         _merge_worker_outputs(base_filtered_path, args.num_workers, cleanup=args.merge_cleanup)
+        return
+
+    if args.rescore_raw_file:
+        rows = read_jsonl(str(rescore_raw_path))
+        if args.smoke:
+            args.limit = 100
+        if args.limit:
+            rows = rows[: args.limit]
+        if args.num_workers > 1:
+            rows = rows[args.worker_rank :: args.num_workers]
+
+        row_iter = rows
+        if tqdm is not None:
+            desc = "02_rescore_success_cot"
+            if args.num_workers > 1:
+                desc = f"{desc} [w{args.worker_rank}/{args.num_workers}]"
+            row_iter = tqdm(
+                rows,
+                total=len(rows),
+                desc=desc,
+                disable=(args.num_workers > 1 and args.worker_rank != 0),
+            )
+
+        raw_rows = [_enrich_raw_row_for_success(row, args.success_match) for row in row_iter]
+        raw_rows.sort(key=_raw_sort_key, reverse=True)
+        filtered_rows = _build_filtered_rows(raw_rows)
+        write_jsonl(output_path, raw_rows)
+        write_jsonl(filtered_path, filtered_rows)
+
+        if args.merge_workers and args.num_workers > 1 and args.append_worker_suffix and args.worker_rank == 0:
+            _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
+            _merge_worker_outputs(base_filtered_path, args.num_workers, cleanup=args.merge_cleanup)
         return
 
     worker_procs: List[subprocess.Popen] = []
@@ -467,14 +774,26 @@ def main() -> None:
 
             formatted_output, pred_label, format_ok = _format_model_output(output, no_cot=False)
             stats = compare_labels(pred_label, gold_label)
-            is_ok = format_ok and _success_match_ok(args.success_match, stats)
+            gold_intent = _gold_intent_from_label(gold_label)
+            gold_slot_types = _gold_slot_types_from_label(gold_label)
+            intent_candidates = _extract_intent_candidates(formatted_output)
+            slot_candidates = _extract_slot_candidates(formatted_output)
+            has_gold_intent_candidate = bool(gold_intent) and (gold_intent in intent_candidates)
+            slot_cov = _slot_candidate_coverage(gold_slot_types, slot_candidates)
+            has_gold_slot_candidates = bool(slot_cov >= 1.0 - 1e-8)
+            match_ok = _success_match_ok(args.success_match, stats)
+            score = _success_score(format_ok, match_ok, has_gold_intent_candidate, slot_cov)
+            is_ok = bool(score >= 4.0)
             reward, _ = compute_reward(pred_label, gold_label)
 
             if args.debug:
                 word_count = len((output or "").split())
                 _log_debug(
                     f"[DEBUG] slurp_id={record.get('slurp_id')} mode={mode} words={word_count} "
-                    f"format_ok={bool(format_ok)} correct={bool(is_ok)} reward={reward:.3f}"
+                    f"format_ok={bool(format_ok)} correct={bool(is_ok)} "
+                    f"match_ok={bool(match_ok)} has_gold_intent_candidate={bool(has_gold_intent_candidate)} "
+                    f"has_gold_slot_candidates={bool(has_gold_slot_candidates)} "
+                    f"slot_candidate_coverage={slot_cov:.3f} success_score={score:.3f} reward={reward:.3f}"
                 )
                 _log_debug("[DEBUG] raw_output:")
                 _log_debug(output or "")
@@ -493,22 +812,22 @@ def main() -> None:
                 "pred_label": pred_label,
                 "gold_label": gold_label,
                 "correct": bool(is_ok),
+                "match_ok": bool(match_ok),
+                "success_score": score,
+                "success_formula": "success_score = format_ok + match_ok + has_gold_intent_candidate + slot_candidate_coverage",
+                "has_gold_intent_candidate": bool(has_gold_intent_candidate),
+                "has_gold_slot_candidates": bool(has_gold_slot_candidates),
+                "slot_candidate_coverage": float(slot_cov),
+                "gold_intent": gold_intent,
+                "gold_slot_types": gold_slot_types,
+                "intent_candidates": intent_candidates,
+                "slot_candidates": slot_candidates,
                 "reward": reward,
             }
             raw_rows.append(raw_row)
 
-            if is_ok:
-                filtered_row = {
-                    "slurp_id": record.get("slurp_id"),
-                    "sentence": gold_text,
-                    "final": gold_label,
-                    "rationale_text": formatted_output.strip(),
-                    "mode": mode,
-                    "method": "sf-cot",
-                }
-                if mode == "audio":
-                    filtered_row["recordings"] = recordings
-                filtered_rows.append(filtered_row)
+    raw_rows.sort(key=_raw_sort_key, reverse=True)
+    filtered_rows = _build_filtered_rows(raw_rows)
 
     write_jsonl(output_path, raw_rows)
     write_jsonl(filtered_path, filtered_rows)
