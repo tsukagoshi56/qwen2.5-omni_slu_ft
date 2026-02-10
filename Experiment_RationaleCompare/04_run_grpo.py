@@ -1533,6 +1533,8 @@ def main() -> None:
     no_improve_count = 0
     early_stopped = False
     reached_max_steps = False
+    reward_running_sum = 0.0
+    reward_running_count = 0
     if args.eval_file:
         init_eval_items = param_debug_eval_items if args.param_debug else eval_items
         init_eval_metrics, _ = evaluate_model(
@@ -1800,6 +1802,10 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
                 accum_steps = 0
 
+            if rank == 0 and reward_values:
+                reward_running_sum += float(sum(reward_values))
+                reward_running_count += len(reward_values)
+
             if rank == 0 and args.log_every and global_step % args.log_every == 0:
                 if reward_values:
                     reward_mean = sum(reward_values) / len(reward_values)
@@ -1807,6 +1813,9 @@ def main() -> None:
                     reward_max = max(reward_values)
                 else:
                     reward_mean = reward_min = reward_max = 0.0
+                reward_mean_cum = (
+                    reward_running_sum / reward_running_count if reward_running_count > 0 else 0.0
+                )
                 adv_mean = (sum(advantage_values) / len(advantage_values)) if advantage_values else 0.0
                 kl_mean = (sum(kl_values) / len(kl_values)) if kl_values else 0.0
                 logprob_mean = (sum(logprob_values) / len(logprob_values)) if logprob_values else 0.0
@@ -1819,6 +1828,7 @@ def main() -> None:
                 print(
                     f"[GRPO] step={global_step} loss={batch_loss.item():.4f} samples={sample_count} "
                     f"reward_mean={reward_mean:.4f} reward_min={reward_min:.4f} reward_max={reward_max:.4f} "
+                    f"reward_mean_cum={reward_mean_cum:.4f} reward_seen={reward_running_count} "
                     f"adv_mean={adv_mean:.4f} kl_mean={kl_mean:.4f} "
                     f"logprob_mean={logprob_mean:.4f} ref_logprob_mean={ref_logprob_mean:.4f} "
                     f"sample_loss_mean={sample_loss_mean:.4f}"
