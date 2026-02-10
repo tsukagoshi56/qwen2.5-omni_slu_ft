@@ -21,22 +21,14 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
 from common import (
-    build_db_definitions,
     compare_labels,
     compute_reward,
     label_from_record,
-    load_metadata,
     normalize_intent_label,
     parse_j_from_output,
     read_jsonl,
     resolve_audio_path,
     split_intent,
-)
-from prompts import (
-    render_infer_audio_prompt,
-    render_infer_audio_prompt_no_cot,
-    render_infer_text_prompt,
-    render_infer_text_prompt_no_cot,
 )
 DEFAULT_ONLY_GRPO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
 
@@ -325,14 +317,49 @@ def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
 
 
 def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: bool = False) -> str:
+    # Compact prompt for GRPO: instruction + input + output format only.
+    # DB Definitions and detailed Rules are intentionally omitted.
+    _ = db_definitions
+    output_schema = (
+        '{"Intent": "<scenario>_<action>", "entities": '
+        '[{"type": "<entity_type>", "filler": "<entity_value>"}, ...]}'
+    )
     if mode == "audio":
         if no_cot:
-            return render_infer_audio_prompt_no_cot(db_definitions)
-        return render_infer_audio_prompt(db_definitions)
+            return (
+                "System: Predict SLU labels from audio.\n\n"
+                "[Input Data]\n"
+                "- Audio: <AUDIO>\n\n"
+                "Output Format:\n"
+                f"J: {output_schema}"
+            )
+        return (
+            "System: Predict SLU labels from audio.\n\n"
+            "[Input Data]\n"
+            "- Audio: <AUDIO>\n\n"
+            "Output Format:\n"
+            "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+            "R: label1!reason1; label2!reason2; ...\n"
+            f"J: {output_schema}"
+        )
     text = str(sentence or "").strip()
     if no_cot:
-        return render_infer_text_prompt_no_cot(db_definitions, text)
-    return render_infer_text_prompt(db_definitions, text)
+        return (
+            "System: Predict SLU labels from transcript.\n\n"
+            "[Input Data]\n"
+            f"- Transcript: {text}\n\n"
+            "Output Format:\n"
+            f"J: {output_schema}"
+        )
+    return (
+        "System: Predict SLU labels from transcript.\n\n"
+        "[Input Data]\n"
+        f"- Transcript: {text}\n\n"
+        "Output Format:\n"
+        "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+        "R: label1!reason1; label2!reason2; ...\n"
+        f"J: {output_schema}"
+    )
 
 
 def prepare_inputs(
@@ -1209,22 +1236,11 @@ def main() -> None:
     else:
         debug_output_path = ""
 
+    # GRPO prompt in this script is intentionally compact and does not inject DB Definitions.
+    db_definitions = ""
     metadata_exists = bool(metadata_path) and os.path.exists(metadata_path)
-    if not metadata_exists and not args.allow_empty_db:
-        raise FileNotFoundError(
-            f"metadata_file not found: {metadata_path}. "
-            "DB Definitions are required by default. "
-            "If you intentionally want no DB, set --allow_empty_db."
-        )
-    metadata = load_metadata(metadata_path)
-    db_definitions = build_db_definitions(metadata)
-    if not str(db_definitions or "").strip() and not args.allow_empty_db:
-        raise ValueError(
-            "DB Definitions is empty. "
-            "Provide a valid --metadata_file or set --allow_empty_db."
-        )
-    if rank == 0 and (not metadata_exists):
-        print(f"[WARN] metadata_file not found: {metadata_path} (DB Definitions will be empty)")
+    if rank == 0 and (not metadata_exists) and args.debug:
+        print(f"[DEBUG] metadata_file not found: {metadata_path} (unused in compact prompt mode)")
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
     if args.balanced_per_intent_slot_combo > 0:
@@ -1330,8 +1346,7 @@ def main() -> None:
                 f"test_every={args.test_every} test_max_samples={args.test_max_samples}"
             )
         print(f"[DEBUG] debug_output_file={debug_output_path}")
-        print("[DEBUG] db_definitions:")
-        print(_shorten(db_definitions, args.debug_max_chars))
+        print("[DEBUG] prompt_mode=compact (no DB Definitions, no detailed Rules)")
         _debug_print_dataset(items, preview_items=max(0, args.debug_preview_items))
 
     dataset = GrpoDataset(items)
