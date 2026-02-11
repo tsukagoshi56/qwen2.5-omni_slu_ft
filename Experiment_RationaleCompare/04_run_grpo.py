@@ -544,6 +544,99 @@ def _extract_prefixed_line(text: str, prefix: str) -> str:
     return f"{prefix} (none)"
 
 
+def _extract_intent_candidates(text: str) -> List[str]:
+    c_line = _extract_prefixed_line(text, "C:")
+    if c_line == "C: (none)":
+        return []
+    c_body = c_line.split(":", 1)[1].strip() if ":" in c_line else ""
+    if not c_body:
+        return []
+    intent_part = c_body.split(";", 1)[0].strip()
+    lowered = intent_part.lower()
+    for prefix in ("intent candidates:", "intent candidate:", "intent:", "intents:"):
+        if lowered.startswith(prefix):
+            intent_part = intent_part[len(prefix):].strip()
+            break
+    values = [normalize_intent_label(x.strip()) for x in intent_part.split("|") if x.strip()]
+    return [v for v in values if v and v != "(none)"]
+
+
+def _extract_slot_candidates(text: str) -> List[str]:
+    c_line = _extract_prefixed_line(text, "C:")
+    if c_line == "C: (none)":
+        return []
+    c_body = c_line.split(":", 1)[1].strip() if ":" in c_line else ""
+    if not c_body:
+        return []
+    slot_part = c_body
+    if ";" in c_body:
+        maybe_slot = c_body.split(";", 1)[1].strip()
+        if maybe_slot:
+            slot_part = maybe_slot
+    lowered = slot_part.lower()
+    for prefix in ("slot candidates:", "slot candidate:", "slots:", "slot:"):
+        if lowered.startswith(prefix):
+            slot_part = slot_part[len(prefix):].strip()
+            break
+    if not slot_part:
+        return []
+    slot_part = re.sub(r"\([^)]*\)", "", slot_part)
+    values = [x.strip().lower() for x in slot_part.split("|") if x.strip()]
+    return [v for v in values if v and v not in {"(none)", "none"}]
+
+
+def _gold_intent_from_label(gold_label: Dict[str, Any]) -> str:
+    return normalize_intent_label(f"{gold_label.get('scenario', '')}_{gold_label.get('action', '')}")
+
+
+def _gold_slot_types_from_label(gold_label: Dict[str, Any]) -> List[str]:
+    entities = gold_label.get("entities", []) if isinstance(gold_label, dict) else []
+    slots: List[str] = []
+    if isinstance(entities, list):
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            slot = str(ent.get("type", "")).strip().lower()
+            if slot:
+                slots.append(slot)
+    # unique keep order
+    seen = set()
+    uniq: List[str] = []
+    for s in slots:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq
+
+
+def _candidate_bonus(
+    formatted_output: str,
+    gold_label: Dict[str, Any],
+    w_intent_candidate: float,
+    w_slot_candidate: float,
+) -> Tuple[float, bool, bool]:
+    if (w_intent_candidate <= 0.0) and (w_slot_candidate <= 0.0):
+        return 0.0, False, False
+
+    intent_candidates = _extract_intent_candidates(formatted_output)
+    slot_candidates = _extract_slot_candidates(formatted_output)
+
+    gold_intent = _gold_intent_from_label(gold_label)
+    gold_slots = set(_gold_slot_types_from_label(gold_label))
+    cand_slots = {str(x).strip().lower() for x in slot_candidates if str(x).strip()}
+
+    has_intent = bool(gold_intent) and (gold_intent in intent_candidates)
+    has_slot = bool(gold_slots & cand_slots) if gold_slots else False
+
+    bonus = 0.0
+    if has_intent:
+        bonus += float(w_intent_candidate)
+    if has_slot:
+        bonus += float(w_slot_candidate)
+    return bonus, has_intent, has_slot
+
+
 def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, Any], bool]:
     pred_obj = parse_j_from_output(raw_output)
     pred_label = _normalize_pred_label(pred_obj)
@@ -789,6 +882,8 @@ def evaluate_model(
     preview_prefix: str = "[EVAL-PREVIEW]",
     show_progress: bool = False,
     progress_desc: str = "eval",
+    reward_w_intent_candidate: float = 0.0,
+    reward_w_slot_candidate: float = 0.0,
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     eval_model = _unwrap_model(model)
     was_training = eval_model.training
@@ -847,6 +942,13 @@ def evaluate_model(
                 generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
                 formatted_text, pred_label, format_ok = _format_model_output(generated_text, no_cot=no_cot)
                 reward, _ = compute_reward(pred_label, item.gold_label)
+                cand_bonus, has_int_cand, has_slot_cand = _candidate_bonus(
+                    formatted_output=formatted_text,
+                    gold_label=item.gold_label,
+                    w_intent_candidate=reward_w_intent_candidate,
+                    w_slot_candidate=reward_w_slot_candidate,
+                )
+                reward += cand_bonus
                 stats = compare_labels(pred_label, item.gold_label)
             except RuntimeError as exc:
                 if _is_oom_error(exc):
@@ -894,6 +996,9 @@ def evaluate_model(
                         "candidates": [],
                         "rationale_text": formatted_text,
                         "format_ok": bool(format_ok),
+                        "has_gold_intent_candidate": bool(has_int_cand),
+                        "has_gold_slot_candidate": bool(has_slot_cand),
+                        "candidate_bonus": float(cand_bonus),
                         "raw_output": generated_text,
                         "target": "",
                         "target_label": item.gold_label,
@@ -909,7 +1014,8 @@ def evaluate_model(
                 print(f"[EVAL-DEBUG] gold={json.dumps(item.gold_label, ensure_ascii=False)}")
                 print(
                     f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} "
-                    f"format_ok={bool(format_ok)} reward={reward:.4f}"
+                    f"format_ok={bool(format_ok)} has_intent_cand={bool(has_int_cand)} "
+                    f"has_slot_cand={bool(has_slot_cand)} cand_bonus={cand_bonus:.4f} reward={reward:.4f}"
                 )
             if rank == 0 and idx < max(0, preview_count):
                 print(
@@ -1177,6 +1283,18 @@ def main() -> None:
     parser.add_argument("--reward_w_action", type=float, default=1.0)
     parser.add_argument("--reward_w_intent", type=float, default=0.5)
     parser.add_argument("--reward_w_entity", type=float, default=1.0)
+    parser.add_argument(
+        "--reward_w_intent_candidate",
+        type=float,
+        default=0.25,
+        help="Bonus reward when gold intent appears in C: intent candidates.",
+    )
+    parser.add_argument(
+        "--reward_w_slot_candidate",
+        type=float,
+        default=0.25,
+        help="Bonus reward when any gold slot type appears in C: slot candidates.",
+    )
     parser.add_argument(
         "--early_stopping",
         dest="early_stopping",
@@ -1682,6 +1800,8 @@ def main() -> None:
             debug_max_chars=args.debug_max_chars,
             preview_count=(5 if args.smoke else 0),
             preview_prefix="[GRPO-EVAL-INIT-SMOKE]",
+            reward_w_intent_candidate=args.reward_w_intent_candidate,
+            reward_w_slot_candidate=args.reward_w_slot_candidate,
         )
         if rank == 0:
             print(
@@ -1775,6 +1895,9 @@ def main() -> None:
                     pred_labels: List[Dict[str, Any]] = []
                     formatted_samples: List[str] = []
                     format_ok_values: List[bool] = []
+                    candidate_bonus_values: List[float] = []
+                    has_intent_candidate_values: List[bool] = []
+                    has_slot_candidate_values: List[bool] = []
                     for text in samples:
                         formatted_text, pred_label, format_ok = _format_model_output(text, no_cot=args.no_cot)
                         reward, _ = compute_reward(
@@ -1785,11 +1908,21 @@ def main() -> None:
                             w_intent=args.reward_w_intent,
                             w_entity=args.reward_w_entity,
                         )
+                        cand_bonus, has_int_cand, has_slot_cand = _candidate_bonus(
+                            formatted_output=formatted_text,
+                            gold_label=item.gold_label,
+                            w_intent_candidate=args.reward_w_intent_candidate,
+                            w_slot_candidate=args.reward_w_slot_candidate,
+                        )
+                        reward += cand_bonus
                         rewards.append(reward)
                         reward_values.append(float(reward))
                         pred_labels.append(pred_label)
                         formatted_samples.append(formatted_text)
                         format_ok_values.append(bool(format_ok))
+                        candidate_bonus_values.append(float(cand_bonus))
+                        has_intent_candidate_values.append(bool(has_int_cand))
+                        has_slot_candidate_values.append(bool(has_slot_cand))
 
                     if debug_step:
                         preview_n = min(args.debug_preview_samples, len(samples))
@@ -1797,6 +1930,9 @@ def main() -> None:
                             print(
                                 f"[DEBUG][step={global_step}] sample#{i} reward={rewards[i]:.4f} "
                                 f"format_ok={format_ok_values[i]} "
+                                f"has_intent_cand={has_intent_candidate_values[i]} "
+                                f"has_slot_cand={has_slot_candidate_values[i]} "
+                                f"cand_bonus={candidate_bonus_values[i]:.4f} "
                                 f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
                             )
                             _print_debug_section(f"train.sample_raw#{i}", samples[i])
@@ -1895,6 +2031,21 @@ def main() -> None:
                                 "gold_label": item.gold_label,
                                 "pred_label": pred_labels[sample_idx] if sample_idx < len(pred_labels) else {},
                                 "format_ok": bool(format_ok_values[sample_idx]) if sample_idx < len(format_ok_values) else False,
+                                "has_gold_intent_candidate": (
+                                    bool(has_intent_candidate_values[sample_idx])
+                                    if sample_idx < len(has_intent_candidate_values)
+                                    else False
+                                ),
+                                "has_gold_slot_candidate": (
+                                    bool(has_slot_candidate_values[sample_idx])
+                                    if sample_idx < len(has_slot_candidate_values)
+                                    else False
+                                ),
+                                "candidate_bonus": (
+                                    float(candidate_bonus_values[sample_idx])
+                                    if sample_idx < len(candidate_bonus_values)
+                                    else 0.0
+                                ),
                                 "prompt": _shorten(prompt, args.debug_max_chars),
                                 "sample_raw": _shorten(sample_text, args.debug_max_chars),
                                 "sample_formatted": _shorten(
@@ -2039,6 +2190,8 @@ def main() -> None:
                     debug_max_chars=args.debug_max_chars,
                     preview_count=(5 if args.smoke else 0),
                     preview_prefix="[GRPO-EVAL-SMOKE]",
+                    reward_w_intent_candidate=args.reward_w_intent_candidate,
+                    reward_w_slot_candidate=args.reward_w_slot_candidate,
                 )
                 if rank == 0:
                     print(
@@ -2095,6 +2248,8 @@ def main() -> None:
                     debug_max_chars=args.debug_max_chars,
                     show_progress=True,
                     progress_desc=f"test@step{global_step}",
+                    reward_w_intent_candidate=args.reward_w_intent_candidate,
+                    reward_w_slot_candidate=args.reward_w_slot_candidate,
                 )
                 if rank == 0:
                     print(
@@ -2145,6 +2300,8 @@ def main() -> None:
             debug_max_chars=args.debug_max_chars,
             preview_count=(5 if args.smoke else 0),
             preview_prefix="[GRPO-EVAL-FINAL-SMOKE]",
+            reward_w_intent_candidate=args.reward_w_intent_candidate,
+            reward_w_slot_candidate=args.reward_w_slot_candidate,
         )
         if rank == 0:
             print(
@@ -2176,6 +2333,8 @@ def main() -> None:
             collect_predictions=True,
             show_progress=True,
             progress_desc="test-final",
+            reward_w_intent_candidate=args.reward_w_intent_candidate,
+            reward_w_slot_candidate=args.reward_w_slot_candidate,
         )
         if rank == 0:
             print(
