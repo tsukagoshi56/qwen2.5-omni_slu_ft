@@ -147,6 +147,79 @@ def candidate_to_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _strip_prefix_case_insensitive(text: str, prefixes: List[str]) -> str:
+    value = str(text or "").strip()
+    lower = value.lower()
+    for prefix in prefixes:
+        p = prefix.lower()
+        if lower.startswith(p):
+            return value[len(prefix):].strip()
+    return value
+
+
+def _clean_intent_candidate(value: str) -> str:
+    text = str(value or "").strip().strip("`'\" ")
+    if not text:
+        return ""
+    text = re.sub(
+        r"^\s*(?:intent\s*candidates?|intentcandidates?|intent\s*candidate|intentcandidate|intents?)\s*[:：\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.replace(":", "_")
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(
+        r"^(?:intent_?candidates?|intent_?candidate|intents?)_+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"_+", "_", text).strip("_ ")
+    if text.lower() in {"intent", "intents", "intentcandidate", "intentcandidates"}:
+        return ""
+    return text
+
+
+def _sanitize_c_line(c_line: str) -> str:
+    if not str(c_line or "").startswith("C:"):
+        return str(c_line or "")
+    body = c_line.split(":", 1)[1].strip() if ":" in c_line else ""
+    if not body:
+        return "C: (none)"
+
+    parts = [p.strip() for p in body.split(";", 1)]
+    intent_part = parts[0] if parts else ""
+    slot_part = parts[1] if len(parts) > 1 else ""
+
+    intent_part = _strip_prefix_case_insensitive(
+        intent_part,
+        ["Intent candidates:", "Intent candidate:", "Intent:", "Intents:"],
+    )
+    slot_part = _strip_prefix_case_insensitive(
+        slot_part,
+        ["Slot candidates:", "Slot candidate:", "Slot:", "Slots:"],
+    )
+
+    intents_raw = [x.strip() for x in intent_part.split("|") if x.strip()]
+    intents_cleaned: List[str] = []
+    seen = set()
+    for cand in intents_raw:
+        cleaned = _clean_intent_candidate(cand)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        intents_cleaned.append(cleaned)
+
+    intent_part_new = " | ".join(intents_cleaned) if intents_cleaned else "(none)"
+    if slot_part:
+        return f"C: Intent candidates: {intent_part_new}; Slot candidates: {slot_part}"
+    return f"C: Intent candidates: {intent_part_new}"
+
+
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
     task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
@@ -185,6 +258,7 @@ def build_training_target(
         return f"J: {final_json}"
 
     lines = [line.strip() for line in rationale.splitlines() if line.strip()]
+    lines = [_sanitize_c_line(line) if line.startswith("C:") else line for line in lines]
     has_c = any(line.startswith("C:") for line in lines)
     has_j = any(line.startswith("J:") for line in lines)
     has_r = any(line.startswith("R:") for line in lines)

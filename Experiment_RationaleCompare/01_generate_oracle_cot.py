@@ -175,7 +175,33 @@ def _extract_crj(output: str) -> Tuple[str, bool]:
 
 
 def _normalize_intent(value: str) -> str:
-    return value.replace(":", "_").strip()
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    # Trim obvious wrappers/quotes.
+    text = text.strip("`'\" ")
+
+    # Handle malformed prefixes such as:
+    # "Intent candidates: xxx", "Intentcandidates:xxx", "Intent: xxx"
+    text = re.sub(
+        r"^\s*(?:intent\s*candidates?|intentcandidates?|intent\s*candidate|intentcandidate|intents?)\s*[:：\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Canonical label style: scenario_action
+    text = text.replace(":", "_")
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(
+        r"^(?:intent_?candidates?|intent_?candidate|intents?)_+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"_+", "_", text).strip("_ ")
+    return text
 
 
 def _strip_prefix(text: str, prefixes: List[str]) -> str:
@@ -214,6 +240,10 @@ def _reorder_c_line(c_line: str, intent_order: List[str], slot_order: List[str])
 
     intents_raw = [x.strip() for x in intent_part.split("|") if x.strip()]
     intents_norm = [_normalize_intent(x) for x in intents_raw]
+    intents_norm = [
+        x for x in intents_norm
+        if x and x.lower() not in {"intent", "intents", "intentcandidate", "intentcandidates"}
+    ]
     intents_norm = _reorder_candidates(intents_norm, intent_order)
     intent_part_new = " | ".join(intents_norm) if intents_norm else intent_part
 
