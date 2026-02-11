@@ -1108,7 +1108,7 @@ def evaluate_model(
     reward_w_slot_candidate: float = 0.0,
     reward_w_c_intent_count: float = 0.0,
     reward_c_intent_target: int = 3,
-    reward_w_rationale_coverage: float = 0.0,
+    reward_w_rationale_coverage: float = 0.25,
     cot_only: bool = False,
     cot_format_bonus: float = 0.0,
     cot_format_penalty: float = 0.25,
@@ -1650,7 +1650,7 @@ def main() -> None:
     parser.add_argument(
         "--reward_w_rationale_coverage",
         type=float,
-        default=0.0,
+        default=0.25,
         help="Bonus weight multiplied by rationale coverage over candidates in C (0.0 disables).",
     )
     parser.add_argument(
