@@ -791,9 +791,17 @@ def _extract_rationale_pairs(text: str) -> List[Tuple[str, str]]:
 
 def _rationale_candidate_coverage(
     formatted_output: str,
+    gold_label: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, bool, int, int]:
     intent_candidates = set(_extract_intent_candidates(formatted_output))
     slot_candidates = {str(x).strip().lower() for x in _extract_slot_candidates(formatted_output) if str(x).strip()}
+
+    # Exclude the accepted (gold) intent from the denominator because R only
+    # lists rejection reasons for non-accepted candidates.
+    if gold_label is not None:
+        gold_intent_key = _gold_intent_from_label(gold_label)
+        intent_candidates.discard(gold_intent_key)
+
     total_candidates = len(intent_candidates) + len(slot_candidates)
     if total_candidates == 0:
         return 1.0, True, 0, 0
@@ -1187,7 +1195,7 @@ def evaluate_model(
                     intent_count_target=reward_c_intent_target,
                 )
                 rationale_cov, rationale_full, rationale_cov_numer, rationale_cov_denom = _rationale_candidate_coverage(
-                    formatted_text
+                    formatted_text, gold_label=item.gold_label
                 )
                 j_fully_correct = _is_j_fully_correct(stats)
                 rationale_reward_term = (
@@ -1433,7 +1441,15 @@ def main() -> None:
         "--cot-only",
         dest="cot_only",
         action="store_true",
-        help="Force CoT-style training (C/R/J). Applies CoT format reward shaping.",
+        default=True,
+        help="Force CoT-style training (C/R/J). Applies CoT format reward shaping. (default: True)",
+    )
+    parser.add_argument(
+        "--no_cot_only",
+        "--no-cot-only",
+        dest="cot_only",
+        action="store_false",
+        help="Disable CoT format reward shaping.",
     )
     parser.add_argument(
         "--cot_format_bonus",
@@ -2360,7 +2376,7 @@ def main() -> None:
                             intent_count_target=args.reward_c_intent_target,
                         )
                         rationale_cov, rationale_full, rationale_cov_numer, rationale_cov_denom = _rationale_candidate_coverage(
-                            formatted_text
+                            formatted_text, gold_label=item.gold_label
                         )
                         j_fully_correct = _is_j_fully_correct(stats)
                         rationale_reward_term = (
@@ -2411,6 +2427,13 @@ def main() -> None:
                             )
                             _print_debug_section(f"train.sample_raw#{i}", samples[i])
                             _print_debug_section(f"train.sample_formatted#{i}", formatted_samples[i])
+
+                    if rank == 0 and global_step % 10 == 0:
+                        print(
+                            f"[TRAIN-SAMPLE][step={global_step}] slurp_id={item.slurp_id} mode={item.mode} "
+                            f"reward={rewards[0]:.4f} gold={json.dumps(item.gold_label, ensure_ascii=False)}"
+                        )
+                        print(f"[TRAIN-SAMPLE] raw_output: {samples[0]}")
 
                     mean_reward = sum(rewards) / max(len(rewards), 1)
                     if args.advantage_normalize:
