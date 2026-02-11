@@ -337,6 +337,7 @@ def build_grpo_prompt(
     db_definitions: str,
     no_cot: bool = False,
     label_cot: bool = False,
+    candidates_only: bool = False,
 ) -> str:
     # Compact prompt for GRPO: instruction + input + output format only.
     # DB Definitions and detailed Rules are intentionally omitted.
@@ -346,16 +347,25 @@ def build_grpo_prompt(
         '[{"type": "<entity_type>", "filler": "<entity_value>"}, ...]}'
     )
     label_only = bool(no_cot)
+    cand_only = bool(candidates_only) and (not label_only)
     if label_cot:
         output_format = (
             "Output Format:\n"
             f"J: {output_schema}"
             if label_only
             else (
-                "Output Format:\n"
-                "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
-                "R: label1!reason1; label2!reason2; ...\n"
-                f"J: {output_schema}"
+                (
+                    "Output Format:\n"
+                    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+                    f"J: {output_schema}"
+                )
+                if cand_only
+                else (
+                    "Output Format:\n"
+                    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+                    "R: label1!reason1; label2!reason2; ...\n"
+                    f"J: {output_schema}"
+                )
             )
         )
         if mode == "audio":
@@ -383,6 +393,16 @@ def build_grpo_prompt(
                 "Output Format:\n"
                 f"J: {output_schema}"
             )
+        if cand_only:
+            return (
+                "System: Predict SLU labels from audio.\n\n"
+                "[Input Data]\n"
+                "- Task: CANDIDATES_LABEL\n"
+                "- Audio: <AUDIO>\n\n"
+                "Output Format:\n"
+                "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+                f"J: {output_schema}"
+            )
         return (
             "System: Predict SLU labels from audio.\n\n"
             "[Input Data]\n"
@@ -401,6 +421,16 @@ def build_grpo_prompt(
             "- Task: LABEL_ONLY\n"
             f"- Transcript: {text}\n\n"
             "Output Format:\n"
+            f"J: {output_schema}"
+        )
+    if cand_only:
+        return (
+            "System: Predict SLU labels from transcript.\n\n"
+            "[Input Data]\n"
+            "- Task: CANDIDATES_LABEL\n"
+            f"- Transcript: {text}\n\n"
+            "Output Format:\n"
+            "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
             f"J: {output_schema}"
         )
     return (
@@ -693,7 +723,11 @@ def _apply_cot_reward_adjustment(
     return adjusted
 
 
-def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, Any], bool]:
+def _format_model_output(
+    raw_output: str,
+    no_cot: bool,
+    candidates_only: bool = False,
+) -> Tuple[str, Dict[str, Any], bool]:
     pred_obj = parse_j_from_output(raw_output)
     pred_label = _normalize_pred_label(pred_obj)
     j_obj = {
@@ -703,6 +737,7 @@ def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, 
     j_line = "J: " + json.dumps(j_obj, ensure_ascii=False)
     has_j = pred_obj is not None
     label_only = bool(no_cot)
+    cand_only = bool(candidates_only) and (not label_only)
     if label_only:
         return j_line, pred_label, has_j
 
@@ -710,6 +745,9 @@ def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, 
     r_line = _extract_prefixed_line(raw_output, "R:")
     has_c = c_line != "C: (none)"
     has_r = r_line != "R: (none)"
+    if cand_only:
+        formatted = "\n".join([c_line, j_line])
+        return formatted, pred_label, (has_c and has_j)
     formatted = "\n".join([c_line, r_line, j_line])
     return formatted, pred_label, (has_c and has_r and has_j)
 
@@ -929,6 +967,7 @@ def evaluate_model(
     db_definitions: str,
     no_cot: bool,
     label_cot: bool,
+    candidates_only: bool,
     device: torch.device,
     max_new_tokens: int,
     rank: int,
@@ -984,6 +1023,7 @@ def evaluate_model(
                     db_definitions=db_definitions,
                     no_cot=no_cot,
                     label_cot=label_cot,
+                    candidates_only=candidates_only,
                 )
                 text_input = build_chat_input(processor, prompt, audio is not None)
                 if audio is None:
@@ -1002,7 +1042,11 @@ def evaluate_model(
                 )
                 input_len = inputs["input_ids"].shape[1]
                 generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-                formatted_text, pred_label, format_ok = _format_model_output(generated_text, no_cot=no_cot)
+                formatted_text, pred_label, format_ok = _format_model_output(
+                    generated_text,
+                    no_cot=no_cot,
+                    candidates_only=candidates_only,
+                )
                 reward, _ = compute_reward(pred_label, item.gold_label)
                 cand_bonus, has_int_cand, has_slot_cand = _candidate_bonus(
                     formatted_output=formatted_text,
@@ -1211,6 +1255,20 @@ def main() -> None:
         dest="no_cot",
         action="store_true",
         help="Use direct J-only prompting (no C/R lines) for controlled GRPO comparison.",
+    )
+    parser.add_argument(
+        "--candidates_only",
+        "--candidates-only",
+        dest="candidates_only",
+        action="store_true",
+        help="Use C+J prompting (intent/slot candidates + final J), without R rationale.",
+    )
+    parser.add_argument(
+        "--no_candidates_only",
+        "--no-candidates-only",
+        dest="candidates_only",
+        action="store_false",
+        help="Disable C+J mode and use the normal C/R/J or J-only style.",
     )
     parser.add_argument(
         "--cot_only",
@@ -1471,6 +1529,7 @@ def main() -> None:
         include_text=True,
         label_cot=False,
         no_cot=False,
+        candidates_only=False,
         early_stopping=False,
         shuffle_train=False,
         do_sample=True,
@@ -1511,10 +1570,13 @@ def main() -> None:
         raise ValueError("--lora_alpha must be >= 1")
     if args.lora_dropout < 0 or args.lora_dropout >= 1:
         raise ValueError("--lora_dropout must satisfy 0 <= value < 1")
-    if args.cot_only and args.no_cot:
-        raise ValueError("--cot_only and --no_cot cannot be used together")
+    if args.no_cot and args.candidates_only:
+        raise ValueError("--no_cot and --candidates_only cannot be used together")
+    if args.cot_only and (args.no_cot or args.candidates_only):
+        raise ValueError("--cot_only cannot be used with --no_cot or --candidates_only")
     if args.cot_only:
         args.no_cot = False
+        args.candidates_only = False
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -1737,7 +1799,8 @@ def main() -> None:
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"use_lora={args.use_lora} lora_r={args.lora_r} lora_alpha={args.lora_alpha} "
             f"lora_dropout={args.lora_dropout} lora_audio_tower={args.lora_audio_tower} "
-            f"include_text={args.include_text} no_cot={args.no_cot} label_cot={args.label_cot} "
+            f"include_text={args.include_text} no_cot={args.no_cot} "
+            f"candidates_only={args.candidates_only} label_cot={args.label_cot} "
             f"cot_only={args.cot_only} "
             f"cot_format_bonus={args.cot_format_bonus} cot_format_penalty={args.cot_format_penalty} "
             f"smoke={args.smoke} "
@@ -1787,7 +1850,8 @@ def main() -> None:
             f"effective_steps={effective_total_steps} max_steps={args.max_steps} "
             f"grad_accum_steps={args.grad_accum_steps} optimizer_steps~={optimizer_steps}"
         )
-        print(f"[GRPO] prompt_style={'J_ONLY' if args.no_cot else 'C_R_J'}")
+        prompt_style = "J_ONLY" if args.no_cot else ("C_J" if args.candidates_only else "C_R_J")
+        print(f"[GRPO] prompt_style={prompt_style}")
         if args.only_grpo:
             print(
                 f"[GRPO] only_grpo=True -> force base model for both policy/ref: "
@@ -1906,6 +1970,7 @@ def main() -> None:
             db_definitions=db_definitions,
             no_cot=args.no_cot,
             label_cot=args.label_cot,
+            candidates_only=args.candidates_only,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
@@ -1984,6 +2049,7 @@ def main() -> None:
                         db_definitions=db_definitions,
                         no_cot=args.no_cot,
                         label_cot=args.label_cot,
+                        candidates_only=args.candidates_only,
                     )
 
                     debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
@@ -2017,7 +2083,11 @@ def main() -> None:
                     has_intent_candidate_values: List[bool] = []
                     has_slot_candidate_values: List[bool] = []
                     for text in samples:
-                        formatted_text, pred_label, format_ok = _format_model_output(text, no_cot=args.no_cot)
+                        formatted_text, pred_label, format_ok = _format_model_output(
+                            text,
+                            no_cot=args.no_cot,
+                            candidates_only=args.candidates_only,
+                        )
                         reward, _ = compute_reward(
                             pred_label,
                             item.gold_label,
@@ -2308,6 +2378,7 @@ def main() -> None:
                     db_definitions=db_definitions,
                     no_cot=args.no_cot,
                     label_cot=args.label_cot,
+                    candidates_only=args.candidates_only,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -2370,6 +2441,7 @@ def main() -> None:
                     db_definitions=db_definitions,
                     no_cot=args.no_cot,
                     label_cot=args.label_cot,
+                    candidates_only=args.candidates_only,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -2426,6 +2498,7 @@ def main() -> None:
             db_definitions=db_definitions,
             no_cot=args.no_cot,
             label_cot=args.label_cot,
+            candidates_only=args.candidates_only,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
@@ -2462,6 +2535,7 @@ def main() -> None:
             db_definitions=db_definitions,
             no_cot=args.no_cot,
             label_cot=args.label_cot,
+            candidates_only=args.candidates_only,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,

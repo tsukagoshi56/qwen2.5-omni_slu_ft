@@ -177,6 +177,7 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re_multitask.py \
 - If `--cot_train_file` is omitted, the script auto-creates both tasks from `--train_file`.
 - Test inference remains standard prediction output (no multitask duplication at test time).
 - For test-time J-only generation, use `--no_cot` (equivalent to `--test_task_mode label`).
+- For test-time candidates+label generation (no rationale), use `--candidates_only` (equivalent to `--test_task_mode candidates`).
 
 ---
 
@@ -200,9 +201,10 @@ python Experiment_RationaleCompare/04_run_grpo.py \
 - Reward is computed from parsed `J:` label (scenario/action/entities).
 - KL penalty uses a frozen reference model.
 - Default prompt style is `C/R/J`. Add `--no-cot` to switch to a direct `J`-only output format.
+- Add `--candidates_only` to switch to `C+J` output format (candidates + final label, no `R`).
 - Add `--label_cot` to use the same prompt wording/style as `audio_text_mix_e2e_re_multitask.py`:
   - `System: Predict SLU labels from transcript/audio.`
-  - `Output Format` matches multitask SFT style (`C/R/J`, or `J`-only when `--no-cot` is set).
+  - `Output Format` matches multitask SFT style (`C/R/J`, `C+J`, or `J`-only).
 - In `--no-cot` mode, the experiment keeps the same System/DB/Input context and changes only the output format (for controlled comparison).
 - Early stopping is enabled by default: after at least 1 epoch, training stops if eval does not improve for 3 consecutive evaluations (`--early_stopping_metric intent_acc`).
 - Override with `--early_stopping_patience`, `--early_stopping_min_epochs`, `--early_stopping_metric`, or disable via `--no-early-stopping`.

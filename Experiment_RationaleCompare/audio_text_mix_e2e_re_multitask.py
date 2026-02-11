@@ -72,6 +72,11 @@ PROMPT_OUTPUT_FORMAT = (
     "R: label1!reason1; label2!reason2; ...\n"
     f"J: {OUTPUT_SCHEMA}"
 )
+PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY = (
+    "Output Format:\n"
+    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+    f"J: {OUTPUT_SCHEMA}"
+)
 PROMPT_OUTPUT_FORMAT_LABEL_ONLY = (
     "Output Format:\n"
     f"J: {OUTPUT_SCHEMA}"
@@ -143,9 +148,12 @@ def candidate_to_text(value: Any) -> str:
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
     task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
-    output_format = (
-        PROMPT_OUTPUT_FORMAT_LABEL_ONLY if task_mode == "label" else PROMPT_OUTPUT_FORMAT
-    )
+    if task_mode == "label":
+        output_format = PROMPT_OUTPUT_FORMAT_LABEL_ONLY
+    elif task_mode in ("candidates", "cand"):
+        output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
+    else:
+        output_format = PROMPT_OUTPUT_FORMAT
 
     if include_transcript and transcript:
         return (
@@ -2054,9 +2062,17 @@ def main():
     parser.add_argument(
         "--test_task_mode",
         type=str,
-        choices=["cot", "label"],
+        choices=["cot", "candidates", "label"],
         default="cot",
         help="Prompt/output mode used only for test inference (default: cot).",
+    )
+    parser.add_argument(
+        "--candidates_only",
+        "--candidates-only",
+        dest="test_task_mode",
+        action="store_const",
+        const="candidates",
+        help="Alias for --test_task_mode candidates (C+J generation at test time).",
     )
     parser.add_argument(
         "--no_cot",
