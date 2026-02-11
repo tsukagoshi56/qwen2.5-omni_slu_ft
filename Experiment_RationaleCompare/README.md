@@ -150,6 +150,33 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
 - Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
 
+### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
+
+This variant trains two tasks together:
+- **CoT task**: `C/R/J` output
+- **Label task**: `J`-only output
+- Loss is fixed to **`0.5 * L_cot + 0.5 * L_label`**.
+
+Use separate files when you want filtered CoT only for the CoT branch:
+
+```bash
+python Experiment_RationaleCompare/audio_text_mix_e2e_re_multitask.py \
+  --train_file Experiment_RationaleCompare/sft_vanilla_train.jsonl \
+  --cot_train_file Experiment_RationaleCompare/sft_success_train.jsonl \
+  --eval_file Experiment_RationaleCompare/sft_vanilla_train.jsonl \
+  --cot_eval_file Experiment_RationaleCompare/sft_success_train.jsonl \
+  --test_file slurp/dataset/slurp/test.jsonl \
+  --audio_dir slurp/slurp_real \
+  --output_file outputs/qwen_rationale_label_ft_multitask/prediction.jsonl \
+  --add_text_only
+```
+
+- `--train_file`: label branch training file (`J`-only task).
+- `--cot_train_file`: CoT branch training file (`C/R/J` task).
+- `--eval_file` / `--cot_eval_file`: same split logic for validation.
+- If `--cot_train_file` is omitted, the script auto-creates both tasks from `--train_file`.
+- Test inference remains standard prediction output (no multitask duplication at test time).
+
 ---
 
 ## 5) GRPO (Method 4)
