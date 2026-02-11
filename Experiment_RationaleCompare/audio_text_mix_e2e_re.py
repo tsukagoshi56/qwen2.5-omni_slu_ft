@@ -46,16 +46,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT_TEXT = (
-    'System: SLU Logic Analyst. Infer the intent and slots using "Transcript".'
+    'System: Predict SLU labels from transcript.'
 )
 SYSTEM_PROMPT_AUDIO = (
-    'System: SLU Logic Analyst. Infer the intent and slots using "Audio".'
+    'System: Predict SLU labels from audio.'
+)
+OUTPUT_SCHEMA = (
+    '{"Intent": "<scenario>_<action>", "entities": '
+    '[{"type": "<entity_type>", "filler": "<entity_value>"}, ...]}'
 )
 PROMPT_OUTPUT_FORMAT = (
     "Output Format:\n"
     "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
     "R: label1!reason1; label2!reason2; ...\n"
-    "J: [Final JSON]"
+    f"J: {OUTPUT_SCHEMA}"
 )
 PROMPT_DB_DEFINITIONS = "Intents: (none)\nSlot Types: (none)"
 
@@ -127,19 +131,15 @@ def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) ->
     if include_transcript and transcript:
         return (
             f"{SYSTEM_PROMPT_TEXT}\n\n"
-            "[DB Definitions]\n"
-            f"{PROMPT_DB_DEFINITIONS}\n\n"
-            f"{PROMPT_OUTPUT_FORMAT}\n\n"
             "[Input Data]\n"
-            f"- Transcript: {transcript}"
+            f"- Transcript: {transcript}\n\n"
+            f"{PROMPT_OUTPUT_FORMAT}"
         )
     return (
         f"{SYSTEM_PROMPT_AUDIO}\n\n"
-        "[DB Definitions]\n"
-        f"{PROMPT_DB_DEFINITIONS}\n\n"
-        f"{PROMPT_OUTPUT_FORMAT}\n\n"
         "[Input Data]\n"
-        "- Audio: <AUDIO>"
+        "- Audio: <AUDIO>\n\n"
+        f"{PROMPT_OUTPUT_FORMAT}"
     )
 
 
