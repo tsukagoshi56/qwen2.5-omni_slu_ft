@@ -739,12 +739,15 @@ def _candidate_bonus(
     gold_label: Dict[str, Any],
     w_intent_candidate: float,
     w_slot_candidate: float,
-) -> Tuple[float, bool, bool]:
-    if (w_intent_candidate <= 0.0) and (w_slot_candidate <= 0.0):
-        return 0.0, False, False
+    w_intent_count: float = 0.0,
+    intent_count_target: int = 3,
+) -> Tuple[float, bool, bool, int, float]:
+    if (w_intent_candidate <= 0.0) and (w_slot_candidate <= 0.0) and (w_intent_count <= 0.0):
+        return 0.0, False, False, 0, 0.0
 
     intent_candidates = _extract_intent_candidates(formatted_output)
     slot_candidates = _extract_slot_candidates(formatted_output)
+    intent_count = len(intent_candidates)
 
     gold_intent = _gold_intent_from_label(gold_label)
     gold_slots = set(_gold_slot_types_from_label(gold_label))
@@ -758,7 +761,14 @@ def _candidate_bonus(
         bonus += float(w_intent_candidate)
     if has_slot:
         bonus += float(w_slot_candidate)
-    return bonus, has_intent, has_slot
+
+    # Encourage C: intent candidate list length to be close to target (default=3).
+    target = max(1, int(intent_count_target))
+    proximity = max(0.0, 1.0 - (abs(intent_count - target) / float(target)))
+    count_bonus = float(w_intent_count) * float(proximity) if w_intent_count > 0.0 else 0.0
+    bonus += count_bonus
+
+    return bonus, has_intent, has_slot, intent_count, count_bonus
 
 
 def _apply_cot_reward_adjustment(
@@ -1037,6 +1047,8 @@ def evaluate_model(
     progress_desc: str = "eval",
     reward_w_intent_candidate: float = 0.0,
     reward_w_slot_candidate: float = 0.0,
+    reward_w_c_intent_count: float = 0.0,
+    reward_c_intent_target: int = 3,
     cot_only: bool = False,
     cot_format_bonus: float = 0.0,
     cot_format_penalty: float = 0.25,
@@ -1104,11 +1116,13 @@ def evaluate_model(
                     candidates_only=candidates_only,
                 )
                 reward, _ = compute_reward(pred_label, item.gold_label)
-                cand_bonus, has_int_cand, has_slot_cand = _candidate_bonus(
+                cand_bonus, has_int_cand, has_slot_cand, c_intent_count, c_count_bonus = _candidate_bonus(
                     formatted_output=formatted_text,
                     gold_label=item.gold_label,
                     w_intent_candidate=reward_w_intent_candidate,
                     w_slot_candidate=reward_w_slot_candidate,
+                    w_intent_count=reward_w_c_intent_count,
+                    intent_count_target=reward_c_intent_target,
                 )
                 reward += cand_bonus
                 reward = _apply_cot_reward_adjustment(
@@ -1168,6 +1182,8 @@ def evaluate_model(
                         "format_ok": bool(format_ok),
                         "has_gold_intent_candidate": bool(has_int_cand),
                         "has_gold_slot_candidate": bool(has_slot_cand),
+                        "c_intent_count": int(c_intent_count),
+                        "c_count_bonus": float(c_count_bonus),
                         "candidate_bonus": float(cand_bonus),
                         "raw_output": generated_text,
                         "target": "",
@@ -1185,7 +1201,8 @@ def evaluate_model(
                 print(
                     f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} "
                     f"format_ok={bool(format_ok)} has_intent_cand={bool(has_int_cand)} "
-                    f"has_slot_cand={bool(has_slot_cand)} cand_bonus={cand_bonus:.4f} reward={reward:.4f}"
+                    f"has_slot_cand={bool(has_slot_cand)} c_intent_count={int(c_intent_count)} "
+                    f"c_count_bonus={c_count_bonus:.4f} cand_bonus={cand_bonus:.4f} reward={reward:.4f}"
                 )
             if rank == 0 and idx < max(0, preview_count):
                 print(
@@ -1534,6 +1551,18 @@ def main() -> None:
         help="Bonus reward when any gold slot type appears in C: slot candidates.",
     )
     parser.add_argument(
+        "--reward_w_c_intent_count",
+        type=float,
+        default=0.25,
+        help="Bonus weight for keeping C: intent candidate count close to --reward_c_intent_target.",
+    )
+    parser.add_argument(
+        "--reward_c_intent_target",
+        type=int,
+        default=3,
+        help="Target number of intent candidates in C: for count-shaping reward.",
+    )
+    parser.add_argument(
         "--early_stopping",
         dest="early_stopping",
         action="store_true",
@@ -1570,6 +1599,18 @@ def main() -> None:
     parser.add_argument("--debug_preview_steps", type=int, default=3, help="Training steps to trace in debug.")
     parser.add_argument("--debug_preview_samples", type=int, default=3, help="Generated samples to show per item.")
     parser.add_argument("--debug_max_chars", type=int, default=1200, help="Max chars per debug text field.")
+    parser.add_argument(
+        "--eval_preview_count",
+        type=int,
+        default=3,
+        help="Number of real model outputs to print for each eval call (set 0 to disable).",
+    )
+    parser.add_argument(
+        "--test_preview_count",
+        type=int,
+        default=3,
+        help="Number of real model outputs to print for each test-eval call (set 0 to disable).",
+    )
     parser.add_argument(
         "--param_debug",
         "--param-debug",
@@ -1639,6 +1680,12 @@ def main() -> None:
         raise ValueError("--balanced_per_intent must be >= 0")
     if args.balanced_per_intent_slot_combo < 0:
         raise ValueError("--balanced_per_intent_slot_combo must be >= 0")
+    if args.eval_preview_count < 0:
+        raise ValueError("--eval_preview_count must be >= 0")
+    if args.test_preview_count < 0:
+        raise ValueError("--test_preview_count must be >= 0")
+    if args.reward_c_intent_target <= 0:
+        raise ValueError("--reward_c_intent_target must be >= 1")
     if args.max_steps < 0:
         raise ValueError("--max_steps must be >= 0")
     if args.lora_r < 1:
@@ -1894,6 +1941,10 @@ def main() -> None:
             f"candidates_only={args.candidates_only} label_cot={args.label_cot} "
             f"cot_only={args.cot_only} "
             f"cot_format_bonus={args.cot_format_bonus} cot_format_penalty={args.cot_format_penalty} "
+            f"reward_w_c_intent_count={args.reward_w_c_intent_count} "
+            f"reward_c_intent_target={args.reward_c_intent_target} "
+            f"eval_preview_count={args.eval_preview_count} "
+            f"test_preview_count={args.test_preview_count} "
             f"smoke={args.smoke} "
             f"param_debug={args.param_debug} "
             f"shuffle_train={args.shuffle_train} "
@@ -1943,6 +1994,10 @@ def main() -> None:
         )
         prompt_style = "J_ONLY" if args.no_cot else ("C_J" if args.candidates_only else "C_R_J")
         print(f"[GRPO] prompt_style={prompt_style}")
+        print(
+            "[GRPO] c_intent_count_reward "
+            f"target={args.reward_c_intent_target} weight={args.reward_w_c_intent_count}"
+        )
         if args.only_grpo:
             print(
                 f"[GRPO] only_grpo=True -> force base model for both policy/ref: "
@@ -2068,10 +2123,12 @@ def main() -> None:
             world_size=world_size,
             debug=args.debug,
             debug_max_chars=args.debug_max_chars,
-            preview_count=(5 if args.smoke else 0),
-            preview_prefix="[GRPO-EVAL-INIT-SMOKE]",
+            preview_count=args.eval_preview_count,
+            preview_prefix="[GRPO-EVAL-INIT-PREVIEW]",
             reward_w_intent_candidate=args.reward_w_intent_candidate,
             reward_w_slot_candidate=args.reward_w_slot_candidate,
+            reward_w_c_intent_count=args.reward_w_c_intent_count,
+            reward_c_intent_target=args.reward_c_intent_target,
             cot_only=args.cot_only,
             cot_format_bonus=args.cot_format_bonus,
             cot_format_penalty=args.cot_format_penalty,
@@ -2173,6 +2230,8 @@ def main() -> None:
                     candidate_bonus_values: List[float] = []
                     has_intent_candidate_values: List[bool] = []
                     has_slot_candidate_values: List[bool] = []
+                    c_intent_count_values: List[int] = []
+                    c_count_bonus_values: List[float] = []
                     for text in samples:
                         formatted_text, pred_label, format_ok = _format_model_output(
                             text,
@@ -2187,11 +2246,13 @@ def main() -> None:
                             w_intent=args.reward_w_intent,
                             w_entity=args.reward_w_entity,
                         )
-                        cand_bonus, has_int_cand, has_slot_cand = _candidate_bonus(
+                        cand_bonus, has_int_cand, has_slot_cand, c_intent_count, c_count_bonus = _candidate_bonus(
                             formatted_output=formatted_text,
                             gold_label=item.gold_label,
                             w_intent_candidate=args.reward_w_intent_candidate,
                             w_slot_candidate=args.reward_w_slot_candidate,
+                            w_intent_count=args.reward_w_c_intent_count,
+                            intent_count_target=args.reward_c_intent_target,
                         )
                         reward += cand_bonus
                         reward = _apply_cot_reward_adjustment(
@@ -2209,6 +2270,8 @@ def main() -> None:
                         candidate_bonus_values.append(float(cand_bonus))
                         has_intent_candidate_values.append(bool(has_int_cand))
                         has_slot_candidate_values.append(bool(has_slot_cand))
+                        c_intent_count_values.append(int(c_intent_count))
+                        c_count_bonus_values.append(float(c_count_bonus))
 
                     if debug_step:
                         preview_n = min(args.debug_preview_samples, len(samples))
@@ -2218,6 +2281,8 @@ def main() -> None:
                                 f"format_ok={format_ok_values[i]} "
                                 f"has_intent_cand={has_intent_candidate_values[i]} "
                                 f"has_slot_cand={has_slot_candidate_values[i]} "
+                                f"c_intent_count={c_intent_count_values[i]} "
+                                f"c_count_bonus={c_count_bonus_values[i]:.4f} "
                                 f"cand_bonus={candidate_bonus_values[i]:.4f} "
                                 f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
                             )
@@ -2326,6 +2391,16 @@ def main() -> None:
                                     bool(has_slot_candidate_values[sample_idx])
                                     if sample_idx < len(has_slot_candidate_values)
                                     else False
+                                ),
+                                "c_intent_count": (
+                                    int(c_intent_count_values[sample_idx])
+                                    if sample_idx < len(c_intent_count_values)
+                                    else 0
+                                ),
+                                "c_count_bonus": (
+                                    float(c_count_bonus_values[sample_idx])
+                                    if sample_idx < len(c_count_bonus_values)
+                                    else 0.0
                                 ),
                                 "candidate_bonus": (
                                     float(candidate_bonus_values[sample_idx])
@@ -2476,10 +2551,12 @@ def main() -> None:
                     world_size=world_size,
                     debug=args.debug,
                     debug_max_chars=args.debug_max_chars,
-                    preview_count=(5 if args.smoke else 0),
-                    preview_prefix="[GRPO-EVAL-SMOKE]",
+                    preview_count=args.eval_preview_count,
+                    preview_prefix="[GRPO-EVAL-PREVIEW]",
                     reward_w_intent_candidate=args.reward_w_intent_candidate,
                     reward_w_slot_candidate=args.reward_w_slot_candidate,
+                    reward_w_c_intent_count=args.reward_w_c_intent_count,
+                    reward_c_intent_target=args.reward_c_intent_target,
                     cot_only=args.cot_only,
                     cot_format_bonus=args.cot_format_bonus,
                     cot_format_penalty=args.cot_format_penalty,
@@ -2541,8 +2618,12 @@ def main() -> None:
                     debug_max_chars=args.debug_max_chars,
                     show_progress=True,
                     progress_desc=f"test@step{global_step}",
+                    preview_count=args.test_preview_count,
+                    preview_prefix="[GRPO-TEST-PREVIEW]",
                     reward_w_intent_candidate=args.reward_w_intent_candidate,
                     reward_w_slot_candidate=args.reward_w_slot_candidate,
+                    reward_w_c_intent_count=args.reward_w_c_intent_count,
+                    reward_c_intent_target=args.reward_c_intent_target,
                     cot_only=args.cot_only,
                     cot_format_bonus=args.cot_format_bonus,
                     cot_format_penalty=args.cot_format_penalty,
@@ -2596,10 +2677,12 @@ def main() -> None:
             world_size=world_size,
             debug=args.debug,
             debug_max_chars=args.debug_max_chars,
-            preview_count=(5 if args.smoke else 0),
-            preview_prefix="[GRPO-EVAL-FINAL-SMOKE]",
+            preview_count=args.eval_preview_count,
+            preview_prefix="[GRPO-EVAL-FINAL-PREVIEW]",
             reward_w_intent_candidate=args.reward_w_intent_candidate,
             reward_w_slot_candidate=args.reward_w_slot_candidate,
+            reward_w_c_intent_count=args.reward_w_c_intent_count,
+            reward_c_intent_target=args.reward_c_intent_target,
             cot_only=args.cot_only,
             cot_format_bonus=args.cot_format_bonus,
             cot_format_penalty=args.cot_format_penalty,
@@ -2636,8 +2719,12 @@ def main() -> None:
             collect_predictions=True,
             show_progress=True,
             progress_desc="test-final",
+            preview_count=args.test_preview_count,
+            preview_prefix="[GRPO-TEST-FINAL-PREVIEW]",
             reward_w_intent_candidate=args.reward_w_intent_candidate,
             reward_w_slot_candidate=args.reward_w_slot_candidate,
+            reward_w_c_intent_count=args.reward_w_c_intent_count,
+            reward_c_intent_target=args.reward_c_intent_target,
             cot_only=args.cot_only,
             cot_format_bonus=args.cot_format_bonus,
             cot_format_penalty=args.cot_format_penalty,
