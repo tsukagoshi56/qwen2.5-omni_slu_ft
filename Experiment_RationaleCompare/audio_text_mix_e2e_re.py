@@ -79,6 +79,10 @@ PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY = (
     "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
     f"J: {OUTPUT_SCHEMA}"
 )
+PROMPT_OUTPUT_FORMAT_JSON_ONLY = (
+    "Output Format:\n"
+    f"J: {OUTPUT_SCHEMA}"
+)
 PROMPT_DB_DEFINITIONS = "Intents: (none)\nSlot Types: (none)"
 
 
@@ -146,7 +150,12 @@ def candidate_to_text(value: Any) -> str:
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
     task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
-    output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY if task_mode == "candidates" else PROMPT_OUTPUT_FORMAT
+    if task_mode == "json_only":
+        output_format = PROMPT_OUTPUT_FORMAT_JSON_ONLY
+    elif task_mode == "candidates":
+        output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
+    else:
+        output_format = PROMPT_OUTPUT_FORMAT
 
     if include_transcript and transcript:
         return (
@@ -163,7 +172,14 @@ def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) ->
     )
 
 
-def build_training_target(rationale_text: str, final_json: str, use_rationale: bool = True) -> str:
+def build_training_target(
+    rationale_text: str,
+    final_json: str,
+    use_rationale: bool = True,
+    use_candidates: bool = True,
+) -> str:
+    if not use_rationale and not use_candidates:
+        return f"J: {final_json}"
     rationale = (rationale_text or "").strip()
     if not rationale:
         return f"J: {final_json}"
@@ -688,6 +704,7 @@ def build_items_from_rationale_jsonl(
     audio_search_print_limit: int = 100,
     strict_audio_missing: bool = False,
     train_candidates_only: bool = False,
+    train_json_only: bool = False,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -750,7 +767,8 @@ def build_items_from_rationale_jsonl(
                 target_str = build_training_target(
                     rationale_text,
                     final_json,
-                    use_rationale=not train_candidates_only,
+                    use_rationale=(not train_candidates_only and not train_json_only),
+                    use_candidates=(not train_json_only),
                 )
 
                 # Prioritize explicit transcript fields
@@ -790,7 +808,8 @@ def build_items_from_rationale_jsonl(
                 target_str = build_training_target(
                     rationale_text,
                     final_json,
-                    use_rationale=not train_candidates_only,
+                    use_rationale=(not train_candidates_only and not train_json_only),
+                    use_candidates=(not train_json_only),
                 )
             
             # Common file resolution
@@ -814,7 +833,11 @@ def build_items_from_rationale_jsonl(
                 "target": target_str,
                 "target_obj": target_obj,
                 "prompt_text": user_text.strip() if user_text else "",
-                "task_mode": "candidates" if train_candidates_only else "cot",
+                "task_mode": (
+                    "json_only"
+                    if train_json_only
+                    else ("candidates" if train_candidates_only else "cot")
+                ),
             }
             text_only_item = {**base_item, "audio_path": None}
             fallback_text_items.append(text_only_item)
@@ -1963,6 +1986,16 @@ def main():
         action="store_false",
         help="Use full C/R/J targets/prompts for train/eval splits.",
     )
+    parser.add_argument(
+        "--train_json_only",
+        "--train-json-only",
+        "--no_c_train",
+        "--no-c-train",
+        dest="train_json_only",
+        action="store_true",
+        default=False,
+        help="Use J-only targets/prompts (no C/R) for train/eval splits.",
+    )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
         "--text_only",
@@ -2044,7 +2077,11 @@ def main():
             logger.info("text_only=True: all splits will use text-only items.")
         logger.info(
             "Train/eval target mode: %s",
-            "C+J (no R)" if args.train_candidates_only else "C/R/J",
+            (
+                "J only (no C/R)"
+                if args.train_json_only
+                else ("C+J (no R)" if args.train_candidates_only else "C/R/J")
+            ),
         )
 
     if rank == 0:
@@ -2074,6 +2111,7 @@ def main():
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
         train_candidates_only=args.train_candidates_only,
+        train_json_only=args.train_json_only,
     )
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
@@ -2086,6 +2124,7 @@ def main():
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
         train_candidates_only=args.train_candidates_only,
+        train_json_only=args.train_json_only,
     )
 
     if rank == 0:
@@ -2169,6 +2208,7 @@ def main():
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
         train_candidates_only=False,
+        train_json_only=False,
     )
 
     output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
