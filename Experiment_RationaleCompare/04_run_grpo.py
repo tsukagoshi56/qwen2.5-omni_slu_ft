@@ -331,7 +331,13 @@ def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
     )
 
 
-def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: bool = False) -> str:
+def build_grpo_prompt(
+    mode: str,
+    sentence: str,
+    db_definitions: str,
+    no_cot: bool = False,
+    label_cot: bool = False,
+) -> str:
     # Compact prompt for GRPO: instruction + input + output format only.
     # DB Definitions and detailed Rules are intentionally omitted.
     _ = db_definitions
@@ -339,11 +345,40 @@ def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: boo
         '{"Intent": "<scenario>_<action>", "entities": '
         '[{"type": "<entity_type>", "filler": "<entity_value>"}, ...]}'
     )
-    if mode == "audio":
-        if no_cot:
+    label_only = bool(no_cot)
+    if label_cot:
+        output_format = (
+            "Output Format:\n"
+            f"J: {output_schema}"
+            if label_only
+            else (
+                "Output Format:\n"
+                "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+                "R: label1!reason1; label2!reason2; ...\n"
+                f"J: {output_schema}"
+            )
+        )
+        if mode == "audio":
             return (
                 "System: Predict SLU labels from audio.\n\n"
                 "[Input Data]\n"
+                "- Audio: <AUDIO>\n\n"
+                f"{output_format}"
+            )
+        text = str(sentence or "").strip()
+        return (
+            "System: Predict SLU labels from transcript.\n\n"
+            "[Input Data]\n"
+            f"- Transcript: {text}\n\n"
+            f"{output_format}"
+        )
+
+    if mode == "audio":
+        if label_only:
+            return (
+                "System: Predict SLU labels from audio.\n\n"
+                "[Input Data]\n"
+                "- Task: LABEL_ONLY\n"
                 "- Audio: <AUDIO>\n\n"
                 "Output Format:\n"
                 f"J: {output_schema}"
@@ -351,6 +386,7 @@ def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: boo
         return (
             "System: Predict SLU labels from audio.\n\n"
             "[Input Data]\n"
+            "- Task: COT_LABEL\n"
             "- Audio: <AUDIO>\n\n"
             "Output Format:\n"
             "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
@@ -358,10 +394,11 @@ def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: boo
             f"J: {output_schema}"
         )
     text = str(sentence or "").strip()
-    if no_cot:
+    if label_only:
         return (
             "System: Predict SLU labels from transcript.\n\n"
             "[Input Data]\n"
+            "- Task: LABEL_ONLY\n"
             f"- Transcript: {text}\n\n"
             "Output Format:\n"
             f"J: {output_schema}"
@@ -369,6 +406,7 @@ def build_grpo_prompt(mode: str, sentence: str, db_definitions: str, no_cot: boo
     return (
         "System: Predict SLU labels from transcript.\n\n"
         "[Input Data]\n"
+        "- Task: COT_LABEL\n"
         f"- Transcript: {text}\n\n"
         "Output Format:\n"
         "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
@@ -664,7 +702,8 @@ def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, 
     }
     j_line = "J: " + json.dumps(j_obj, ensure_ascii=False)
     has_j = pred_obj is not None
-    if no_cot:
+    label_only = bool(no_cot)
+    if label_only:
         return j_line, pred_label, has_j
 
     c_line = _extract_prefixed_line(raw_output, "C:")
@@ -889,6 +928,7 @@ def evaluate_model(
     items: List[GrpoItem],
     db_definitions: str,
     no_cot: bool,
+    label_cot: bool,
     device: torch.device,
     max_new_tokens: int,
     rank: int,
@@ -943,6 +983,7 @@ def evaluate_model(
                     item.sentence,
                     db_definitions=db_definitions,
                     no_cot=no_cot,
+                    label_cot=label_cot,
                 )
                 text_input = build_chat_input(processor, prompt, audio is not None)
                 if audio is None:
@@ -984,7 +1025,8 @@ def evaluate_model(
                     _recover_from_oom()
                     if rank == 0:
                         print(
-                            f"[WARN][EVAL-OOM] skipped sample slurp_id={item.slurp_id} mode={item.mode}: {exc}"
+                            f"[WARN][EVAL-OOM] skipped sample slurp_id={item.slurp_id} "
+                            f"mode={item.mode}: {exc}"
                         )
                     continue
                 raise
@@ -1202,6 +1244,22 @@ def main() -> None:
         action="store_false",
         help="Disable text-mode samples and train with audio-mode samples only.",
     )
+    parser.add_argument(
+        "--label_cot",
+        "--label-COT",
+        "--label_CoT",
+        dest="label_cot",
+        action="store_true",
+        help="Use multitask.py-aligned prompt text/format style (no Task tag line).",
+    )
+    parser.add_argument(
+        "--no_label_cot",
+        "--no-label-COT",
+        "--no_label_CoT",
+        dest="label_cot",
+        action="store_false",
+        help="Use GRPO native prompt text/format style.",
+    )
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
         "--shuffle_train",
@@ -1411,6 +1469,7 @@ def main() -> None:
     )
     parser.set_defaults(
         include_text=True,
+        label_cot=False,
         no_cot=False,
         early_stopping=False,
         shuffle_train=False,
@@ -1678,7 +1737,8 @@ def main() -> None:
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"use_lora={args.use_lora} lora_r={args.lora_r} lora_alpha={args.lora_alpha} "
             f"lora_dropout={args.lora_dropout} lora_audio_tower={args.lora_audio_tower} "
-            f"include_text={args.include_text} no_cot={args.no_cot} cot_only={args.cot_only} "
+            f"include_text={args.include_text} no_cot={args.no_cot} label_cot={args.label_cot} "
+            f"cot_only={args.cot_only} "
             f"cot_format_bonus={args.cot_format_bonus} cot_format_penalty={args.cot_format_penalty} "
             f"smoke={args.smoke} "
             f"param_debug={args.param_debug} "
@@ -1845,6 +1905,7 @@ def main() -> None:
             items=init_eval_items,
             db_definitions=db_definitions,
             no_cot=args.no_cot,
+            label_cot=args.label_cot,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
@@ -1922,6 +1983,7 @@ def main() -> None:
                         item.sentence,
                         db_definitions=db_definitions,
                         no_cot=args.no_cot,
+                        label_cot=args.label_cot,
                     )
 
                     debug_step = args.debug and rank == 0 and (global_step < args.debug_preview_steps)
@@ -2245,6 +2307,7 @@ def main() -> None:
                     items=eval_items_step,
                     db_definitions=db_definitions,
                     no_cot=args.no_cot,
+                    label_cot=args.label_cot,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -2306,6 +2369,7 @@ def main() -> None:
                     items=test_items,
                     db_definitions=db_definitions,
                     no_cot=args.no_cot,
+                    label_cot=args.label_cot,
                     device=device,
                     max_new_tokens=args.max_new_tokens,
                     rank=rank,
@@ -2361,6 +2425,7 @@ def main() -> None:
             items=final_eval_items,
             db_definitions=db_definitions,
             no_cot=args.no_cot,
+            label_cot=args.label_cot,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,
@@ -2396,6 +2461,7 @@ def main() -> None:
             items=test_items,
             db_definitions=db_definitions,
             no_cot=args.no_cot,
+            label_cot=args.label_cot,
             device=device,
             max_new_tokens=args.max_new_tokens,
             rank=rank,

@@ -2051,6 +2051,29 @@ def main():
         action="store_true",
         help="Also export label-only predictions and metrics after inference.",
     )
+    parser.add_argument(
+        "--test_task_mode",
+        type=str,
+        choices=["cot", "label"],
+        default="cot",
+        help="Prompt/output mode used only for test inference (default: cot).",
+    )
+    parser.add_argument(
+        "--no_cot",
+        "--no-cot",
+        dest="test_task_mode",
+        action="store_const",
+        const="label",
+        help="Alias for --test_task_mode label (J-only generation at test time).",
+    )
+    parser.add_argument(
+        "--with_cot",
+        "--with-cot",
+        dest="test_task_mode",
+        action="store_const",
+        const="cot",
+        help="Alias for --test_task_mode cot (C/R/J generation at test time).",
+    )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
         "--text_only",
@@ -2335,6 +2358,8 @@ def main():
         strict_audio_missing=args.strict_audio_missing,
         multitask=False,
     )
+    for item in test_items:
+        item["task_mode"] = args.test_task_mode
 
     output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
     output_parent = os.path.dirname(output_jsonl)
@@ -2342,6 +2367,7 @@ def main():
         os.makedirs(output_parent, exist_ok=True)
     if rank == 0:
         logger.info("Test inference DataLoader workers: %d", args.inference_num_workers)
+        logger.info("Test task mode: %s", args.test_task_mode)
         logger.info("Prediction output file: %s", output_jsonl)
     run_distributed_inference(
         model=model,
