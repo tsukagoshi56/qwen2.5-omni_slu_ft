@@ -137,7 +137,7 @@ python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
 Use the existing trainer (audio + text mixed). Example:
 
 ```bash
-python Experiment_RationaleFT/audio_text_mix_e2e_re.py \
+python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
   --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
   --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
   --test_file  slurp/dataset/slurp/test.jsonl \
