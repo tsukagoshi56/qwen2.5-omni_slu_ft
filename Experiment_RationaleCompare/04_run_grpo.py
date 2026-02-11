@@ -113,6 +113,62 @@ def _record_key(item: GrpoItem, fallback_idx: int) -> Any:
     return item.slurp_id if item.slurp_id is not None else f"__row_{fallback_idx}"
 
 
+def _sample_items_by_slurp_id_ratio(
+    items: List[GrpoItem],
+    ratio: float,
+    seed: int,
+) -> Tuple[List[GrpoItem], Dict[str, int]]:
+    if not items:
+        return items, {"unique_ids": 0, "selected_ids": 0, "items_before": 0, "items_after": 0}
+
+    item_keys: List[Any] = [_record_key(item, idx) for idx, item in enumerate(items)]
+    unique_keys = sorted(
+        set(item_keys),
+        key=lambda x: (type(x).__name__, str(x)),
+    )
+    unique_count = len(unique_keys)
+
+    if ratio >= 1.0:
+        return (
+            items,
+            {
+                "unique_ids": unique_count,
+                "selected_ids": unique_count,
+                "items_before": len(items),
+                "items_after": len(items),
+            },
+        )
+    if ratio <= 0.0:
+        return (
+            [],
+            {
+                "unique_ids": unique_count,
+                "selected_ids": 0,
+                "items_before": len(items),
+                "items_after": 0,
+            },
+        )
+
+    selected_count = int(unique_count * ratio)
+    if selected_count == 0:
+        selected_count = 1
+    selected_count = min(selected_count, unique_count)
+
+    rng = random.Random(seed)
+    selected_keys = set(rng.sample(unique_keys, selected_count))
+    sampled_items = [item for item, key in zip(items, item_keys) if key in selected_keys]
+
+    return (
+        sampled_items,
+        {
+            "unique_ids": unique_count,
+            "selected_ids": selected_count,
+            "items_before": len(items),
+            "items_after": len(sampled_items),
+        },
+    )
+
+
 def _label_intent_key(gold_label: Dict[str, Any]) -> str:
     scenario = str(gold_label.get("scenario", "")).strip().lower()
     action = str(gold_label.get("action", "")).strip().lower()
@@ -1344,6 +1400,25 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--train_id_sample_ratio",
+        "--train-id-sample-ratio",
+        dest="train_id_sample_ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Randomly keep only this ratio of unique training slurp_id values "
+            "before other balancing/smoke filtering (0.0-1.0)."
+        ),
+    )
+    parser.add_argument(
+        "--train_id_sample_seed",
+        "--train-id-sample-seed",
+        dest="train_id_sample_seed",
+        type=int,
+        default=None,
+        help="Seed for train slurp_id subsampling (default: --seed).",
+    )
+    parser.add_argument(
         "--balanced_per_intent",
         "--balanced-per-intent",
         dest="balanced_per_intent",
@@ -1556,6 +1631,8 @@ def main() -> None:
         raise ValueError("--early_stopping_min_epochs must be >= 0")
     if args.grad_accum_steps < 1:
         raise ValueError("--grad_accum_steps must be >= 1")
+    if args.train_id_sample_ratio < 0.0 or args.train_id_sample_ratio > 1.0:
+        raise ValueError("--train_id_sample_ratio must satisfy 0.0 <= value <= 1.0")
     if args.balanced_train_records < 0:
         raise ValueError("--balanced_train_records must be >= 0")
     if args.balanced_per_intent < 0:
@@ -1698,6 +1775,20 @@ def main() -> None:
         print(f"[DEBUG] metadata_file not found: {metadata_path} (unused in compact prompt mode)")
 
     items = build_items(train_path, audio_dir, include_text=args.include_text)
+    sample_seed = args.seed if args.train_id_sample_seed is None else int(args.train_id_sample_seed)
+    items, sample_stats = _sample_items_by_slurp_id_ratio(
+        items=items,
+        ratio=args.train_id_sample_ratio,
+        seed=sample_seed,
+    )
+    if rank == 0:
+        print(
+            "[GRPO] train slurp_id subsampling: "
+            f"ratio={args.train_id_sample_ratio:.4f} seed={sample_seed} "
+            f"selected_ids={sample_stats['selected_ids']}/{sample_stats['unique_ids']} "
+            f"items={sample_stats['items_after']}/{sample_stats['items_before']}"
+        )
+
     if args.balanced_per_intent_slot_combo > 0:
         total_items_before = len(items)
         unique_records_before = len({_record_key(x, i) for i, x in enumerate(items)})
