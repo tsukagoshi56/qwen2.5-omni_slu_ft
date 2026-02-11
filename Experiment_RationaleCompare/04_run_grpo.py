@@ -43,6 +43,7 @@ from common import (
     split_intent,
 )
 DEFAULT_ONLY_GRPO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
+PARAM_DEBUG_EVAL_SAMPLES = 200
 
 
 @dataclass
@@ -1208,7 +1209,10 @@ def main() -> None:
         "--param-debug",
         dest="param_debug",
         action="store_true",
-        help="Quick GRPO parameter-debug preset: eval every 50 steps with random 50 eval samples.",
+        help=(
+            "Quick GRPO parameter-debug preset: eval every 50 steps "
+            f"with a fixed random {PARAM_DEBUG_EVAL_SAMPLES}-sample eval subset."
+        ),
     )
     parser.add_argument(
         "--debug_output_file",
@@ -1285,7 +1289,7 @@ def main() -> None:
     if args.param_debug:
         if args.eval_file:
             args.eval_every = 50
-        # Keep full eval pool; each eval call will draw random 50 samples.
+        # Keep full eval pool; the run will draw one fixed random subset.
         args.eval_max_samples = None
     if args.use_lora and not HAS_PEFT:
         raise ImportError(
@@ -1468,13 +1472,13 @@ def main() -> None:
             if test_cap is not None:
                 test_items = test_items[: max(0, test_cap)]
 
-    # In --param_debug mode, keep one fixed 50-sample eval subset for the whole run.
+    # In --param_debug mode, keep one fixed eval subset for the whole run.
     param_debug_eval_items = eval_items
     if args.eval_file and args.param_debug:
         param_debug_eval_items = _pick_param_debug_eval_items(
             eval_items,
             enabled=True,
-            sample_size=50,
+            sample_size=PARAM_DEBUG_EVAL_SAMPLES,
             seed=args.seed,
             eval_index=0,
         )
@@ -1508,7 +1512,7 @@ def main() -> None:
             print(
                 f"[DEBUG] eval_file={eval_path} eval_items={len(eval_items)} "
                 f"eval_every={args.eval_every} eval_max_samples={args.eval_max_samples} "
-                f"param_debug_random_eval50={args.param_debug}"
+                f"param_debug_eval_subset={PARAM_DEBUG_EVAL_SAMPLES if args.param_debug else 'off'}"
             )
         if args.test_file:
             print(
