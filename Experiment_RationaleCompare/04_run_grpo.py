@@ -412,10 +412,11 @@ def model_forward(model: Qwen2AudioForConditionalGeneration, inputs: Dict[str, t
     return model(**kwargs)
 
 
-def compute_logprob_sum(
+def compute_token_logprobs(
     model: Qwen2AudioForConditionalGeneration,
     inputs: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
+    """Return per-token log-probabilities for the response tokens (excluding prompt)."""
     prompt_len = int(inputs.get("_prompt_len", 0))
     outputs = model_forward(model, inputs)
     logits = outputs.logits
@@ -426,9 +427,9 @@ def compute_logprob_sum(
     log_probs = log_probs[:, :-1, :]
     start = max(prompt_len - 1, 0)
     if start >= log_probs.shape[1]:
-        return torch.tensor(0.0, device=input_ids.device)
+        return torch.tensor([0.0], device=input_ids.device)
     token_logprobs = log_probs[0, start:, :].gather(1, target_ids[0, start:].unsqueeze(-1)).squeeze(-1)
-    return token_logprobs.sum()
+    return token_logprobs
 
 
 def generate_samples(
@@ -451,20 +452,29 @@ def generate_samples(
         inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
+    # Switch to eval mode for generation to disable dropout etc.
+    was_training = model.training
+    model.eval()
+
     outputs: List[str] = []
-    for _ in range(group_size):
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            temperature=temperature,
-            top_p=top_p,
-            use_cache=True,
-            pad_token_id=processor.tokenizer.pad_token_id,
-        )
-        input_len = inputs["input_ids"].shape[1]
-        generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-        outputs.append(generated_text)
+    with torch.no_grad():
+        for _ in range(group_size):
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_p=top_p,
+                use_cache=True,
+                pad_token_id=processor.tokenizer.pad_token_id,
+            )
+            input_len = inputs["input_ids"].shape[1]
+            generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+            outputs.append(generated_text)
+
+    # Restore previous mode.
+    if was_training:
+        model.train()
     return outputs
 
 
@@ -1807,7 +1817,7 @@ def main() -> None:
                             audio=audio,
                             device=device,
                         )
-                        logprob = compute_logprob_sum(model, inputs)
+                        token_lps = compute_token_logprobs(model, inputs)
 
                         with torch.no_grad():
                             ref_inputs = prepare_inputs(
@@ -1817,15 +1827,29 @@ def main() -> None:
                                 audio=audio,
                                 device=device,
                             )
-                            ref_logprob = compute_logprob_sum(ref_model, ref_inputs)
+                            ref_token_lps = compute_token_logprobs(ref_model, ref_inputs)
 
-                        kl = logprob - ref_logprob
-                        loss = -(advantage * logprob) + args.kl_beta * kl
+                        # Align lengths (rare edge-case where tokenization differs).
+                        min_len = min(token_lps.shape[0], ref_token_lps.shape[0])
+                        token_lps = token_lps[:min_len]
+                        ref_token_lps = ref_token_lps[:min_len]
+
+                        # Per-token KL divergence: KL(π_θ || π_ref) ≈ log π_θ - log π_ref
+                        per_token_kl = token_lps - ref_token_lps
+
+                        # Mean log-probability (length-normalised).
+                        logprob_mean = token_lps.mean()
+                        ref_logprob_mean = ref_token_lps.mean()
+                        kl_mean_val = per_token_kl.mean()
+
+                        # GRPO loss: -advantage * mean(log π_θ) + β * mean(per-token KL)
+                        # advantage is a Python float (no grad), so this is correct REINFORCE.
+                        loss = -(advantage * logprob_mean) + args.kl_beta * kl_mean_val
                         batch_loss += loss
                         sample_count += 1
-                        logprob_values.append(float(logprob.item()))
-                        ref_logprob_values.append(float(ref_logprob.item()))
-                        kl_values.append(float(kl.item()))
+                        logprob_values.append(float(logprob_mean.item()))
+                        ref_logprob_values.append(float(ref_logprob_mean.item()))
+                        kl_values.append(float(kl_mean_val.item()))
                         sample_loss_values.append(float(loss.item()))
 
                         if debug_step and sample_idx < args.debug_preview_samples:
@@ -1839,9 +1863,9 @@ def main() -> None:
                                 "mean_reward": float(mean_reward),
                                 "std_reward": float(std),
                                 "advantage": float(advantage),
-                                "logprob": float(logprob.item()),
-                                "ref_logprob": float(ref_logprob.item()),
-                                "kl": float(kl.item()),
+                                "logprob": float(logprob_mean.item()),
+                                "ref_logprob": float(ref_logprob_mean.item()),
+                                "kl": float(kl_mean_val.item()),
                                 "loss": float(loss.item()),
                                 "gold_label": item.gold_label,
                                 "pred_label": pred_labels[sample_idx] if sample_idx < len(pred_labels) else {},
@@ -1857,8 +1881,8 @@ def main() -> None:
                             _debug_write_jsonl(debug_output_path, trace_row)
                             print(
                                 f"[DEBUG][step={global_step}] sample#{sample_idx} "
-                                f"adv={advantage:.4f} logprob={logprob.item():.4f} "
-                                f"ref={ref_logprob.item():.4f} kl={kl.item():.4f} loss={loss.item():.4f}"
+                                f"adv={advantage:.4f} logprob={logprob_mean.item():.4f} "
+                                f"ref={ref_logprob_mean.item():.4f} kl={kl_mean_val.item():.4f} loss={loss.item():.4f}"
                             )
                 except RuntimeError as exc:
                     if _is_oom_error(exc):
