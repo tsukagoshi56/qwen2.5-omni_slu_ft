@@ -1929,6 +1929,65 @@ def evaluate_prediction_file(prediction_path: str) -> Dict[str, float]:
     }
 
 
+def sample_train_items_by_slurp_id(
+    items: List[Dict[str, Any]],
+    ratio: float,
+    seed: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    if not items:
+        return items, {"unique_ids": 0, "selected_ids": 0, "items_before": 0, "items_after": 0}
+
+    item_ids: List[str] = []
+    for idx, item in enumerate(items):
+        sample_id = pick_first_nonempty(item.get("slurp_id"), item.get("id"))
+        if not sample_id:
+            sample_id = f"__missing_id_{idx}"
+        item_ids.append(sample_id)
+
+    unique_ids = sorted(set(item_ids))
+    unique_count = len(unique_ids)
+
+    if ratio >= 1.0:
+        return (
+            items,
+            {
+                "unique_ids": unique_count,
+                "selected_ids": unique_count,
+                "items_before": len(items),
+                "items_after": len(items),
+            },
+        )
+    if ratio <= 0.0:
+        return (
+            [],
+            {
+                "unique_ids": unique_count,
+                "selected_ids": 0,
+                "items_before": len(items),
+                "items_after": 0,
+            },
+        )
+
+    selected_count = int(unique_count * ratio)
+    if selected_count == 0:
+        selected_count = 1
+    selected_count = min(selected_count, unique_count)
+
+    rng = random.Random(seed)
+    selected_ids = set(rng.sample(unique_ids, selected_count))
+    sampled_items = [item for item, sample_id in zip(items, item_ids) if sample_id in selected_ids]
+
+    return (
+        sampled_items,
+        {
+            "unique_ids": unique_count,
+            "selected_ids": selected_count,
+            "items_before": len(items),
+            "items_after": len(sampled_items),
+        },
+    )
+
+
 # ==============================================================================
 # Main
 # ==============================================================================
@@ -1966,6 +2025,18 @@ def main():
     )
 
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument(
+        "--train_id_sample_ratio",
+        type=float,
+        default=0.1,
+        help="Randomly keep only this ratio of unique train SLURP IDs (0.0-1.0). Default: 0.1",
+    )
+    parser.add_argument(
+        "--train_id_sample_seed",
+        type=int,
+        default=42,
+        help="Random seed for train SLURP ID subsampling.",
+    )
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
     parser.add_argument(
@@ -2101,6 +2172,9 @@ def main():
 
     args = parser.parse_args()
 
+    if not (0.0 <= args.train_id_sample_ratio <= 1.0):
+        raise ValueError("--train_id_sample_ratio must be between 0.0 and 1.0")
+
     if args.recover_only:
         recover_input = args.recover_prediction_file.strip()
         if not recover_input:
@@ -2187,6 +2261,25 @@ def main():
         train_candidates_only=args.train_candidates_only,
         train_json_only=args.train_json_only,
     )
+    train_items, train_sample_stats = sample_train_items_by_slurp_id(
+        train_items,
+        ratio=args.train_id_sample_ratio,
+        seed=args.train_id_sample_seed,
+    )
+    if rank == 0:
+        logger.info(
+            (
+                "Train SLURP-ID subsampling: ratio=%.4f seed=%d "
+                "(unique_ids=%d -> selected_ids=%d, items=%d -> %d)"
+            ),
+            args.train_id_sample_ratio,
+            args.train_id_sample_seed,
+            train_sample_stats["unique_ids"],
+            train_sample_stats["selected_ids"],
+            train_sample_stats["items_before"],
+            train_sample_stats["items_after"],
+        )
+
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
         args.audio_dir,
