@@ -1854,7 +1854,7 @@ def main():
         save_strategy="no",
         save_total_limit=None,
         remove_unused_columns=False,
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=True,
         report_to="none",
         disable_tqdm=True,
     )
