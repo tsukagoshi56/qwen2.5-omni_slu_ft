@@ -20,6 +20,14 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 try:
+    from peft import LoraConfig, TaskType, get_peft_model
+    HAS_PEFT = True
+except Exception:  # pragma: no cover
+    LoraConfig = None
+    TaskType = None
+    get_peft_model = None
+    HAS_PEFT = False
+try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
     tqdm = None
@@ -706,6 +714,37 @@ def _recover_from_oom() -> None:
         torch.cuda.empty_cache()
 
 
+def _parse_lora_targets(targets: str) -> List[str]:
+    return [x.strip() for x in str(targets or "").split(",") if x.strip()]
+
+
+def _resolve_lora_targets(
+    model: Qwen2AudioForConditionalGeneration,
+    base_targets: List[str],
+    include_audio_tower: bool,
+) -> Any:
+    if not include_audio_tower:
+        return base_targets
+
+    audio_linear_names: List[str] = []
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        if ("audio_tower" in name) or ("multi_modal_projector" in name):
+            audio_linear_names.append(name)
+
+    if not audio_linear_names:
+        return base_targets
+
+    pattern_parts: List[str] = []
+    if base_targets:
+        escaped_suffix = "|".join(re.escape(x) for x in base_targets)
+        pattern_parts.append(rf".*\.(?:{escaped_suffix})")
+    escaped_audio = "|".join(re.escape(x) for x in sorted(set(audio_linear_names)))
+    pattern_parts.append(rf"(?:{escaped_audio})")
+    return rf"(?:{'|'.join(pattern_parts)})"
+
+
 def _pick_param_debug_eval_items(
     items: List[GrpoItem],
     *,
@@ -1062,6 +1101,38 @@ def main() -> None:
     )
     parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument(
+        "--use_lora",
+        "--use-lora",
+        dest="use_lora",
+        action="store_true",
+        help="Enable LoRA adapters for policy model fine-tuning.",
+    )
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank.")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha.")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout.")
+    parser.add_argument(
+        "--lora_audio_tower",
+        "--lora-audio-tower",
+        dest="lora_audio_tower",
+        action="store_true",
+        help="Include audio_tower / multi_modal_projector linear layers in LoRA targets.",
+    )
+    parser.add_argument(
+        "--no_lora_audio_tower",
+        "--no-lora-audio-tower",
+        dest="lora_audio_tower",
+        action="store_false",
+        help="Do not include audio_tower / multi_modal_projector linear layers in LoRA targets.",
+    )
+    parser.add_argument(
+        "--lora_target_modules",
+        "--lora-target-modules",
+        dest="lora_target_modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated module names to apply LoRA to.",
+    )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
         "--max_steps",
@@ -1166,6 +1237,8 @@ def main() -> None:
         shuffle_train=False,
         do_sample=True,
         param_debug=False,
+        use_lora=False,
+        lora_audio_tower=True,
     )
 
     # Accept both --snake_case and --kebab-case flags.
@@ -1194,6 +1267,12 @@ def main() -> None:
         raise ValueError("--balanced_per_intent_slot_combo must be >= 0")
     if args.max_steps < 0:
         raise ValueError("--max_steps must be >= 0")
+    if args.lora_r < 1:
+        raise ValueError("--lora_r must be >= 1")
+    if args.lora_alpha < 1:
+        raise ValueError("--lora_alpha must be >= 1")
+    if args.lora_dropout < 0 or args.lora_dropout >= 1:
+        raise ValueError("--lora_dropout must satisfy 0 <= value < 1")
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -1208,6 +1287,11 @@ def main() -> None:
             args.eval_every = 50
         # Keep full eval pool; each eval call will draw random 50 samples.
         args.eval_max_samples = None
+    if args.use_lora and not HAS_PEFT:
+        raise ImportError(
+            "--use_lora was specified, but peft is not installed. "
+            "Install peft in this environment and retry."
+        )
 
     forced_only_grpo_base = False
     if args.only_grpo:
@@ -1409,6 +1493,8 @@ def main() -> None:
             f"batch_size={args.batch_size} group_size={args.group_size} max_new_tokens={args.max_new_tokens} "
             f"temperature={args.temperature} top_p={args.top_p} do_sample={args.do_sample} "
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
+            f"use_lora={args.use_lora} lora_r={args.lora_r} lora_alpha={args.lora_alpha} "
+            f"lora_dropout={args.lora_dropout} lora_audio_tower={args.lora_audio_tower} "
             f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke} "
             f"param_debug={args.param_debug} "
             f"shuffle_train={args.shuffle_train} "
@@ -1500,6 +1586,34 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
+    if args.use_lora:
+        lora_base_targets = _parse_lora_targets(args.lora_target_modules)
+        if not lora_base_targets:
+            raise ValueError("--lora_target_modules must contain at least one module name")
+        resolved_targets = _resolve_lora_targets(
+            model=model,
+            base_targets=lora_base_targets,
+            include_audio_tower=args.lora_audio_tower,
+        )
+        lora_cfg = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            target_modules=resolved_targets,
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model = get_peft_model(model, lora_cfg)
+        if rank == 0:
+            print(
+                "[GRPO] LoRA enabled: "
+                f"r={args.lora_r} alpha={args.lora_alpha} dropout={args.lora_dropout} "
+                f"audio_tower={args.lora_audio_tower} "
+                f"base_targets={','.join(lora_base_targets)} "
+                f"resolved_target_type={'regex' if isinstance(resolved_targets, str) else 'list'}"
+            )
+            if hasattr(model, "print_trainable_parameters"):
+                model.print_trainable_parameters()
     if distributed:
         model = DDP(
             model,
@@ -1525,7 +1639,10 @@ def main() -> None:
     for p in ref_model.parameters():
         p.requires_grad_(False)
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters found for optimizer.")
+    optimizer = AdamW(trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay)
     optimizer.zero_grad(set_to_none=True)
 
     global_step = 0
