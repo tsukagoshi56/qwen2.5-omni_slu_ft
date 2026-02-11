@@ -246,6 +246,22 @@ def parse_entities(raw_entities: Any) -> List[Dict[str, str]]:
     return results
 
 
+def get_dict_value_ci(obj: Dict[str, Any], *names: str) -> Any:
+    if not isinstance(obj, dict):
+        return None
+    for name in names:
+        if name in obj:
+            return obj[name]
+    lowered: Dict[str, Any] = {}
+    for k, v in obj.items():
+        lowered[str(k).strip().lower()] = v
+    for name in names:
+        key = str(name).strip().lower()
+        if key in lowered:
+            return lowered[key]
+    return None
+
+
 def intent_to_scenario_action(intent: str) -> Tuple[str, str]:
     intent = (intent or "").strip()
     if "_" in intent:
@@ -259,16 +275,16 @@ def extract_target_obj(record: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(final_obj, dict):
         final_obj = {}
 
-    scenario = str(final_obj.get("scenario", "")).strip()
-    action = str(final_obj.get("action", "")).strip()
+    scenario = str(get_dict_value_ci(final_obj, "scenario") or "").strip()
+    action = str(get_dict_value_ci(final_obj, "action") or "").strip()
 
-    intent = str(final_obj.get("intent", "")).strip()
+    intent = str(get_dict_value_ci(final_obj, "intent") or "").strip()
     if (not scenario or not action) and intent:
         inferred_scenario, inferred_action = intent_to_scenario_action(intent)
         scenario = scenario or inferred_scenario
         action = action or inferred_action
 
-    entities = parse_entities(final_obj.get("entities", []))
+    entities = parse_entities(get_dict_value_ci(final_obj, "entities") or [])
 
     return {
         "scenario": scenario,
@@ -561,18 +577,19 @@ def extract_target_obj_from_assistant(record: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(parsed, dict):
         if "scenario" in parsed or "action" in parsed or "entities" in parsed:
             return {
-                "scenario": str(parsed.get("scenario", "")).strip(),
-                "action": str(parsed.get("action", "")).strip(),
-                "entities": parse_entities(parsed.get("entities", [])),
+                "scenario": str(get_dict_value_ci(parsed, "scenario") or "").strip(),
+                "action": str(get_dict_value_ci(parsed, "action") or "").strip(),
+                "entities": parse_entities(get_dict_value_ci(parsed, "entities") or []),
             }
         if "final" in parsed:
             return extract_target_obj(parsed)
-        if "intent" in parsed:
-            scenario, action = intent_to_scenario_action(str(parsed.get("intent", "")))
+        intent = get_dict_value_ci(parsed, "intent")
+        if intent is not None:
+            scenario, action = intent_to_scenario_action(str(intent))
             return {
                 "scenario": scenario,
                 "action": action,
-                "entities": parse_entities(parsed.get("entities", [])),
+                "entities": parse_entities(get_dict_value_ci(parsed, "entities") or []),
             }
     return {"scenario": "", "action": "", "entities": []}
 
@@ -1278,13 +1295,13 @@ def parse_prediction_label(raw_output: str) -> Dict[str, Any]:
     if isinstance(final_obj, dict):
         parsed = final_obj
 
-    scenario = parsed.get("scenario")
-    action = parsed.get("action")
-    entities = parsed.get("entities") or []
+    scenario = get_dict_value_ci(parsed, "scenario")
+    action = get_dict_value_ci(parsed, "action")
+    entities = get_dict_value_ci(parsed, "entities") or []
 
     # 2. If scenario/action are missing, try to parse "intent"
     if not scenario and not action:
-        intent = parsed.get("intent")
+        intent = get_dict_value_ci(parsed, "intent")
         if isinstance(intent, str):
             intent = intent.strip()
             if "_" in intent:
@@ -1299,6 +1316,66 @@ def parse_prediction_label(raw_output: str) -> Dict[str, Any]:
         "scenario": str(scenario or "").strip(),
         "action": str(action or "").strip(),
         "entities": parse_entities(entities),
+    }
+
+
+def recover_prediction_file(input_path: str, output_path: str) -> Dict[str, int]:
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"recover input not found: {input_path}")
+
+    total = 0
+    changed = 0
+    intent_key_recovered = 0
+    rows: List[Dict[str, Any]] = []
+    with open(input_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            total += 1
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+
+            old_s = str(row.get("scenario", "") or "").strip()
+            old_a = str(row.get("action", "") or "").strip()
+            old_e = parse_entities(row.get("entities", []))
+
+            raw_output = str(row.get("raw_output", "") or "")
+            parsed_from_raw = parse_prediction_label(raw_output) if raw_output else {}
+            parsed_fallback = parse_prediction_label(json.dumps(row, ensure_ascii=False))
+
+            new_s = str(parsed_from_raw.get("scenario", "") or parsed_fallback.get("scenario", "") or old_s).strip()
+            new_a = str(parsed_from_raw.get("action", "") or parsed_fallback.get("action", "") or old_a).strip()
+            new_e = parsed_from_raw.get("entities") or parsed_fallback.get("entities") or old_e
+            new_e = parse_entities(new_e)
+
+            if (not old_s and not old_a) and (new_s or new_a):
+                intent_key_recovered += 1
+
+            row["scenario"] = new_s
+            row["action"] = new_a
+            row["entities"] = new_e
+            row["pred_label"] = {"scenario": new_s, "action": new_a, "entities": new_e}
+
+            if (old_s != new_s) or (old_a != new_a) or (old_e != new_e):
+                changed += 1
+
+            rows.append(row)
+
+    output_parent = os.path.dirname(output_path)
+    if output_parent:
+        os.makedirs(output_parent, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    return {
+        "num_rows": total,
+        "num_changed": changed,
+        "num_intent_key_recovered": intent_key_recovered,
     }
 
 
@@ -1689,6 +1766,36 @@ def main():
         default="",
         help="Training log file path (default: <output_dir>/train.log).",
     )
+    parser.add_argument(
+        "--recover_prediction_file",
+        "--recover-prediction-file",
+        dest="recover_prediction_file",
+        type=str,
+        default="",
+        help="Existing prediction JSONL to recover/fix parser outputs from.",
+    )
+    parser.add_argument(
+        "--recover_output_file",
+        "--recover-output-file",
+        dest="recover_output_file",
+        type=str,
+        default="",
+        help="Recovered prediction JSONL path (default: <recover_input>.recovered.jsonl).",
+    )
+    parser.add_argument(
+        "--recover_inplace",
+        "--recover-inplace",
+        dest="recover_inplace",
+        action="store_true",
+        help="Overwrite recover input file instead of writing a new output file.",
+    )
+    parser.add_argument(
+        "--recover_only",
+        "--recover-only",
+        dest="recover_only",
+        action="store_true",
+        help="Run recovery mode only and exit (no train/inference).",
+    )
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
@@ -1746,6 +1853,28 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
+
+    if args.recover_only:
+        recover_input = args.recover_prediction_file.strip()
+        if not recover_input:
+            raise ValueError("--recover_only requires --recover_prediction_file")
+        if args.recover_inplace:
+            recover_output = recover_input
+        else:
+            recover_output = args.recover_output_file.strip()
+            if not recover_output:
+                base, ext = os.path.splitext(recover_input)
+                recover_output = f"{base}.recovered{ext}" if ext else f"{recover_input}.recovered.jsonl"
+        stats = recover_prediction_file(recover_input, recover_output)
+        logger.info(
+            "Recover done: input=%s output=%s rows=%d changed=%d intent_key_recovered=%d",
+            recover_input,
+            recover_output,
+            stats["num_rows"],
+            stats["num_changed"],
+            stats["num_intent_key_recovered"],
+        )
+        return
 
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
