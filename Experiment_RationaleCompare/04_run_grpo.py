@@ -637,6 +637,24 @@ def _candidate_bonus(
     return bonus, has_intent, has_slot
 
 
+def _apply_cot_reward_adjustment(
+    reward: float,
+    *,
+    format_ok: bool,
+    cot_only: bool,
+    cot_format_bonus: float,
+    cot_format_penalty: float,
+) -> float:
+    if not cot_only:
+        return float(reward)
+    adjusted = float(reward)
+    if format_ok:
+        adjusted += float(cot_format_bonus)
+    else:
+        adjusted -= float(cot_format_penalty)
+    return adjusted
+
+
 def _format_model_output(raw_output: str, no_cot: bool) -> Tuple[str, Dict[str, Any], bool]:
     pred_obj = parse_j_from_output(raw_output)
     pred_label = _normalize_pred_label(pred_obj)
@@ -884,6 +902,9 @@ def evaluate_model(
     progress_desc: str = "eval",
     reward_w_intent_candidate: float = 0.0,
     reward_w_slot_candidate: float = 0.0,
+    cot_only: bool = False,
+    cot_format_bonus: float = 0.0,
+    cot_format_penalty: float = 0.25,
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     eval_model = _unwrap_model(model)
     was_training = eval_model.training
@@ -949,6 +970,13 @@ def evaluate_model(
                     w_slot_candidate=reward_w_slot_candidate,
                 )
                 reward += cand_bonus
+                reward = _apply_cot_reward_adjustment(
+                    reward,
+                    format_ok=bool(format_ok),
+                    cot_only=bool(cot_only),
+                    cot_format_bonus=float(cot_format_bonus),
+                    cot_format_penalty=float(cot_format_penalty),
+                )
                 stats = compare_labels(pred_label, item.gold_label)
             except RuntimeError as exc:
                 if _is_oom_error(exc):
@@ -1141,6 +1169,25 @@ def main() -> None:
         dest="no_cot",
         action="store_true",
         help="Use direct J-only prompting (no C/R lines) for controlled GRPO comparison.",
+    )
+    parser.add_argument(
+        "--cot_only",
+        "--cot-only",
+        dest="cot_only",
+        action="store_true",
+        help="Force CoT-style training (C/R/J). Applies CoT format reward shaping.",
+    )
+    parser.add_argument(
+        "--cot_format_bonus",
+        type=float,
+        default=0.0,
+        help="Extra reward when C/R/J format is valid under --cot_only.",
+    )
+    parser.add_argument(
+        "--cot_format_penalty",
+        type=float,
+        default=0.25,
+        help="Penalty when C/R/J format is broken under --cot_only.",
     )
     parser.add_argument(
         "--include_text",
@@ -1405,6 +1452,10 @@ def main() -> None:
         raise ValueError("--lora_alpha must be >= 1")
     if args.lora_dropout < 0 or args.lora_dropout >= 1:
         raise ValueError("--lora_dropout must satisfy 0 <= value < 1")
+    if args.cot_only and args.no_cot:
+        raise ValueError("--cot_only and --no_cot cannot be used together")
+    if args.cot_only:
+        args.no_cot = False
     if args.smoke:
         args.num_train_epochs = 1
         args.group_size = min(args.group_size, 2)
@@ -1627,7 +1678,9 @@ def main() -> None:
             f"lr={args.learning_rate} kl_beta={args.kl_beta} grad_accum_steps={args.grad_accum_steps} "
             f"use_lora={args.use_lora} lora_r={args.lora_r} lora_alpha={args.lora_alpha} "
             f"lora_dropout={args.lora_dropout} lora_audio_tower={args.lora_audio_tower} "
-            f"include_text={args.include_text} no_cot={args.no_cot} smoke={args.smoke} "
+            f"include_text={args.include_text} no_cot={args.no_cot} cot_only={args.cot_only} "
+            f"cot_format_bonus={args.cot_format_bonus} cot_format_penalty={args.cot_format_penalty} "
+            f"smoke={args.smoke} "
             f"param_debug={args.param_debug} "
             f"shuffle_train={args.shuffle_train} "
             f"balanced_train_records={args.balanced_train_records} "
@@ -1802,6 +1855,9 @@ def main() -> None:
             preview_prefix="[GRPO-EVAL-INIT-SMOKE]",
             reward_w_intent_candidate=args.reward_w_intent_candidate,
             reward_w_slot_candidate=args.reward_w_slot_candidate,
+            cot_only=args.cot_only,
+            cot_format_bonus=args.cot_format_bonus,
+            cot_format_penalty=args.cot_format_penalty,
         )
         if rank == 0:
             print(
@@ -1915,6 +1971,13 @@ def main() -> None:
                             w_slot_candidate=args.reward_w_slot_candidate,
                         )
                         reward += cand_bonus
+                        reward = _apply_cot_reward_adjustment(
+                            reward,
+                            format_ok=bool(format_ok),
+                            cot_only=bool(args.cot_only),
+                            cot_format_bonus=float(args.cot_format_bonus),
+                            cot_format_penalty=float(args.cot_format_penalty),
+                        )
                         rewards.append(reward)
                         reward_values.append(float(reward))
                         pred_labels.append(pred_label)
@@ -2192,6 +2255,9 @@ def main() -> None:
                     preview_prefix="[GRPO-EVAL-SMOKE]",
                     reward_w_intent_candidate=args.reward_w_intent_candidate,
                     reward_w_slot_candidate=args.reward_w_slot_candidate,
+                    cot_only=args.cot_only,
+                    cot_format_bonus=args.cot_format_bonus,
+                    cot_format_penalty=args.cot_format_penalty,
                 )
                 if rank == 0:
                     print(
@@ -2250,6 +2316,9 @@ def main() -> None:
                     progress_desc=f"test@step{global_step}",
                     reward_w_intent_candidate=args.reward_w_intent_candidate,
                     reward_w_slot_candidate=args.reward_w_slot_candidate,
+                    cot_only=args.cot_only,
+                    cot_format_bonus=args.cot_format_bonus,
+                    cot_format_penalty=args.cot_format_penalty,
                 )
                 if rank == 0:
                     print(
@@ -2302,6 +2371,9 @@ def main() -> None:
             preview_prefix="[GRPO-EVAL-FINAL-SMOKE]",
             reward_w_intent_candidate=args.reward_w_intent_candidate,
             reward_w_slot_candidate=args.reward_w_slot_candidate,
+            cot_only=args.cot_only,
+            cot_format_bonus=args.cot_format_bonus,
+            cot_format_penalty=args.cot_format_penalty,
         )
         if rank == 0:
             print(
@@ -2335,6 +2407,9 @@ def main() -> None:
             progress_desc="test-final",
             reward_w_intent_candidate=args.reward_w_intent_candidate,
             reward_w_slot_candidate=args.reward_w_slot_candidate,
+            cot_only=args.cot_only,
+            cot_format_bonus=args.cot_format_bonus,
+            cot_format_penalty=args.cot_format_penalty,
         )
         if rank == 0:
             print(
