@@ -21,7 +21,6 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-import librosa
 import torch
 import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
@@ -36,6 +35,11 @@ from transformers import (
 from common import build_db_definitions, load_metadata
 
 try:
+    import librosa
+except ImportError:
+    librosa = None
+
+try:
     import jiwer
 
     HAS_JIWER = True
@@ -44,6 +48,16 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
+    if librosa is None:
+        raise ModuleNotFoundError(
+            "librosa is required for audio processing. "
+            "Install librosa for train/eval/test with audio, or run --recover_only."
+        )
+    return librosa.load(audio_path, sr=sr)
+
 
 SYSTEM_PROMPT_TEXT = (
     'System: Predict SLU labels from transcript.'
@@ -1034,7 +1048,7 @@ class SmartCollator:
             if item.get("audio_path") is None:
                 continue
             try:
-                audio, _ = librosa.load(item["audio_path"], sr=sr)
+                audio, _ = load_audio_or_raise(item["audio_path"], sr=sr)
             except Exception:
                 continue
 
@@ -1210,7 +1224,7 @@ class SampleGenerationCallback(TrainerCallback):
 
         for item in samples:
             try:
-                audio, _ = librosa.load(item["audio_path"], sr=sr)
+                audio, _ = load_audio_or_raise(item["audio_path"], sr=sr)
                 prompt_text = build_prompt_text(item)
                 user_content = [
                     {"type": "audio", "audio_url": "placeholder"},
@@ -1264,40 +1278,100 @@ def clean_json_text(text: str) -> str:
     return text
 
 
+def _extract_labeled_tail(text: str, labels: List[str]) -> str:
+    if not isinstance(text, str):
+        return ""
+    for label in labels:
+        # Accept `J:`, `j:`, `J ：` and similar variants.
+        pattern = rf"(?is)(?:^|\n)\s*{re.escape(label)}\s*[:：]\s*(.+)$"
+        m = re.search(pattern, text)
+        if m:
+            return str(m.group(1)).strip()
+    return ""
+
+
+def _parse_first_json_dict(text: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(text, str):
+        return None
+    candidate = text.strip()
+    if not candidate:
+        return None
+
+    decoder = json.JSONDecoder()
+    for probe in (clean_json_text(candidate), candidate):
+        probe = probe.strip()
+        if not probe:
+            continue
+        # Some model outputs include doubled braces from prompt examples.
+        normalized_probe = probe.replace("{{", "{").replace("}}", "}")
+        for target in (probe, normalized_probe):
+            try:
+                obj = json.loads(target)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+
+            # Find the first decodable JSON object anywhere in the text.
+            for m in re.finditer(r"\{", target):
+                start = m.start()
+                try:
+                    obj, _ = decoder.raw_decode(target[start:])
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    return obj
+    return None
+
+
+def _is_error_label(label: Dict[str, Any]) -> bool:
+    if not isinstance(label, dict):
+        return True
+    scenario = str(label.get("scenario", "") or "").strip().lower()
+    action = str(label.get("action", "") or "").strip().lower()
+    entities = parse_entities(label.get("entities", []))
+    return scenario == "error" and action == "error" and len(entities) == 0
+
+
+def _label_info_score(label: Dict[str, Any]) -> int:
+    if not isinstance(label, dict):
+        return -1
+    scenario = str(label.get("scenario", "") or "").strip()
+    action = str(label.get("action", "") or "").strip()
+    entities = parse_entities(label.get("entities", []))
+    return int(bool(scenario)) + int(bool(action)) + int(bool(entities))
+
+
 def parse_prediction_label(raw_output: str) -> Dict[str, Any]:
     default_obj = {"scenario": "error", "action": "error", "entities": []}
 
-    text_for_json = raw_output
-    if "J:" in text_for_json:
-        text_for_json = text_for_json.rsplit("J:", 1)[-1]
-    elif "SLU:" in text_for_json:
-        text_for_json = text_for_json.rsplit("SLU:", 1)[-1]
+    text = str(raw_output or "")
+    probes: List[str] = []
 
-    json_str = clean_json_text(text_for_json)
+    j_tail = _extract_labeled_tail(text, ["J", "SLU", "FINAL", "Final", "Output"])
+    if j_tail:
+        probes.append(j_tail)
+    probes.append(text)
+
     parsed = None
-    try:
-        parsed = json.loads(json_str)
-    except Exception:
-        # Last fallback: extract first {...} block.
-        match = re.search(r"\{.*\}", text_for_json, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except Exception:
-                pass
-    
+    for probe in probes:
+        parsed = _parse_first_json_dict(probe)
+        if isinstance(parsed, dict):
+            break
+
     if not isinstance(parsed, dict):
         return default_obj
 
     # Extraction Logic
     # 1. Check for "final" wrapper FIRST (To handle: "final": {"intent": "..."})
-    final_obj = parsed.get("final")
-    if isinstance(final_obj, dict):
-        parsed = final_obj
+    for wrapper_key in ("final", "Final", "j", "J", "output", "prediction", "result"):
+        wrapped = parsed.get(wrapper_key)
+        if isinstance(wrapped, dict):
+            parsed = wrapped
 
     scenario = get_dict_value_ci(parsed, "scenario")
     action = get_dict_value_ci(parsed, "action")
-    entities = get_dict_value_ci(parsed, "entities") or []
+    entities = get_dict_value_ci(parsed, "entities", "slots") or []
 
     # 2. If scenario/action are missing, try to parse "intent"
     if not scenario and not action:
@@ -1343,13 +1417,39 @@ def recover_prediction_file(input_path: str, output_path: str) -> Dict[str, int]
             old_a = str(row.get("action", "") or "").strip()
             old_e = parse_entities(row.get("entities", []))
 
-            raw_output = str(row.get("raw_output", "") or "")
-            parsed_from_raw = parse_prediction_label(raw_output) if raw_output else {}
-            parsed_fallback = parse_prediction_label(json.dumps(row, ensure_ascii=False))
+            candidate_outputs: List[str] = []
+            for key in (
+                "raw_output",
+                "prediction",
+                "pred_text",
+                "model_output",
+                "output",
+                "response",
+                "assistant",
+                "assistant_text",
+                "text",
+            ):
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidate_outputs.append(value)
 
-            new_s = str(parsed_from_raw.get("scenario", "") or parsed_fallback.get("scenario", "") or old_s).strip()
-            new_a = str(parsed_from_raw.get("action", "") or parsed_fallback.get("action", "") or old_a).strip()
-            new_e = parsed_from_raw.get("entities") or parsed_fallback.get("entities") or old_e
+            parsed_candidates: List[Dict[str, Any]] = []
+            for text in candidate_outputs:
+                parsed = parse_prediction_label(text)
+                if not _is_error_label(parsed):
+                    parsed_candidates.append(parsed)
+
+            parsed_from_row = parse_prediction_label(json.dumps(row, ensure_ascii=False))
+            if not _is_error_label(parsed_from_row):
+                parsed_candidates.append(parsed_from_row)
+
+            chosen = {}
+            if parsed_candidates:
+                chosen = sorted(parsed_candidates, key=_label_info_score, reverse=True)[0]
+
+            new_s = str(chosen.get("scenario", "") or old_s).strip()
+            new_a = str(chosen.get("action", "") or old_a).strip()
+            new_e = chosen.get("entities") or old_e
             new_e = parse_entities(new_e)
 
             if (not old_s and not old_a) and (new_s or new_a):
@@ -1403,7 +1503,7 @@ class InferenceCollator:
         for item in batch:
             if item.get("audio_path"):
                 try:
-                    audio, _ = librosa.load(item["audio_path"], sr=sr)
+                    audio, _ = load_audio_or_raise(item["audio_path"], sr=sr)
                     audios.append(audio)
                     prompt_text = build_prompt_text(item)
                     user_content = [
