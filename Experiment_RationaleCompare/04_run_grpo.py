@@ -1728,6 +1728,11 @@ def main() -> None:
             logprob_values: List[float] = []
             ref_logprob_values: List[float] = []
             sample_loss_values: List[float] = []
+            # Diversity tracking per group.
+            diversity_unique_outputs: List[int] = []
+            diversity_unique_rewards: List[int] = []
+            diversity_unique_intents: List[int] = []
+            diversity_reward_spread: List[float] = []
 
             for item in batch:
                 try:
@@ -1803,6 +1808,26 @@ def main() -> None:
                         std = math.sqrt(variance) if variance > 0 else 1.0
                     else:
                         std = 1.0
+
+                    # Track group diversity.
+                    n_unique_out = len(set(samples))
+                    n_unique_rew = len(set(rewards))
+                    pred_intents = [pl.get("intent", "") for pl in pred_labels]
+                    n_unique_int = len(set(pred_intents))
+                    r_spread = max(rewards) - min(rewards) if rewards else 0.0
+                    diversity_unique_outputs.append(n_unique_out)
+                    diversity_unique_rewards.append(n_unique_rew)
+                    diversity_unique_intents.append(n_unique_int)
+                    diversity_reward_spread.append(r_spread)
+
+                    if debug_step:
+                        print(
+                            f"[DEBUG][step={global_step}] diversity: "
+                            f"unique_outputs={n_unique_out}/{len(samples)} "
+                            f"unique_rewards={n_unique_rew}/{len(rewards)} "
+                            f"unique_intents={n_unique_int} "
+                            f"reward_spread={r_spread:.4f}"
+                        )
 
                     for sample_idx, (sample_text, reward) in enumerate(zip(samples, rewards)):
                         advantage = (reward - mean_reward) / (std + 1e-6)
@@ -1978,6 +2003,19 @@ def main() -> None:
                     f"logprob_mean={logprob_mean:.4f} ref_logprob_mean={ref_logprob_mean:.4f} "
                     f"sample_loss_mean={sample_loss_mean:.4f}"
                 )
+                # Log diversity metrics.
+                if diversity_unique_outputs:
+                    avg_uniq_out = sum(diversity_unique_outputs) / len(diversity_unique_outputs)
+                    avg_uniq_rew = sum(diversity_unique_rewards) / len(diversity_unique_rewards)
+                    avg_uniq_int = sum(diversity_unique_intents) / len(diversity_unique_intents)
+                    avg_r_spread = sum(diversity_reward_spread) / len(diversity_reward_spread)
+                    print(
+                        f"[GRPO-DIV] step={global_step} "
+                        f"avg_unique_outputs={avg_uniq_out:.1f}/{args.group_size} "
+                        f"avg_unique_rewards={avg_uniq_rew:.1f}/{args.group_size} "
+                        f"avg_unique_intents={avg_uniq_int:.1f} "
+                        f"avg_reward_spread={avg_r_spread:.4f}"
+                    )
 
             if rank == 0 and args.save_every and global_step > 0 and global_step % args.save_every == 0:
                 ckpt_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
