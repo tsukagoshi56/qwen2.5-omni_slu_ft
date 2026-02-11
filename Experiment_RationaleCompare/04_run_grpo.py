@@ -771,6 +771,65 @@ def _candidate_bonus(
     return bonus, has_intent, has_slot, intent_count, count_bonus
 
 
+def _extract_rationale_pairs(text: str) -> List[Tuple[str, str]]:
+    r_line = _extract_prefixed_line(text, "R:")
+    if r_line == "R: (none)":
+        return []
+    body = r_line.split(":", 1)[1].strip() if ":" in r_line else ""
+    if not body:
+        return []
+    parts = [p.strip() for p in body.split(";") if p.strip()]
+    pairs: List[Tuple[str, str]] = []
+    for part in parts:
+        if "!" in part:
+            label, reason = part.split("!", 1)
+            pairs.append((label.strip(), reason.strip()))
+        else:
+            pairs.append((part.strip(), ""))
+    return pairs
+
+
+def _rationale_candidate_coverage(
+    formatted_output: str,
+) -> Tuple[float, bool, int, int]:
+    intent_candidates = set(_extract_intent_candidates(formatted_output))
+    slot_candidates = {str(x).strip().lower() for x in _extract_slot_candidates(formatted_output) if str(x).strip()}
+    total_candidates = len(intent_candidates) + len(slot_candidates)
+    if total_candidates == 0:
+        return 1.0, True, 0, 0
+
+    covered_intents: set = set()
+    covered_slots: set = set()
+    rationale_pairs = _extract_rationale_pairs(formatted_output)
+    for raw_label, raw_reason in rationale_pairs:
+        reason = str(raw_reason or "").strip()
+        if not reason:
+            continue
+        label = str(raw_label or "").strip()
+        intent_key = normalize_intent_label(label)
+        slot_key = re.sub(r"\([^)]*\)", "", label).strip().lower()
+        slot_key = re.sub(r"^(slot|slots)\s*:\s*", "", slot_key)
+        if intent_key in intent_candidates:
+            covered_intents.add(intent_key)
+        if slot_key in slot_candidates:
+            covered_slots.add(slot_key)
+
+    covered_candidates = len(covered_intents) + len(covered_slots)
+    coverage = float(covered_candidates) / float(total_candidates)
+    full_coverage = covered_candidates == total_candidates
+    return coverage, full_coverage, covered_candidates, total_candidates
+
+
+def _is_j_fully_correct(stats: Dict[str, Any]) -> bool:
+    if not isinstance(stats, dict):
+        return False
+    if not bool(stats.get("scenario_ok", False)):
+        return False
+    if not bool(stats.get("action_ok", False)):
+        return False
+    return True
+
+
 def _apply_cot_reward_adjustment(
     reward: float,
     *,
@@ -1049,6 +1108,7 @@ def evaluate_model(
     reward_w_slot_candidate: float = 0.0,
     reward_w_c_intent_count: float = 0.0,
     reward_c_intent_target: int = 3,
+    reward_w_rationale_coverage: float = 0.0,
     cot_only: bool = False,
     cot_format_bonus: float = 0.0,
     cot_format_penalty: float = 0.25,
@@ -1064,6 +1124,8 @@ def evaluate_model(
     action_sum = 0.0
     intent_sum = 0.0
     entity_f1_sum = 0.0
+    rationale_cov_sum = 0.0
+    rationale_full_sum = 0.0
     slu_tp_sum = 0.0
     slu_fp_sum = 0.0
     slu_fn_sum = 0.0
@@ -1115,7 +1177,7 @@ def evaluate_model(
                     no_cot=no_cot,
                     candidates_only=candidates_only,
                 )
-                reward, _ = compute_reward(pred_label, item.gold_label)
+                reward, stats = compute_reward(pred_label, item.gold_label)
                 cand_bonus, has_int_cand, has_slot_cand, c_intent_count, c_count_bonus = _candidate_bonus(
                     formatted_output=formatted_text,
                     gold_label=item.gold_label,
@@ -1124,7 +1186,15 @@ def evaluate_model(
                     w_intent_count=reward_w_c_intent_count,
                     intent_count_target=reward_c_intent_target,
                 )
+                rationale_cov, rationale_full, rationale_cov_numer, rationale_cov_denom = _rationale_candidate_coverage(
+                    formatted_text
+                )
+                j_fully_correct = _is_j_fully_correct(stats)
+                rationale_reward_term = (
+                    float(reward_w_rationale_coverage) * float(rationale_cov) if j_fully_correct else 0.0
+                )
                 reward += cand_bonus
+                reward += rationale_reward_term
                 reward = _apply_cot_reward_adjustment(
                     reward,
                     format_ok=bool(format_ok),
@@ -1132,7 +1202,6 @@ def evaluate_model(
                     cot_format_bonus=float(cot_format_bonus),
                     cot_format_penalty=float(cot_format_penalty),
                 )
-                stats = compare_labels(pred_label, item.gold_label)
             except RuntimeError as exc:
                 if _is_oom_error(exc):
                     local_oom_skips += 1.0
@@ -1151,6 +1220,8 @@ def evaluate_model(
             action_sum += 1.0 if stats["action_ok"] else 0.0
             intent_sum += 1.0 if stats["intent_ok"] else 0.0
             entity_f1_sum += float(stats["entity_f1"])
+            rationale_cov_sum += float(rationale_cov)
+            rationale_full_sum += 1.0 if rationale_full else 0.0
             w_tp, w_fp, w_fn = _span_distance_counts(
                 item.gold_label.get("entities", []) or [],
                 pred_label.get("entities", []) or [],
@@ -1184,6 +1255,12 @@ def evaluate_model(
                         "has_gold_slot_candidate": bool(has_slot_cand),
                         "c_intent_count": int(c_intent_count),
                         "c_count_bonus": float(c_count_bonus),
+                        "rationale_candidate_coverage": float(rationale_cov),
+                        "rationale_candidate_full_coverage": bool(rationale_full),
+                        "rationale_covered_candidates": int(rationale_cov_numer),
+                        "rationale_total_candidates": int(rationale_cov_denom),
+                        "j_fully_correct_for_rationale": bool(j_fully_correct),
+                        "rationale_reward_term": float(rationale_reward_term),
                         "candidate_bonus": float(cand_bonus),
                         "raw_output": generated_text,
                         "target": "",
@@ -1202,7 +1279,9 @@ def evaluate_model(
                     f"[EVAL-DEBUG] pred={json.dumps(pred_label, ensure_ascii=False)} "
                     f"format_ok={bool(format_ok)} has_intent_cand={bool(has_int_cand)} "
                     f"has_slot_cand={bool(has_slot_cand)} c_intent_count={int(c_intent_count)} "
-                    f"c_count_bonus={c_count_bonus:.4f} cand_bonus={cand_bonus:.4f} reward={reward:.4f}"
+                    f"c_count_bonus={c_count_bonus:.4f} cand_bonus={cand_bonus:.4f} "
+                    f"rat_cov={rationale_cov:.3f} rat_full={bool(rationale_full)} "
+                    f"j_ok={bool(j_fully_correct)} r_term={rationale_reward_term:.4f} reward={reward:.4f}"
                 )
             if rank == 0 and idx < max(0, preview_count):
                 print(
@@ -1226,6 +1305,8 @@ def evaluate_model(
             action_sum,
             intent_sum,
             entity_f1_sum,
+            rationale_cov_sum,
+            rationale_full_sum,
             slu_tp_sum,
             slu_fp_sum,
             slu_fn_sum,
@@ -1251,13 +1332,15 @@ def evaluate_model(
             "action_acc": 0.0,
             "intent_acc": 0.0,
             "entity_f1_mean": 0.0,
+            "rationale_candidate_coverage_mean": 0.0,
+            "rationale_candidate_full_rate": 0.0,
             "slu_f1": 0.0,
         }
     else:
         slu_f1_value = _f1_from_counts(
-            float(metrics_tensor[6].item()),
-            float(metrics_tensor[7].item()),
             float(metrics_tensor[8].item()),
+            float(metrics_tensor[9].item()),
+            float(metrics_tensor[10].item()),
         )
         result = {
             "num_samples": total,
@@ -1266,6 +1349,8 @@ def evaluate_model(
             "action_acc": float(metrics_tensor[3].item() / total),
             "intent_acc": float(metrics_tensor[4].item() / total),
             "entity_f1_mean": float(metrics_tensor[5].item() / total),
+            "rationale_candidate_coverage_mean": float(metrics_tensor[6].item() / total),
+            "rationale_candidate_full_rate": float(metrics_tensor[7].item() / total),
             "slu_f1": float(slu_f1_value),
         }
 
@@ -1561,6 +1646,12 @@ def main() -> None:
         type=int,
         default=3,
         help="Target number of intent candidates in C: for count-shaping reward.",
+    )
+    parser.add_argument(
+        "--reward_w_rationale_coverage",
+        type=float,
+        default=0.0,
+        help="Bonus weight multiplied by rationale coverage over candidates in C (0.0 disables).",
     )
     parser.add_argument(
         "--early_stopping",
@@ -1943,6 +2034,7 @@ def main() -> None:
             f"cot_format_bonus={args.cot_format_bonus} cot_format_penalty={args.cot_format_penalty} "
             f"reward_w_c_intent_count={args.reward_w_c_intent_count} "
             f"reward_c_intent_target={args.reward_c_intent_target} "
+            f"reward_w_rationale_coverage={args.reward_w_rationale_coverage} "
             f"eval_preview_count={args.eval_preview_count} "
             f"test_preview_count={args.test_preview_count} "
             f"smoke={args.smoke} "
@@ -1997,6 +2089,10 @@ def main() -> None:
         print(
             "[GRPO] c_intent_count_reward "
             f"target={args.reward_c_intent_target} weight={args.reward_w_c_intent_count}"
+        )
+        print(
+            "[GRPO] rationale_coverage_reward "
+            f"weight={args.reward_w_rationale_coverage}"
         )
         if args.only_grpo:
             print(
@@ -2129,6 +2225,7 @@ def main() -> None:
             reward_w_slot_candidate=args.reward_w_slot_candidate,
             reward_w_c_intent_count=args.reward_w_c_intent_count,
             reward_c_intent_target=args.reward_c_intent_target,
+            reward_w_rationale_coverage=args.reward_w_rationale_coverage,
             cot_only=args.cot_only,
             cot_format_bonus=args.cot_format_bonus,
             cot_format_penalty=args.cot_format_penalty,
@@ -2142,6 +2239,8 @@ def main() -> None:
                 f"scenario_acc={init_eval_metrics['scenario_acc']:.4f} "
                 f"action_acc={init_eval_metrics['action_acc']:.4f} "
                 f"entity_f1_mean={init_eval_metrics['entity_f1_mean']:.4f} "
+                f"rat_cov={init_eval_metrics['rationale_candidate_coverage_mean']:.4f} "
+                f"rat_full={init_eval_metrics['rationale_candidate_full_rate']:.4f} "
                 f"slu_f1={init_eval_metrics['slu_f1']:.4f}"
             )
             if args.param_debug:
@@ -2232,13 +2331,19 @@ def main() -> None:
                     has_slot_candidate_values: List[bool] = []
                     c_intent_count_values: List[int] = []
                     c_count_bonus_values: List[float] = []
+                    rationale_cov_values: List[float] = []
+                    rationale_full_values: List[bool] = []
+                    rationale_cov_count_values: List[int] = []
+                    rationale_total_count_values: List[int] = []
+                    j_fully_correct_values: List[bool] = []
+                    rationale_reward_values: List[float] = []
                     for text in samples:
                         formatted_text, pred_label, format_ok = _format_model_output(
                             text,
                             no_cot=args.no_cot,
                             candidates_only=args.candidates_only,
                         )
-                        reward, _ = compute_reward(
+                        reward, stats = compute_reward(
                             pred_label,
                             item.gold_label,
                             w_scenario=args.reward_w_scenario,
@@ -2254,7 +2359,15 @@ def main() -> None:
                             w_intent_count=args.reward_w_c_intent_count,
                             intent_count_target=args.reward_c_intent_target,
                         )
+                        rationale_cov, rationale_full, rationale_cov_numer, rationale_cov_denom = _rationale_candidate_coverage(
+                            formatted_text
+                        )
+                        j_fully_correct = _is_j_fully_correct(stats)
+                        rationale_reward_term = (
+                            float(args.reward_w_rationale_coverage) * float(rationale_cov) if j_fully_correct else 0.0
+                        )
                         reward += cand_bonus
+                        reward += rationale_reward_term
                         reward = _apply_cot_reward_adjustment(
                             reward,
                             format_ok=bool(format_ok),
@@ -2272,6 +2385,12 @@ def main() -> None:
                         has_slot_candidate_values.append(bool(has_slot_cand))
                         c_intent_count_values.append(int(c_intent_count))
                         c_count_bonus_values.append(float(c_count_bonus))
+                        rationale_cov_values.append(float(rationale_cov))
+                        rationale_full_values.append(bool(rationale_full))
+                        rationale_cov_count_values.append(int(rationale_cov_numer))
+                        rationale_total_count_values.append(int(rationale_cov_denom))
+                        j_fully_correct_values.append(bool(j_fully_correct))
+                        rationale_reward_values.append(float(rationale_reward_term))
 
                     if debug_step:
                         preview_n = min(args.debug_preview_samples, len(samples))
@@ -2284,6 +2403,10 @@ def main() -> None:
                                 f"c_intent_count={c_intent_count_values[i]} "
                                 f"c_count_bonus={c_count_bonus_values[i]:.4f} "
                                 f"cand_bonus={candidate_bonus_values[i]:.4f} "
+                                f"rat_cov={rationale_cov_values[i]:.3f} "
+                                f"rat_full={rationale_full_values[i]} "
+                                f"j_ok={j_fully_correct_values[i]} "
+                                f"r_term={rationale_reward_values[i]:.4f} "
                                 f"pred={json.dumps(pred_labels[i], ensure_ascii=False)}"
                             )
                             _print_debug_section(f"train.sample_raw#{i}", samples[i])
@@ -2405,6 +2528,36 @@ def main() -> None:
                                 "candidate_bonus": (
                                     float(candidate_bonus_values[sample_idx])
                                     if sample_idx < len(candidate_bonus_values)
+                                    else 0.0
+                                ),
+                                "rationale_candidate_coverage": (
+                                    float(rationale_cov_values[sample_idx])
+                                    if sample_idx < len(rationale_cov_values)
+                                    else 0.0
+                                ),
+                                "rationale_candidate_full_coverage": (
+                                    bool(rationale_full_values[sample_idx])
+                                    if sample_idx < len(rationale_full_values)
+                                    else False
+                                ),
+                                "rationale_covered_candidates": (
+                                    int(rationale_cov_count_values[sample_idx])
+                                    if sample_idx < len(rationale_cov_count_values)
+                                    else 0
+                                ),
+                                "rationale_total_candidates": (
+                                    int(rationale_total_count_values[sample_idx])
+                                    if sample_idx < len(rationale_total_count_values)
+                                    else 0
+                                ),
+                                "j_fully_correct_for_rationale": (
+                                    bool(j_fully_correct_values[sample_idx])
+                                    if sample_idx < len(j_fully_correct_values)
+                                    else False
+                                ),
+                                "rationale_reward_term": (
+                                    float(rationale_reward_values[sample_idx])
+                                    if sample_idx < len(rationale_reward_values)
                                     else 0.0
                                 ),
                                 "prompt": _shorten(prompt, args.debug_max_chars),
@@ -2557,6 +2710,7 @@ def main() -> None:
                     reward_w_slot_candidate=args.reward_w_slot_candidate,
                     reward_w_c_intent_count=args.reward_w_c_intent_count,
                     reward_c_intent_target=args.reward_c_intent_target,
+                    reward_w_rationale_coverage=args.reward_w_rationale_coverage,
                     cot_only=args.cot_only,
                     cot_format_bonus=args.cot_format_bonus,
                     cot_format_penalty=args.cot_format_penalty,
@@ -2570,6 +2724,8 @@ def main() -> None:
                         f"scenario_acc={eval_metrics['scenario_acc']:.4f} "
                         f"action_acc={eval_metrics['action_acc']:.4f} "
                         f"entity_f1_mean={eval_metrics['entity_f1_mean']:.4f} "
+                        f"rat_cov={eval_metrics['rationale_candidate_coverage_mean']:.4f} "
+                        f"rat_full={eval_metrics['rationale_candidate_full_rate']:.4f} "
                         f"slu_f1={eval_metrics['slu_f1']:.4f}"
                     )
                     if args.param_debug:
@@ -2624,6 +2780,7 @@ def main() -> None:
                     reward_w_slot_candidate=args.reward_w_slot_candidate,
                     reward_w_c_intent_count=args.reward_w_c_intent_count,
                     reward_c_intent_target=args.reward_c_intent_target,
+                    reward_w_rationale_coverage=args.reward_w_rationale_coverage,
                     cot_only=args.cot_only,
                     cot_format_bonus=args.cot_format_bonus,
                     cot_format_penalty=args.cot_format_penalty,
@@ -2637,6 +2794,8 @@ def main() -> None:
                         f"scenario_acc={test_metrics['scenario_acc']:.4f} "
                         f"action_acc={test_metrics['action_acc']:.4f} "
                         f"entity_f1_mean={test_metrics['entity_f1_mean']:.4f} "
+                        f"rat_cov={test_metrics['rationale_candidate_coverage_mean']:.4f} "
+                        f"rat_full={test_metrics['rationale_candidate_full_rate']:.4f} "
                         f"slu_f1={test_metrics['slu_f1']:.4f}"
                     )
 
@@ -2683,6 +2842,7 @@ def main() -> None:
             reward_w_slot_candidate=args.reward_w_slot_candidate,
             reward_w_c_intent_count=args.reward_w_c_intent_count,
             reward_c_intent_target=args.reward_c_intent_target,
+            reward_w_rationale_coverage=args.reward_w_rationale_coverage,
             cot_only=args.cot_only,
             cot_format_bonus=args.cot_format_bonus,
             cot_format_penalty=args.cot_format_penalty,
@@ -2696,6 +2856,8 @@ def main() -> None:
                 f"scenario_acc={final_eval['scenario_acc']:.4f} "
                 f"action_acc={final_eval['action_acc']:.4f} "
                 f"entity_f1_mean={final_eval['entity_f1_mean']:.4f} "
+                f"rat_cov={final_eval['rationale_candidate_coverage_mean']:.4f} "
+                f"rat_full={final_eval['rationale_candidate_full_rate']:.4f} "
                 f"slu_f1={final_eval['slu_f1']:.4f}"
             )
             if args.param_debug:
@@ -2725,6 +2887,7 @@ def main() -> None:
             reward_w_slot_candidate=args.reward_w_slot_candidate,
             reward_w_c_intent_count=args.reward_w_c_intent_count,
             reward_c_intent_target=args.reward_c_intent_target,
+            reward_w_rationale_coverage=args.reward_w_rationale_coverage,
             cot_only=args.cot_only,
             cot_format_bonus=args.cot_format_bonus,
             cot_format_penalty=args.cot_format_penalty,
@@ -2738,6 +2901,8 @@ def main() -> None:
                 f"scenario_acc={final_test['scenario_acc']:.4f} "
                 f"action_acc={final_test['action_acc']:.4f} "
                 f"entity_f1_mean={final_test['entity_f1_mean']:.4f} "
+                f"rat_cov={final_test['rationale_candidate_coverage_mean']:.4f} "
+                f"rat_full={final_test['rationale_candidate_full_rate']:.4f} "
                 f"slu_f1={final_test['slu_f1']:.4f}"
             )
             prediction_path = os.path.join(output_dir, "prediction.jsonl")
