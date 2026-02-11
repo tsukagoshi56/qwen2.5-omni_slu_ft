@@ -191,6 +191,18 @@ def build_label_only_target(final_json: str) -> str:
     return f"J: {final_json}"
 
 
+def build_candidates_only_target(rationale_text: str, final_json: str) -> str:
+    c_line = ""
+    for line in (rationale_text or "").splitlines():
+        s = line.strip()
+        if s.startswith("C:"):
+            c_line = s
+            break
+    if not c_line:
+        c_line = "C: (none)"
+    return "\n".join([c_line, f"J: {final_json}"])
+
+
 # ==============================================================================
 # 1. Data Loading
 # ==============================================================================
@@ -681,14 +693,19 @@ def load_rationale_records(path: str) -> List[Dict[str, Any]]:
     return records
 
 
-def expand_multitask_items(base_item: Dict[str, Any]) -> List[Dict[str, Any]]:
+def expand_multitask_items(base_item: Dict[str, Any], cot_task_mode: str = "cot") -> List[Dict[str, Any]]:
     target_obj = base_item.get("target_obj", {})
     final_json = json.dumps(target_obj, ensure_ascii=False)
+    cot_mode = str(cot_task_mode or "cot").strip().lower()
+    if cot_mode == "candidates":
+        cot_target = build_candidates_only_target(base_item.get("rationale_text", ""), final_json)
+    else:
+        cot_target = base_item.get("target", build_label_only_target(final_json))
     cot_item = {
         **base_item,
-        "task_mode": "cot",
+        "task_mode": "candidates" if cot_mode == "candidates" else "cot",
         "task_id": 0,
-        "target": base_item.get("target", build_label_only_target(final_json)),
+        "target": cot_target,
     }
     label_item = {
         **base_item,
@@ -710,6 +727,13 @@ def build_task_item(base_item: Dict[str, Any], task_mode: str) -> Dict[str, Any]
             "task_id": 1,
             "target": build_label_only_target(final_json),
         }
+    if mode == "candidates":
+        return {
+            **base_item,
+            "task_mode": "candidates",
+            "task_id": 0,
+            "target": build_candidates_only_target(base_item.get("rationale_text", ""), final_json),
+        }
     return {
         **base_item,
         "task_mode": "cot",
@@ -721,10 +745,11 @@ def build_task_item(base_item: Dict[str, Any], task_mode: str) -> Dict[str, Any]
 def build_multisource_multitask_items(
     label_items: List[Dict[str, Any]],
     cot_items: List[Dict[str, Any]],
+    cot_task_mode: str = "cot",
 ) -> List[Dict[str, Any]]:
     mixed: List[Dict[str, Any]] = []
     mixed.extend(build_task_item(item, "label") for item in label_items)
-    mixed.extend(build_task_item(item, "cot") for item in cot_items)
+    mixed.extend(build_task_item(item, cot_task_mode) for item in cot_items)
     return mixed
 
 
@@ -739,6 +764,7 @@ def build_items_from_rationale_jsonl(
     audio_search_print_limit: int = 100,
     strict_audio_missing: bool = False,
     multitask: bool = True,
+    cot_task_mode: str = "cot",
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -859,7 +885,11 @@ def build_items_from_rationale_jsonl(
                 "prompt_text": user_text.strip() if user_text else "",
             }
             text_only_item = {**base_item, "audio_path": None}
-            text_only_items = expand_multitask_items(text_only_item) if multitask else [text_only_item]
+            text_only_items = (
+                expand_multitask_items(text_only_item, cot_task_mode=cot_task_mode)
+                if multitask
+                else [text_only_item]
+            )
             fallback_text_items.extend(text_only_items)
 
             if text_only:
@@ -870,7 +900,11 @@ def build_items_from_rationale_jsonl(
                 items.extend(text_only_items)
 
             if audio_path:
-                audio_items = expand_multitask_items(base_item) if multitask else [base_item]
+                audio_items = (
+                    expand_multitask_items(base_item, cot_task_mode=cot_task_mode)
+                    if multitask
+                    else [base_item]
+                )
                 items.extend(audio_items)
                 rows_with_audio += 1
                 if print_audio_search_paths and rows_with_audio <= audio_search_print_limit:
@@ -2060,6 +2094,22 @@ def main():
         help="Also export label-only predictions and metrics after inference.",
     )
     parser.add_argument(
+        "--train_candidates_only",
+        "--train-candidates-only",
+        "--no_r_train",
+        "--no-r-train",
+        dest="train_candidates_only",
+        action="store_true",
+        help="For multitask train/eval branches, use C+J targets/prompts (no R) instead of C/R/J.",
+    )
+    parser.add_argument(
+        "--no_train_candidates_only",
+        "--no-train-candidates-only",
+        dest="train_candidates_only",
+        action="store_false",
+        help="Disable C+J train/eval mode and use standard C/R/J for CoT branch.",
+    )
+    parser.add_argument(
         "--test_task_mode",
         type=str,
         choices=["cot", "candidates", "label"],
@@ -2120,6 +2170,7 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
+    cot_train_task_mode = "candidates" if args.train_candidates_only else "cot"
 
     if args.recover_only:
         recover_input = args.recover_prediction_file.strip()
@@ -2220,7 +2271,11 @@ def main():
             strict_audio_missing=args.strict_audio_missing,
             multitask=False,
         )
-        train_items = build_multisource_multitask_items(label_train_items, cot_train_items)
+        train_items = build_multisource_multitask_items(
+            label_train_items,
+            cot_train_items,
+            cot_task_mode=cot_train_task_mode,
+        )
     else:
         train_items = build_items_from_rationale_jsonl(
             args.train_file,
@@ -2233,6 +2288,7 @@ def main():
             audio_search_print_limit=args.audio_search_print_limit,
             strict_audio_missing=args.strict_audio_missing,
             multitask=True,
+            cot_task_mode=cot_train_task_mode,
         )
 
     if cot_eval_file:
@@ -2266,7 +2322,11 @@ def main():
             strict_audio_missing=args.strict_audio_missing,
             multitask=False,
         )
-        eval_items = build_multisource_multitask_items(label_eval_items, cot_eval_items)
+        eval_items = build_multisource_multitask_items(
+            label_eval_items,
+            cot_eval_items,
+            cot_task_mode=cot_train_task_mode,
+        )
     else:
         eval_items = build_items_from_rationale_jsonl(
             args.eval_file,
@@ -2279,6 +2339,7 @@ def main():
             audio_search_print_limit=args.audio_search_print_limit,
             strict_audio_missing=args.strict_audio_missing,
             multitask=True,
+            cot_task_mode=cot_train_task_mode,
         )
 
     if rank == 0:
@@ -2287,6 +2348,7 @@ def main():
         train_label = sum(1 for x in train_items if int(x.get("task_id", -1)) == 1)
         eval_cot = sum(1 for x in eval_items if int(x.get("task_id", -1)) == 0)
         eval_label = sum(1 for x in eval_items if int(x.get("task_id", -1)) == 1)
+        logger.info("CoT branch mode for train/eval: %s", cot_train_task_mode)
         logger.info(
             "Multitask split | train: cot=%d label=%d | eval: cot=%d label=%d",
             train_cot,

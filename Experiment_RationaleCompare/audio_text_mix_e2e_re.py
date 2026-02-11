@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Audio/text mixed SLU training and distributed inference for C/R/J rationale outputs.
+Audio/text mixed SLU training and distributed inference.
 
 - Prompting follows Experiment_RationaleCompare/prompts.py templates.
-- Training target prefers rationale-style output:
+- Default training target style is C/J (no R rationale line):
   C: ...
-  R: ...
   J: {"scenario": "...", "action": "...", "entities": [...]}
 - Prediction parsing prioritizes the JSON after "J:".
 """
@@ -75,6 +74,11 @@ PROMPT_OUTPUT_FORMAT = (
     "R: label1!reason1; label2!reason2; ...\n"
     f"J: {OUTPUT_SCHEMA}"
 )
+PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY = (
+    "Output Format:\n"
+    "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+    f"J: {OUTPUT_SCHEMA}"
+)
 PROMPT_DB_DEFINITIONS = "Intents: (none)\nSlot Types: (none)"
 
 
@@ -141,34 +145,43 @@ def candidate_to_text(value: Any) -> str:
 
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
+    task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
+    output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY if task_mode == "candidates" else PROMPT_OUTPUT_FORMAT
 
     if include_transcript and transcript:
         return (
             f"{SYSTEM_PROMPT_TEXT}\n\n"
             "[Input Data]\n"
             f"- Transcript: {transcript}\n\n"
-            f"{PROMPT_OUTPUT_FORMAT}"
+            f"{output_format}"
         )
     return (
         f"{SYSTEM_PROMPT_AUDIO}\n\n"
         "[Input Data]\n"
         "- Audio: <AUDIO>\n\n"
-        f"{PROMPT_OUTPUT_FORMAT}"
+        f"{output_format}"
     )
 
 
-def build_training_target(rationale_text: str, final_json: str) -> str:
+def build_training_target(rationale_text: str, final_json: str, use_rationale: bool = True) -> str:
     rationale = (rationale_text or "").strip()
     if not rationale:
         return f"J: {final_json}"
 
     lines = [line.strip() for line in rationale.splitlines() if line.strip()]
     has_c = any(line.startswith("C:") for line in lines)
-    has_r = any(line.startswith("R:") for line in lines)
     has_j = any(line.startswith("J:") for line in lines)
+    has_r = any(line.startswith("R:") for line in lines)
 
-    if has_c and has_r and has_j:
+    if use_rationale and has_c and has_r and has_j:
         return "\n".join(lines)
+
+    if not use_rationale:
+        c_line = next((line for line in lines if line.startswith("C:")), "")
+        if not c_line:
+            c_line = "C: (none)"
+        return "\n".join([c_line, f"J: {final_json}"])
+
     if has_j:
         return "\n".join(lines)
     return "\n".join(lines + [f"J: {final_json}"])
@@ -674,6 +687,7 @@ def build_items_from_rationale_jsonl(
     print_audio_search_paths: bool = False,
     audio_search_print_limit: int = 100,
     strict_audio_missing: bool = False,
+    train_candidates_only: bool = False,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
@@ -733,7 +747,11 @@ def build_items_from_rationale_jsonl(
                 rationale_text = normalize_rationale_text(data.get("rationale_text"))
                 if not rationale_text:
                     rationale_text = assistant_text.strip()
-                target_str = build_training_target(rationale_text, final_json)
+                target_str = build_training_target(
+                    rationale_text,
+                    final_json,
+                    use_rationale=not train_candidates_only,
+                )
 
                 # Prioritize explicit transcript fields
                 transcript = pick_first_nonempty(
@@ -769,7 +787,11 @@ def build_items_from_rationale_jsonl(
                     target_obj = extract_target_obj_from_assistant(data)
 
                 final_json = json.dumps(target_obj, ensure_ascii=False)
-                target_str = build_training_target(rationale_text, final_json)
+                target_str = build_training_target(
+                    rationale_text,
+                    final_json,
+                    use_rationale=not train_candidates_only,
+                )
             
             # Common file resolution
             if filename:
@@ -792,6 +814,7 @@ def build_items_from_rationale_jsonl(
                 "target": target_str,
                 "target_obj": target_obj,
                 "prompt_text": user_text.strip() if user_text else "",
+                "task_mode": "candidates" if train_candidates_only else "cot",
             }
             text_only_item = {**base_item, "audio_path": None}
             fallback_text_items.append(text_only_item)
@@ -1923,6 +1946,23 @@ def main():
         action="store_true",
         help="Also export label-only predictions and metrics after inference.",
     )
+    parser.add_argument(
+        "--train_candidates_only",
+        "--train-candidates-only",
+        "--no_r_train",
+        "--no-r-train",
+        dest="train_candidates_only",
+        action="store_true",
+        default=True,
+        help="Use C+J targets/prompts (no R) for train/eval splits. Default: enabled.",
+    )
+    parser.add_argument(
+        "--train_with_rationale",
+        "--train-with-rationale",
+        dest="train_candidates_only",
+        action="store_false",
+        help="Use full C/R/J targets/prompts for train/eval splits.",
+    )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
         "--text_only",
@@ -2002,6 +2042,10 @@ def main():
             logger.warning("metadata_file not found: %s (using empty DB Definitions)", args.metadata_file)
         if args.text_only:
             logger.info("text_only=True: all splits will use text-only items.")
+        logger.info(
+            "Train/eval target mode: %s",
+            "C+J (no R)" if args.train_candidates_only else "C/R/J",
+        )
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
@@ -2029,6 +2073,7 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
+        train_candidates_only=args.train_candidates_only,
     )
     eval_items = build_items_from_rationale_jsonl(
         args.eval_file,
@@ -2040,6 +2085,7 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
+        train_candidates_only=args.train_candidates_only,
     )
 
     if rank == 0:
@@ -2122,6 +2168,7 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
+        train_candidates_only=False,
     )
 
     output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
