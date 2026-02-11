@@ -88,26 +88,33 @@ python Experiment_RationaleCompare/02_generate_success_cot.py \
 
 ## 3) Prepare SFT JSONL
 
+> **Important**: The rationale generation outputs (`01_`, `02_`) do not include audio file
+> references (`recordings`). Use `--slurp_files` to enrich records by looking up `recordings`
+> from the original SLURP JSONL files via `slurp_id`.
+
 ### Vanilla SFT (Method 1)
 ```bash
 python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
   --input_files slurp/dataset/slurp/train.jsonl \
   --output_file Experiment_RationaleCompare/sft_vanilla_train.jsonl \
-  --method vanilla
+  --method vanilla \
+  --slurp_files slurp/dataset/slurp/train.jsonl,slurp/dataset/slurp/devel.jsonl,slurp/dataset/slurp/test.jsonl
 ```
 
 ### Oracle SFT (Method 2)
 ```bash
 python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
   --input_files Experiment_RationaleCompare/oracle_cot.jsonl \
-  --output_file Experiment_RationaleCompare/sft_oracle_train.jsonl
+  --output_file Experiment_RationaleCompare/sft_oracle_train.jsonl \
+  --slurp_files slurp/dataset/slurp/train.jsonl,slurp/dataset/slurp/devel.jsonl,slurp/dataset/slurp/test.jsonl
 ```
 
 ### Success‑Filtered SFT (Method 3)
 ```bash
 python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
   --input_files Experiment_RationaleCompare/success_cot_filtered.jsonl \
-  --output_file Experiment_RationaleCompare/sft_success_train.jsonl
+  --output_file Experiment_RationaleCompare/sft_success_train.jsonl \
+  --slurp_files slurp/dataset/slurp/train.jsonl,slurp/dataset/slurp/devel.jsonl,slurp/dataset/slurp/test.jsonl
 ```
 
 ### Success‑CoT SFT (keep all outputs)
@@ -115,10 +122,13 @@ python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
 python Experiment_RationaleCompare/03_prepare_sft_jsonl.py \
   --input_files Experiment_RationaleCompare/success_cot_raw.jsonl \
   --output_file Experiment_RationaleCompare/sft_success_train.jsonl \
-  --method sf-cot
+  --method sf-cot \
+  --slurp_files slurp/dataset/slurp/train.jsonl,slurp/dataset/slurp/devel.jsonl,slurp/dataset/slurp/test.jsonl
 ```
 
 `success_cot_raw.jsonl` includes `gold_label`; `03_prepare_sft_jsonl.py` will use it as `final` automatically.
+
+`--slurp_files` omission results in empty `recordings`, causing audio items to be skipped during training.
 
 ---
 
