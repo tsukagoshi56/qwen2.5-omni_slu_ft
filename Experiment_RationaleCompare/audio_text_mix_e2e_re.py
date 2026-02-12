@@ -82,6 +82,89 @@ class ProcessorWithTokenizerProxy:
         return self._base_processor(*args, **kwargs)
 
 
+def _is_tokenizer_like(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return False
+    has_decode = hasattr(value, "decode") or hasattr(value, "batch_decode")
+    has_tokenizer_api = callable(value) or has_decode
+    return bool(has_tokenizer_api and has_decode)
+
+
+def _coerce_tokenizer_candidate(value: Any) -> Optional[Any]:
+    if _is_tokenizer_like(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            candidate = _coerce_tokenizer_candidate(item)
+            if candidate is not None:
+                return candidate
+    if isinstance(value, dict):
+        preferred_keys = (
+            "tokenizer",
+            "text_tokenizer",
+            "lm_tokenizer",
+            "language_tokenizer",
+            "decoder_tokenizer",
+        )
+        for key in preferred_keys:
+            if key in value:
+                candidate = _coerce_tokenizer_candidate(value.get(key))
+                if candidate is not None:
+                    return candidate
+        for item in value.values():
+            candidate = _coerce_tokenizer_candidate(item)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _extract_tokenizer_from_processor(processor: Any) -> Optional[Any]:
+    preferred_attrs = (
+        "tokenizer",
+        "text_tokenizer",
+        "lm_tokenizer",
+        "language_tokenizer",
+        "_tokenizer",
+    )
+    for attr in preferred_attrs:
+        try:
+            candidate = _coerce_tokenizer_candidate(getattr(processor, attr, None))
+        except Exception:
+            candidate = None
+        if candidate is not None:
+            return candidate
+
+    try:
+        mapping = vars(processor)
+    except Exception:
+        mapping = {}
+    for key, value in mapping.items():
+        if "tokenizer" not in str(key).lower():
+            continue
+        candidate = _coerce_tokenizer_candidate(value)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _load_tokenizer_with_fallbacks(model_name_or_path: str) -> Tuple[Any, str]:
+    attempts = (
+        ("use_fast=False", {"trust_remote_code": True, "use_fast": False}),
+        ("use_fast=True", {"trust_remote_code": True, "use_fast": True}),
+        ("default", {"trust_remote_code": True}),
+    )
+    errors: List[str] = []
+    for label, kwargs in attempts:
+        try:
+            return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs), label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    detail = " | ".join(errors) if errors else "unknown"
+    raise RuntimeError(
+        f"AutoTokenizer loading failed for '{model_name_or_path}' across fallbacks. Details: {detail}"
+    )
+
+
 def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
     if librosa is None:
         raise ModuleNotFoundError(
@@ -149,18 +232,15 @@ def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) ->
 
 
 def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Tuple[Any, Any]:
-    tokenizer = getattr(processor, "tokenizer", None)
+    tokenizer = _extract_tokenizer_from_processor(processor)
     if tokenizer is None:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name_or_path,
-                trust_remote_code=True,
-                use_fast=False,
-            )
+            tokenizer, load_mode = _load_tokenizer_with_fallbacks(model_name_or_path)
             logger.warning(
-                "Processor %s has no tokenizer; loaded AutoTokenizer(%s).",
+                "Processor %s has no tokenizer; loaded AutoTokenizer(%s) with %s.",
                 type(processor).__name__,
                 model_name_or_path,
+                load_mode,
             )
         except Exception as exc:
             raise ValueError(
@@ -192,15 +272,15 @@ def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str)
 
 
 def get_tokenizer_or_raise(processor: Any) -> Any:
-    tokenizer = getattr(processor, "tokenizer", None)
+    tokenizer = _extract_tokenizer_from_processor(processor)
     if tokenizer is not None:
         return tokenizer
-    tokenizer = _PROCESSOR_TOKENIZER_REGISTRY.get(id(processor))
+    tokenizer = _coerce_tokenizer_candidate(_PROCESSOR_TOKENIZER_REGISTRY.get(id(processor)))
     if tokenizer is not None:
         return tokenizer
     base = getattr(processor, "_base_processor", None)
     if base is not None:
-        tokenizer = _PROCESSOR_TOKENIZER_REGISTRY.get(id(base))
+        tokenizer = _coerce_tokenizer_candidate(_PROCESSOR_TOKENIZER_REGISTRY.get(id(base)))
         if tokenizer is not None:
             return tokenizer
     raise AttributeError(
