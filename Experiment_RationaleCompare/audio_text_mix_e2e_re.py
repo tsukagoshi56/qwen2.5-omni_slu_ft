@@ -197,28 +197,6 @@ def _infer_model_family(model_name_or_path: str) -> str:
     return "other"
 
 
-def _infer_model_family_from_model(model: Any) -> str:
-    probes: List[str] = []
-    for obj in (model, getattr(model, "module", None), getattr(model, "config", None)):
-        if obj is None:
-            continue
-        probes.append(type(obj).__name__)
-        for attr in ("name_or_path", "_name_or_path", "model_type"):
-            try:
-                value = getattr(obj, attr, None)
-            except Exception:
-                value = None
-            if isinstance(value, str) and value.strip():
-                probes.append(value)
-        try:
-            arch = getattr(obj, "architectures", None)
-        except Exception:
-            arch = None
-        if isinstance(arch, (list, tuple)):
-            probes.extend([str(x) for x in arch if x is not None])
-    return _infer_model_family(" ".join(probes))
-
-
 def load_audio_model_from_pretrained(
     model_name_or_path: str,
     *,
@@ -697,15 +675,6 @@ def _drop_unsupported_feature_masks_for_generate(model: Any, inputs: Dict[str, t
     present_keys = [k for k in candidate_keys if k in inputs]
     if not present_keys:
         return inputs, []
-
-    family = _infer_model_family_from_model(model)
-    if family in {"flamingo", "music-flamingo"}:
-        filtered = dict(inputs)
-        dropped = []
-        for key in present_keys:
-            filtered.pop(key, None)
-            dropped.append(key)
-        return filtered, dropped
 
     try:
         target = model.module if hasattr(model, "module") and getattr(model, "module") is not None else model
@@ -2268,13 +2237,6 @@ class CustomTrainer(Trainer):
 
     @staticmethod
     def _drop_unsupported_feature_masks(model: Any, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        family = _infer_model_family_from_model(model)
-        if family in {"flamingo", "music-flamingo"}:
-            filtered = dict(inputs)
-            filtered.pop("input_features_mask", None)
-            filtered.pop("feature_attention_mask", None)
-            return filtered
-
         try:
             target = model
             module = getattr(model, "module", None)
