@@ -2087,6 +2087,10 @@ class SmartCollator:
                 imask = _normalize_feature_mask(imask)
                 batch_dict["input_features_mask"] = imask
                 batch_dict["feature_attention_mask"] = imask
+        elif "input_features" in batch_dict and torch.is_tensor(batch_dict["input_features"]):
+            fmask = _infer_feature_attention_mask(batch_dict["input_features"])
+            batch_dict["feature_attention_mask"] = fmask
+            batch_dict["input_features_mask"] = fmask
         return batch_dict
 
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -2170,6 +2174,10 @@ class CustomTrainer(Trainer):
                 imask = _normalize_feature_mask(imask)
             sanitized["input_features_mask"] = imask
             sanitized["feature_attention_mask"] = imask
+        elif "input_features" in sanitized and torch.is_tensor(sanitized["input_features"]):
+            fmask = _infer_feature_attention_mask(sanitized["input_features"])
+            sanitized["feature_attention_mask"] = fmask
+            sanitized["input_features_mask"] = fmask
         return sanitized
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
