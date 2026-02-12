@@ -1623,7 +1623,7 @@ def main() -> None:
         default=0,
         help="Maximum number of GRPO training steps. 0 means no step cap (use epochs only).",
     )
-    parser.add_argument("--eval_every", type=int, default=50, help="Run eval every N global steps (0 disables).")
+    parser.add_argument("--eval_every", type=int, default=500, help="Run eval every N global steps (0 disables).")
     parser.add_argument(
         "--eval_max_samples",
         type=int,
@@ -1829,7 +1829,7 @@ def main() -> None:
             args.test_every = 10
     if args.param_debug:
         if args.eval_file:
-            args.eval_every = 50
+            args.eval_every = 500
         # Keep full eval pool; the run will draw one fixed random subset.
         args.eval_max_samples = None
     if args.use_lora and not HAS_PEFT:
