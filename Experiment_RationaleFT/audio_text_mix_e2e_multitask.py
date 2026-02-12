@@ -467,7 +467,7 @@ def main():
         logger.info("Train items: %d | <ras>: %d | <slu>: %d", len(train_items), n_ras, n_slu)
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    tokenizer = base.ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
+    processor, tokenizer = base.ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
     _ = base.get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
     model = base.load_audio_model_from_pretrained(

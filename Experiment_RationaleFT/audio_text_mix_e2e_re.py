@@ -63,6 +63,18 @@ PROJECTOR_MODULE_NAME_HINTS = (
     "mm_projector",
 )
 
+class ProcessorWithTokenizerProxy:
+    def __init__(self, base_processor: Any, tokenizer: Any):
+        self._base_processor = base_processor
+        self.tokenizer = tokenizer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base_processor, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._base_processor(*args, **kwargs)
+
+
 PROMPT_HEADER = (
     "Predict the final SLU label from ASR n-best and rationale.\n"
     "Output JSON only with keys: scenario, action, entities."
@@ -126,7 +138,7 @@ def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) ->
         ) from exc
 
 
-def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Any:
+def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Tuple[Any, Any]:
     tokenizer = getattr(processor, "tokenizer", None)
     if tokenizer is None:
         try:
@@ -135,9 +147,8 @@ def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str)
                 trust_remote_code=True,
                 use_fast=False,
             )
-            setattr(processor, "tokenizer", tokenizer)
             logger.warning(
-                "Processor %s has no tokenizer; attached AutoTokenizer(%s).",
+                "Processor %s has no tokenizer; loaded AutoTokenizer(%s).",
                 type(processor).__name__,
                 model_name_or_path,
             )
@@ -159,7 +170,14 @@ def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str)
                 f"Tokenizer for '{model_name_or_path}' has neither pad_token nor eos_token. "
                 "Set tokenizer special tokens before training."
             )
-    return tokenizer
+
+    try:
+        if getattr(processor, "tokenizer", None) is None:
+            setattr(processor, "tokenizer", tokenizer)
+    except Exception:
+        processor = ProcessorWithTokenizerProxy(processor, tokenizer)
+
+    return processor, tokenizer
 
 
 def _chat_template_owner_or_raise(processor: Any) -> Any:
@@ -2190,7 +2208,7 @@ def main():
         raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
+    processor, tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
     _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
     model = load_audio_model_from_pretrained(
