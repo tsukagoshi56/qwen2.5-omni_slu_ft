@@ -1656,6 +1656,39 @@ class SmartCollator:
 
 
 class CustomTrainer(Trainer):
+    @staticmethod
+    def _sanitize_model_inputs(inputs: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+        for key, value in inputs.items():
+            if value is None:
+                continue
+            sanitized[key] = value
+
+        if "input_ids" in sanitized and "attention_mask" not in sanitized:
+            input_ids = sanitized["input_ids"]
+            if torch.is_tensor(input_ids):
+                sanitized["attention_mask"] = torch.ones_like(input_ids, dtype=torch.long)
+
+        if "input_features" in sanitized and "feature_attention_mask" not in sanitized:
+            feat = sanitized["input_features"]
+            if torch.is_tensor(feat):
+                if feat.dim() >= 2:
+                    bsz = int(feat.shape[0])
+                    tlen = int(feat.shape[1])
+                else:
+                    bsz = 1
+                    tlen = int(feat.shape[0])
+                sanitized["feature_attention_mask"] = torch.ones(
+                    (bsz, tlen),
+                    dtype=torch.long,
+                    device=feat.device,
+                )
+        return sanitized
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        inputs = self._sanitize_model_inputs(inputs)
+        return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+
     def get_train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
