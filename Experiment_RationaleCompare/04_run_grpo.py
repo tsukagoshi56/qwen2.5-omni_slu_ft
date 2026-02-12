@@ -1562,9 +1562,9 @@ def main() -> None:
     )
     parser.add_argument("--group_size", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=4096)
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--do_sample", dest="do_sample", action="store_true", help="Enable sampling.")
+    parser.add_argument("--do_sample", dest="do_sample", action="store_true", default=True, help="Enable sampling (default: True).")
     parser.add_argument(
         "--no_do_sample",
         "--no-do-sample",
