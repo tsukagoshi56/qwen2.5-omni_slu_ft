@@ -225,32 +225,49 @@ def load_audio_model_from_pretrained(
         attempts_list.append((loader_name, loader_cls))
 
     family = _infer_model_family(model_name_or_path)
+    model_name_lc = str(model_name_or_path or "").lower()
+
+    # Qwen path: mirror the stable script behavior and avoid AutoModel fallbacks.
+    if family == "qwen":
+        qwen_errors: List[str] = []
+        if "qwen2.5-omni" in model_name_lc:
+            qwen_omni_cls = _optional_transformers_class(
+                "Qwen2_5OmniForConditionalGeneration",
+                "Qwen2_5OmniForCausalLM",
+                "Qwen2OmniForConditionalGeneration",
+                "Qwen2OmniForCausalLM",
+            )
+            if qwen_omni_cls is not None:
+                try:
+                    return qwen_omni_cls.from_pretrained(
+                        model_name_or_path,
+                        torch_dtype=torch_dtype,
+                        trust_remote_code=trust_remote_code,
+                    )
+                except Exception as exc:
+                    qwen_errors.append(f"{qwen_omni_cls.__name__}: {exc}")
+
+        if Qwen2AudioForConditionalGeneration is not None:
+            try:
+                return Qwen2AudioForConditionalGeneration.from_pretrained(
+                    model_name_or_path,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=trust_remote_code,
+                )
+            except Exception as exc:
+                qwen_errors.append(f"Qwen2AudioForConditionalGeneration: {exc}")
+        else:
+            qwen_errors.append("Qwen2AudioForConditionalGeneration is unavailable in current transformers.")
+
+        detail = " | ".join(qwen_errors) if qwen_errors else "no qwen loader available"
+        raise RuntimeError(
+            f"Failed to load Qwen model '{model_name_or_path}' with Qwen loaders only. Details: {detail}"
+        )
+
     attempts: List[Tuple[str, Any]] = []
     seen_loader_ids = set()
 
-    if family == "qwen":
-        qwen_omni_cls = _optional_transformers_class(
-            "Qwen2_5OmniForConditionalGeneration",
-            "Qwen2_5OmniForCausalLM",
-            "Qwen2OmniForConditionalGeneration",
-            "Qwen2OmniForCausalLM",
-        )
-        _append_attempt(
-            attempts,
-            getattr(qwen_omni_cls, "__name__", "Qwen2_5Omni*"),
-            qwen_omni_cls,
-            seen_loader_ids,
-        )
-        _append_attempt(
-            attempts,
-            "Qwen2AudioForConditionalGeneration",
-            Qwen2AudioForConditionalGeneration,
-            seen_loader_ids,
-        )
-        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
-        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
-
-    elif family == "flamingo":
+    if family == "flamingo":
         _append_attempt(
             attempts,
             "AudioFlamingo3ForConditionalGeneration",
