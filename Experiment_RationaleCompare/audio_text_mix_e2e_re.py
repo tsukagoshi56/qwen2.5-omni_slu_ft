@@ -184,6 +184,19 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
     return librosa.load(audio_path, sr=sr)
 
 
+def _infer_model_family(model_name_or_path: str) -> str:
+    name_lc = str(model_name_or_path or "").lower()
+    if "music-flamingo" in name_lc:
+        return "music-flamingo"
+    if "audio-flamingo-3" in name_lc or "flamingo" in name_lc:
+        return "flamingo"
+    if "voxtral" in name_lc:
+        return "voxtral"
+    if "qwen" in name_lc:
+        return "qwen"
+    return "other"
+
+
 def load_audio_model_from_pretrained(
     model_name_or_path: str,
     *,
@@ -211,19 +224,11 @@ def load_audio_model_from_pretrained(
         seen_loader_ids.add(key)
         attempts_list.append((loader_name, loader_cls))
 
-    model_name_lc = str(model_name_or_path).lower()
+    family = _infer_model_family(model_name_or_path)
     attempts: List[Tuple[str, Any]] = []
     seen_loader_ids = set()
 
-    if "qwen2-audio" in model_name_lc:
-        _append_attempt(
-            attempts,
-            "Qwen2AudioForConditionalGeneration",
-            Qwen2AudioForConditionalGeneration,
-            seen_loader_ids,
-        )
-
-    if "qwen2.5-omni" in model_name_lc:
+    if family == "qwen":
         qwen_omni_cls = _optional_transformers_class(
             "Qwen2_5OmniForConditionalGeneration",
             "Qwen2_5OmniForCausalLM",
@@ -236,20 +241,22 @@ def load_audio_model_from_pretrained(
             qwen_omni_cls,
             seen_loader_ids,
         )
-
-    if "voxtral" in model_name_lc:
-        voxtral_cls = _optional_transformers_class(
-            "VoxtralForConditionalGeneration",
-            "VoxtralForCausalLM",
-        )
         _append_attempt(
             attempts,
-            getattr(voxtral_cls, "__name__", "Voxtral*"),
-            voxtral_cls,
+            "Qwen2AudioForConditionalGeneration",
+            Qwen2AudioForConditionalGeneration,
             seen_loader_ids,
         )
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
 
-    if "music-flamingo" in model_name_lc:
+    elif family == "flamingo":
+        _append_attempt(
+            attempts,
+            "AudioFlamingo3ForConditionalGeneration",
+            AudioFlamingo3ForConditionalGeneration,
+            seen_loader_ids,
+        )
         music_flamingo_cls = _optional_transformers_class(
             "MusicFlamingoForConditionalGeneration",
             "MusicFlamingoForCausalLM",
@@ -260,29 +267,58 @@ def load_audio_model_from_pretrained(
             music_flamingo_cls,
             seen_loader_ids,
         )
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
 
-    if "audio-flamingo-3" in model_name_lc:
+    elif family == "music-flamingo":
+        music_flamingo_cls = _optional_transformers_class(
+            "MusicFlamingoForConditionalGeneration",
+            "MusicFlamingoForCausalLM",
+        )
+        _append_attempt(
+            attempts,
+            getattr(music_flamingo_cls, "__name__", "MusicFlamingo*"),
+            music_flamingo_cls,
+            seen_loader_ids,
+        )
         _append_attempt(
             attempts,
             "AudioFlamingo3ForConditionalGeneration",
             AudioFlamingo3ForConditionalGeneration,
             seen_loader_ids,
         )
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
 
-    _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
-    _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
-    _append_attempt(
-        attempts,
-        "Qwen2AudioForConditionalGeneration",
-        Qwen2AudioForConditionalGeneration,
-        seen_loader_ids,
-    )
-    _append_attempt(
-        attempts,
-        "AudioFlamingo3ForConditionalGeneration",
-        AudioFlamingo3ForConditionalGeneration,
-        seen_loader_ids,
-    )
+    elif family == "voxtral":
+        voxtral_cls = _optional_transformers_class(
+            "VoxtralForConditionalGeneration",
+            "VoxtralForCausalLM",
+        )
+        _append_attempt(
+            attempts,
+            getattr(voxtral_cls, "__name__", "Voxtral*"),
+            voxtral_cls,
+            seen_loader_ids,
+        )
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
+
+    else:
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
+        _append_attempt(
+            attempts,
+            "Qwen2AudioForConditionalGeneration",
+            Qwen2AudioForConditionalGeneration,
+            seen_loader_ids,
+        )
+        _append_attempt(
+            attempts,
+            "AudioFlamingo3ForConditionalGeneration",
+            AudioFlamingo3ForConditionalGeneration,
+            seen_loader_ids,
+        )
 
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
@@ -517,9 +553,14 @@ def _audio_chat_content_variants(prompt_text: str, audio_ref: str) -> List[List[
     ]
 
 
-def _is_qwen_processor_or_tokenizer(processor: Any, tokenizer: Optional[Any] = None) -> bool:
-    probes: List[str] = []
-    for obj in (processor, tokenizer, getattr(processor, "tokenizer", None)):
+def _infer_audio_input_mode(
+    model_name_or_path: str,
+    *,
+    processor: Optional[Any] = None,
+    tokenizer: Optional[Any] = None,
+) -> str:
+    probes: List[str] = [str(model_name_or_path or "")]
+    for obj in (processor, tokenizer, getattr(processor, "tokenizer", None) if processor is not None else None):
         if obj is None:
             continue
         probes.append(type(obj).__name__.lower())
@@ -539,7 +580,10 @@ def _is_qwen_processor_or_tokenizer(processor: Any, tokenizer: Optional[Any] = N
                     value = None
                 if isinstance(value, str) and value.strip():
                     probes.append(value.lower())
-    return any("qwen" in text for text in probes)
+    family = _infer_model_family(" ".join(probes))
+    if family in {"flamingo", "music-flamingo"}:
+        return "tokenized_chat_template"
+    return "processor_audio"
 
 
 def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
@@ -2466,13 +2510,17 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
 @dataclass
 class InferenceCollator:
     processor: Any
+    audio_input_mode: str = "auto"
 
     def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
         if not batch:
             return {}
         tokenizer = get_tokenizer_or_raise(self.processor)
         tokenizer.padding_side = "left"
-        use_qwen_audio_flow = _is_qwen_processor_or_tokenizer(self.processor, tokenizer)
+        mode = str(self.audio_input_mode or "").strip().lower()
+        if mode not in {"processor_audio", "tokenized_chat_template"}:
+            mode = _infer_audio_input_mode("", processor=self.processor, tokenizer=tokenizer)
+        use_processor_audio_flow = mode == "processor_audio"
         sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
         is_audio_batch = batch[0].get("audio_path") is not None
 
@@ -2486,7 +2534,7 @@ class InferenceCollator:
                     if not audio_path:
                         continue
                     prompt_text = build_prompt_text(item)
-                    if use_qwen_audio_flow:
+                    if use_processor_audio_flow:
                         audio, _ = load_audio_or_raise(audio_path, sr=sr)
                         user_content = [
                             {"type": "audio", "audio_url": "placeholder"},
@@ -2647,6 +2695,7 @@ def run_distributed_inference(
     processor,
     items,
     output_path,
+    model_name_or_path: str,
     device,
     rank,
     world_size,
@@ -2664,10 +2713,16 @@ def run_distributed_inference(
     local_results: List[Dict[str, Any]] = []
     tokenizer = get_tokenizer_or_raise(processor)
     tokenizer.padding_side = "left"
+    audio_input_mode = _infer_audio_input_mode(
+        model_name_or_path,
+        processor=processor,
+        tokenizer=tokenizer,
+    )
 
     if rank == 0:
         logger.info("Starting Inference. Items: %d (Audio: %d, Text: %d), Batch size: %d",
                     len(my_items), len(my_audio_items), len(my_text_items), batch_size)
+        logger.info("Inference audio input mode: %s", audio_input_mode)
 
     # Audio Loader
     if my_audio_items:
@@ -2675,7 +2730,7 @@ def run_distributed_inference(
             MixedDataset(my_audio_items),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=InferenceCollator(processor),
+            collate_fn=InferenceCollator(processor, audio_input_mode=audio_input_mode),
             drop_last=False,
             shuffle=False,
         )
@@ -2703,7 +2758,7 @@ def run_distributed_inference(
             MixedDataset(my_text_items),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=InferenceCollator(processor),
+            collate_fn=InferenceCollator(processor, audio_input_mode=audio_input_mode),
             drop_last=False,
             shuffle=False,
         )
@@ -3352,6 +3407,7 @@ def main():
         processor=processor,
         items=test_items,
         output_path=output_jsonl,
+        model_name_or_path=args.model_name_or_path,
         device=device,
         rank=rank,
         world_size=world_size,
