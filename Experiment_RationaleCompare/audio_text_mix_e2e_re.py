@@ -1855,48 +1855,10 @@ class SampleGenerationCallback(TrainerCallback):
                             inputs["attention_mask"] = tok["attention_mask"].to(device)
                 if "attention_mask" not in inputs and "input_ids" in inputs:
                     inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-                if (
-                    "input_features" in inputs
-                    and "feature_attention_mask" not in inputs
-                    and "input_features_mask" not in inputs
-                ):
-                    feat = inputs["input_features"]
-                    if feat.dim() >= 2:
-                        mask = torch.ones(
-                            (feat.shape[0], feat.shape[1]),
-                            dtype=torch.long,
-                            device=feat.device,
-                        )
-                    else:
-                        mask = torch.ones(
-                            (1, feat.shape[0]),
-                            dtype=torch.long,
-                            device=feat.device,
-                        )
-                    inputs["feature_attention_mask"] = mask
-                    inputs["input_features_mask"] = mask
-                elif "feature_attention_mask" in inputs and "input_features_mask" not in inputs:
-                    inputs["input_features_mask"] = inputs["feature_attention_mask"]
-                elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
-                    inputs["feature_attention_mask"] = inputs["input_features_mask"]
-
-                # --- Align mask length to input_features time dimension ---
-                if "input_features" in inputs:
-                    feat = inputs["input_features"]
-                    feat_time = feat.shape[1] if feat.dim() >= 2 else feat.shape[0]
-                    for mask_key in ("feature_attention_mask", "input_features_mask"):
-                        if mask_key in inputs:
-                            m = inputs[mask_key]
-                            mask_time = m.shape[-1]
-                            if mask_time != feat_time:
-                                if mask_time > feat_time:
-                                    inputs[mask_key] = m[..., :feat_time]
-                                else:
-                                    pad = torch.zeros(
-                                        *m.shape[:-1], feat_time - mask_time,
-                                        dtype=m.dtype, device=m.device,
-                                    )
-                                    inputs[mask_key] = torch.cat([m, pad], dim=-1)
+                # Drop feature masks — audio encoder downsamples features but
+                # not the mask, causing size-mismatch inside generate().
+                inputs.pop("feature_attention_mask", None)
+                inputs.pop("input_features_mask", None)
 
                 output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
                     self.model,
@@ -2219,27 +2181,10 @@ class InferenceCollator:
         inputs = {k: v for k, v in inputs.items() if torch.is_tensor(v)}
         if "attention_mask" not in inputs and "input_ids" in inputs:
             inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-        if "feature_attention_mask" in inputs and "input_features_mask" not in inputs:
-            inputs["input_features_mask"] = inputs["feature_attention_mask"]
-        elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
-            inputs["feature_attention_mask"] = inputs["input_features_mask"]
-        # --- Align mask length to input_features time dimension ---
-        if "input_features" in inputs:
-            feat = inputs["input_features"]
-            feat_time = feat.shape[1] if feat.dim() >= 2 else feat.shape[0]
-            for mask_key in ("feature_attention_mask", "input_features_mask"):
-                if mask_key in inputs:
-                    m = inputs[mask_key]
-                    mask_time = m.shape[-1]
-                    if mask_time != feat_time:
-                        if mask_time > feat_time:
-                            inputs[mask_key] = m[..., :feat_time]
-                        else:
-                            pad = torch.zeros(
-                                *m.shape[:-1], feat_time - mask_time,
-                                dtype=m.dtype, device=m.device,
-                            )
-                            inputs[mask_key] = torch.cat([m, pad], dim=-1)
+        # Drop feature masks — audio encoder downsamples features but not the
+        # mask, causing size-mismatch inside generate().
+        inputs.pop("feature_attention_mask", None)
+        inputs.pop("input_features_mask", None)
         return {"net_inputs": inputs, "items": valid_items}
 
 
@@ -2263,52 +2208,12 @@ def _generate_batch(
         return []
     if "attention_mask" not in net_inputs:
         net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
-    if (
-        "input_features" in net_inputs
-        and "feature_attention_mask" not in net_inputs
-        and "input_features_mask" not in net_inputs
-    ):
-        feat = net_inputs["input_features"]
-        if feat.dim() >= 2:
-            mask = torch.ones(
-                (feat.shape[0], feat.shape[1]),
-                dtype=torch.long,
-                device=feat.device,
-            )
-        else:
-            mask = torch.ones(
-                (1, feat.shape[0]),
-                dtype=torch.long,
-                device=feat.device,
-            )
-        net_inputs["feature_attention_mask"] = mask
-        net_inputs["input_features_mask"] = mask
-    elif "feature_attention_mask" in net_inputs and "input_features_mask" not in net_inputs:
-        net_inputs["input_features_mask"] = net_inputs["feature_attention_mask"]
-    elif "input_features_mask" in net_inputs and "feature_attention_mask" not in net_inputs:
-        net_inputs["feature_attention_mask"] = net_inputs["input_features_mask"]
-
-    # --- Align mask length to input_features time dimension ---
-    if "input_features" in net_inputs:
-        feat = net_inputs["input_features"]
-        feat_time = feat.shape[1] if feat.dim() >= 2 else feat.shape[0]
-        for mask_key in ("feature_attention_mask", "input_features_mask"):
-            if mask_key in net_inputs:
-                m = net_inputs[mask_key]
-                mask_time = m.shape[-1]
-                if mask_time != feat_time:
-                    logger.debug(
-                        "Realigning %s from %d to %d to match input_features.",
-                        mask_key, mask_time, feat_time,
-                    )
-                    if mask_time > feat_time:
-                        net_inputs[mask_key] = m[..., :feat_time]
-                    else:
-                        pad = torch.zeros(
-                            *m.shape[:-1], feat_time - mask_time,
-                            dtype=m.dtype, device=m.device,
-                        )
-                        net_inputs[mask_key] = torch.cat([m, pad], dim=-1)
+    # Remove feature masks before generate() — the audio encoder internally
+    # downsamples input_features (e.g. 1500 → 259) but does NOT downsample
+    # the mask, causing a size-mismatch crash inside the model.  Dropping
+    # the masks lets the model handle masking on its own.
+    net_inputs.pop("feature_attention_mask", None)
+    net_inputs.pop("input_features_mask", None)
 
     output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
         model,
