@@ -646,6 +646,14 @@ def _extract_unused_model_kwargs_from_exception(exc: Exception) -> List[str]:
         )
         if match:
             found.append(match.group(1).strip())
+    if not found:
+        match = re.search(
+            r"['\"]([^'\"]+)['\"]\s+is\s+(?:an\s+)?unsupported\s+keyword\s+argument",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            found.append(match.group(1).strip())
 
     normalized: List[str] = []
     seen = set()
@@ -660,6 +668,44 @@ def _extract_unused_model_kwargs_from_exception(exc: Exception) -> List[str]:
     return normalized
 
 
+def _drop_unsupported_feature_masks_for_generate(model: Any, inputs: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+    candidate_keys = ("input_features_mask", "feature_attention_mask")
+    present_keys = [k for k in candidate_keys if k in inputs]
+    if not present_keys:
+        return inputs, []
+
+    try:
+        target = model.module if hasattr(model, "module") and getattr(model, "module") is not None else model
+        accepted: set = set()
+
+        forward = getattr(target, "forward", None)
+        if callable(forward):
+            sig = inspect.signature(forward)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return inputs, []
+            accepted.update(sig.parameters.keys())
+
+        prep = getattr(target, "prepare_inputs_for_generation", None)
+        if callable(prep):
+            sig = inspect.signature(prep)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return inputs, []
+            accepted.update(sig.parameters.keys())
+
+        if not accepted:
+            return inputs, []
+    except Exception:
+        return inputs, []
+
+    filtered = dict(inputs)
+    dropped: List[str] = []
+    for key in present_keys:
+        if key not in accepted:
+            filtered.pop(key, None)
+            dropped.append(key)
+    return filtered, dropped
+
+
 def _generate_with_retry_drop_unused_kwargs(
     model: Any,
     *,
@@ -670,6 +716,8 @@ def _generate_with_retry_drop_unused_kwargs(
     working = dict(net_inputs)
     working = _cast_floating_tensors_to_model_dtype(working, model)
     dropped: List[str] = []
+    working, dropped_pre = _drop_unsupported_feature_masks_for_generate(model, working)
+    dropped.extend(dropped_pre)
     for _ in range(6):
         try:
             with torch.no_grad():
