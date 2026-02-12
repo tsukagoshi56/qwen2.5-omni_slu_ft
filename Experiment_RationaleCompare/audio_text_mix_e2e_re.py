@@ -692,8 +692,11 @@ def configure_audio_trainability(
         root: Any,
         module_paths: Tuple[str, ...],
         requires_grad: bool,
+        seen_param_ids: Optional[set] = None,
     ) -> int:
-        seen_param_ids = set()
+        if seen_param_ids is None:
+            seen_param_ids = set()
+        before = len(seen_param_ids)
         for path in module_paths:
             module = _resolve_attr_path(root, path)
             if module is None or not hasattr(module, "parameters"):
@@ -708,49 +711,51 @@ def configure_audio_trainability(
                     continue
                 param.requires_grad_(requires_grad)
                 seen_param_ids.add(pid)
-        return len(seen_param_ids)
+        return len(seen_param_ids) - before
 
-    audio_matches = 0
-    projector_matches = 0
+    audio_param_ids = set()
+    projector_param_ids = set()
     for name, param in model.named_parameters():
         lname = str(name).lower()
         if any(hint in lname for hint in AUDIO_ENCODER_MODULE_NAME_HINTS):
             param.requires_grad_(bool(train_audio_encoder))
-            audio_matches += 1
+            audio_param_ids.add(id(param))
         if any(hint in lname for hint in PROJECTOR_MODULE_NAME_HINTS):
             param.requires_grad_(not bool(freeze_projector))
-            projector_matches += 1
+            projector_param_ids.add(id(param))
 
-    if audio_matches == 0:
-        audio_matches = _apply_requires_grad_from_modules(
-            model,
-            (
-                "audio_tower",
-                "model.audio_tower",
-                "audio_encoder",
-                "model.audio_encoder",
-                "speech_encoder",
-                "model.speech_encoder",
-                "audio_model",
-                "model.audio_model",
-            ),
-            bool(train_audio_encoder),
-        )
-    if projector_matches == 0:
-        projector_matches = _apply_requires_grad_from_modules(
-            model,
-            (
-                "multi_modal_projector",
-                "model.multi_modal_projector",
-                "multimodal_projector",
-                "model.multimodal_projector",
-                "audio_projector",
-                "model.audio_projector",
-                "mm_projector",
-                "model.mm_projector",
-            ),
-            not bool(freeze_projector),
-        )
+    _apply_requires_grad_from_modules(
+        model,
+        (
+            "audio_tower",
+            "model.audio_tower",
+            "audio_encoder",
+            "model.audio_encoder",
+            "speech_encoder",
+            "model.speech_encoder",
+            "audio_model",
+            "model.audio_model",
+        ),
+        bool(train_audio_encoder),
+        seen_param_ids=audio_param_ids,
+    )
+    _apply_requires_grad_from_modules(
+        model,
+        (
+            "multi_modal_projector",
+            "model.multi_modal_projector",
+            "multimodal_projector",
+            "model.multimodal_projector",
+            "audio_projector",
+            "model.audio_projector",
+            "mm_projector",
+            "model.mm_projector",
+        ),
+        not bool(freeze_projector),
+        seen_param_ids=projector_param_ids,
+    )
+    audio_matches = len(audio_param_ids)
+    projector_matches = len(projector_param_ids)
     return audio_matches, projector_matches
 
 
