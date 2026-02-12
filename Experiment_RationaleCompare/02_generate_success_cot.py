@@ -204,23 +204,71 @@ def _mojibake_score(text: str) -> int:
     return score
 
 
-def _maybe_fix_mojibake_text(value: Any) -> str:
+def _locale_prefix(locale_hint: Optional[str]) -> str:
+    text = str(locale_hint or "").strip()
+    if not text:
+        return ""
+    return text.split("-", 1)[0].lower()
+
+
+def _language_mismatch_penalty(text: str, locale_hint: Optional[str]) -> int:
+    locale = _locale_prefix(locale_hint)
+    if not locale:
+        return 0
+    japanese_chars = 0
+    latin_chars = 0
+    for ch in text:
+        code = ord(ch)
+        if (0x3040 <= code <= 0x30FF) or (0x4E00 <= code <= 0x9FFF):
+            japanese_chars += 1
+        elif ("a" <= ch.lower() <= "z"):
+            latin_chars += 1
+    if locale == "ja":
+        # Japanese locale: do not penalize Japanese script.
+        return 0
+    # Non-Japanese locale: heavily penalize unexpected Japanese-script artifacts.
+    if japanese_chars == 0:
+        return 0
+    return japanese_chars * 5 if latin_chars > 0 else japanese_chars * 3
+
+
+def _mojibake_candidates(text: str) -> List[str]:
+    seen = {text}
+    candidates = [text]
+    frontier = [text]
+    for _ in range(2):
+        next_frontier: List[str] = []
+        for base in frontier:
+            for enc in ("latin-1", "cp1252"):
+                try:
+                    candidate = base.encode(enc).decode("utf-8")
+                except Exception:
+                    continue
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                candidates.append(candidate)
+                next_frontier.append(candidate)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return candidates
+
+
+def _candidate_score(text: str, locale_hint: Optional[str]) -> int:
+    score = _mojibake_score(text) * 4
+    score += text.count("�") * 6
+    score += _language_mismatch_penalty(text, locale_hint)
+    score += sum(1 for ch in text if ord(ch) < 32 and ch not in ("\n", "\r", "\t")) * 2
+    return score
+
+
+def _maybe_fix_mojibake_text(value: Any, locale_hint: Optional[str] = None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    best_text = text
-    best_score = _mojibake_score(text)
-    if best_score == 0:
-        return text
-    for enc in ("latin-1", "cp1252"):
-        try:
-            candidate = text.encode(enc).decode("utf-8")
-        except Exception:
-            continue
-        cand_score = _mojibake_score(candidate)
-        if cand_score < best_score:
-            best_text = candidate
-            best_score = cand_score
+    candidates = _mojibake_candidates(text)
+    best_text = min(candidates, key=lambda cand: (_candidate_score(cand, locale_hint), abs(len(cand) - len(text))))
     return best_text
 
 
@@ -313,13 +361,13 @@ def _normalize_speech_massive_record(
         or record.get("text")
         or ""
     )
-    transcript = _maybe_fix_mojibake_text(raw_transcript)
+    transcript = _maybe_fix_mojibake_text(raw_transcript, locale_hint=dataset_config)
     raw_scenario = record.get("scenario_str") or record.get("scenario") or ""
     raw_intent = record.get("intent_str") or record.get("intent") or ""
     scenario, action, intent = _normalize_massive_scenario_action(raw_scenario, raw_intent)
     token_values = record.get("tokens") if isinstance(record.get("tokens"), list) else []
     label_values = record.get("labels") if isinstance(record.get("labels"), list) else []
-    tokens = [_maybe_fix_mojibake_text(tok) for tok in token_values]
+    tokens = [_maybe_fix_mojibake_text(tok, locale_hint=dataset_config) for tok in token_values]
     labels = [str(lbl) for lbl in label_values]
     entities = _massive_entities_to_common(tokens, labels, outside_label) if (tokens and labels) else []
     audio_path = _extract_massive_audio_path(record)
