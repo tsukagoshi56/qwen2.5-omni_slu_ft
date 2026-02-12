@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
+import transformers as hf_transformers
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
@@ -189,20 +190,99 @@ def load_audio_model_from_pretrained(
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
+    def _optional_transformers_class(*names: str) -> Optional[Any]:
+        for name in names:
+            cls = getattr(hf_transformers, name, None)
+            if cls is not None:
+                return cls
+        return None
+
+    def _append_attempt(
+        attempts_list: List[Tuple[str, Any]],
+        loader_name: str,
+        loader_cls: Any,
+        seen_loader_ids: set,
+    ) -> None:
+        if loader_cls is None:
+            return
+        key = id(loader_cls)
+        if key in seen_loader_ids:
+            return
+        seen_loader_ids.add(key)
+        attempts_list.append((loader_name, loader_cls))
+
     model_name_lc = str(model_name_or_path).lower()
     attempts: List[Tuple[str, Any]] = []
-    if "audio-flamingo-3" in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
-        attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
-    attempts.extend(
-        [
-            ("AutoModelForCausalLM", AutoModelForCausalLM),
-            ("AutoModel", AutoModel),
-        ]
+    seen_loader_ids = set()
+
+    if "qwen2-audio" in model_name_lc:
+        _append_attempt(
+            attempts,
+            "Qwen2AudioForConditionalGeneration",
+            Qwen2AudioForConditionalGeneration,
+            seen_loader_ids,
+        )
+
+    if "qwen2.5-omni" in model_name_lc:
+        qwen_omni_cls = _optional_transformers_class(
+            "Qwen2_5OmniForConditionalGeneration",
+            "Qwen2_5OmniForCausalLM",
+            "Qwen2OmniForConditionalGeneration",
+            "Qwen2OmniForCausalLM",
+        )
+        _append_attempt(
+            attempts,
+            getattr(qwen_omni_cls, "__name__", "Qwen2_5Omni*"),
+            qwen_omni_cls,
+            seen_loader_ids,
+        )
+
+    if "voxtral" in model_name_lc:
+        voxtral_cls = _optional_transformers_class(
+            "VoxtralForConditionalGeneration",
+            "VoxtralForCausalLM",
+        )
+        _append_attempt(
+            attempts,
+            getattr(voxtral_cls, "__name__", "Voxtral*"),
+            voxtral_cls,
+            seen_loader_ids,
+        )
+
+    if "music-flamingo" in model_name_lc:
+        music_flamingo_cls = _optional_transformers_class(
+            "MusicFlamingoForConditionalGeneration",
+            "MusicFlamingoForCausalLM",
+        )
+        _append_attempt(
+            attempts,
+            getattr(music_flamingo_cls, "__name__", "MusicFlamingo*"),
+            music_flamingo_cls,
+            seen_loader_ids,
+        )
+
+    if "audio-flamingo-3" in model_name_lc:
+        _append_attempt(
+            attempts,
+            "AudioFlamingo3ForConditionalGeneration",
+            AudioFlamingo3ForConditionalGeneration,
+            seen_loader_ids,
+        )
+
+    _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+    _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
+    _append_attempt(
+        attempts,
+        "Qwen2AudioForConditionalGeneration",
+        Qwen2AudioForConditionalGeneration,
+        seen_loader_ids,
     )
-    if Qwen2AudioForConditionalGeneration is not None:
-        attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
-    if "audio-flamingo-3" not in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
-        attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
+    _append_attempt(
+        attempts,
+        "AudioFlamingo3ForConditionalGeneration",
+        AudioFlamingo3ForConditionalGeneration,
+        seen_loader_ids,
+    )
 
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
@@ -600,6 +680,36 @@ def configure_audio_trainability(
     train_audio_encoder: bool,
     freeze_projector: bool,
 ) -> Tuple[int, int]:
+    def _resolve_attr_path(root: Any, attr_path: str) -> Optional[Any]:
+        cur = root
+        for part in attr_path.split("."):
+            if not hasattr(cur, part):
+                return None
+            cur = getattr(cur, part)
+        return cur
+
+    def _apply_requires_grad_from_modules(
+        root: Any,
+        module_paths: Tuple[str, ...],
+        requires_grad: bool,
+    ) -> int:
+        seen_param_ids = set()
+        for path in module_paths:
+            module = _resolve_attr_path(root, path)
+            if module is None or not hasattr(module, "parameters"):
+                continue
+            try:
+                params = module.parameters()
+            except Exception:
+                continue
+            for param in params:
+                pid = id(param)
+                if pid in seen_param_ids:
+                    continue
+                param.requires_grad_(requires_grad)
+                seen_param_ids.add(pid)
+        return len(seen_param_ids)
+
     audio_matches = 0
     projector_matches = 0
     for name, param in model.named_parameters():
@@ -610,6 +720,37 @@ def configure_audio_trainability(
         if freeze_projector and any(hint in lname for hint in PROJECTOR_MODULE_NAME_HINTS):
             param.requires_grad_(False)
             projector_matches += 1
+
+    if audio_matches == 0:
+        audio_matches = _apply_requires_grad_from_modules(
+            model,
+            (
+                "audio_tower",
+                "model.audio_tower",
+                "audio_encoder",
+                "model.audio_encoder",
+                "speech_encoder",
+                "model.speech_encoder",
+                "audio_model",
+                "model.audio_model",
+            ),
+            bool(train_audio_encoder),
+        )
+    if freeze_projector and projector_matches == 0:
+        projector_matches = _apply_requires_grad_from_modules(
+            model,
+            (
+                "multi_modal_projector",
+                "model.multi_modal_projector",
+                "multimodal_projector",
+                "model.multimodal_projector",
+                "audio_projector",
+                "model.audio_projector",
+                "mm_projector",
+                "model.mm_projector",
+            ),
+            False,
+        )
     return audio_matches, projector_matches
 
 
