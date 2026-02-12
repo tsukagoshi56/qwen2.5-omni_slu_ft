@@ -1726,7 +1726,23 @@ class SampleGenerationCallback(TrainerCallback):
                     sampling_rate=sr,
                     return_tensors="pt",
                 )
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
+                if "attention_mask" not in inputs and "input_ids" in inputs:
+                    inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
+                if "input_features" in inputs and "feature_attention_mask" not in inputs:
+                    feat = inputs["input_features"]
+                    if feat.dim() >= 2:
+                        inputs["feature_attention_mask"] = torch.ones(
+                            (feat.shape[0], feat.shape[1]),
+                            dtype=torch.long,
+                            device=feat.device,
+                        )
+                    else:
+                        inputs["feature_attention_mask"] = torch.ones(
+                            (1, feat.shape[0]),
+                            dtype=torch.long,
+                            device=feat.device,
+                        )
 
                 with torch.no_grad():
                     output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
@@ -1977,9 +1993,12 @@ class InferenceCollator:
     processor: Any
 
     def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
+        if not batch:
+            return {}
         tokenizer = get_tokenizer_or_raise(self.processor)
         tokenizer.padding_side = "left"
         sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
+        is_audio_batch = batch[0].get("audio_path") is not None
 
         texts = []
         audios = []
@@ -2013,13 +2032,18 @@ class InferenceCollator:
         if not texts:
             return {}
 
-        inputs = self.processor(
-            text=texts,
-            audio=audios if audios else None,
-            sampling_rate=sr,
-            padding=True,
-            return_tensors="pt",
-        )
+        processor_kwargs: Dict[str, Any] = {
+            "text": texts,
+            "sampling_rate": sr,
+            "padding": True,
+            "return_tensors": "pt",
+        }
+        if is_audio_batch:
+            processor_kwargs["audio"] = audios
+
+        inputs = self.processor(**processor_kwargs)
+        # Avoid passing non-tensor/None entries (can break downstream generate in some model impls).
+        inputs = {k: v for k, v in inputs.items() if torch.is_tensor(v)}
         return {"net_inputs": inputs, "items": valid_items}
 
 
@@ -2037,7 +2061,26 @@ def _generate_batch(
     items = batch_data["items"]
     tokenizer = get_tokenizer_or_raise(processor)
 
-    net_inputs = {k: v.to(device) for k, v in net_inputs.items()}
+    net_inputs = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
+    if "input_ids" not in net_inputs:
+        logger.warning("Skip generation batch because input_ids is missing.")
+        return []
+    if "attention_mask" not in net_inputs:
+        net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
+    if "input_features" in net_inputs and "feature_attention_mask" not in net_inputs:
+        feat = net_inputs["input_features"]
+        if feat.dim() >= 2:
+            net_inputs["feature_attention_mask"] = torch.ones(
+                (feat.shape[0], feat.shape[1]),
+                dtype=torch.long,
+                device=feat.device,
+            )
+        else:
+            net_inputs["feature_attention_mask"] = torch.ones(
+                (1, feat.shape[0]),
+                dtype=torch.long,
+                device=feat.device,
+            )
 
     with torch.no_grad():
         output_ids = model.generate(
