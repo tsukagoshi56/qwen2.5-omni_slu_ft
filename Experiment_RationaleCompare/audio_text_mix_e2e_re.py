@@ -2174,7 +2174,39 @@ class CustomTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         inputs = self._sanitize_model_inputs(inputs)
-        return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        try:
+            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        except RuntimeError as exc:
+            # AF3 occasionally throws shape mismatches around embed_positions when stale
+            # position-related kwargs are passed through. Retry once with those removed.
+            message = str(exc or "")
+            if "expanded size of the tensor" not in message:
+                raise
+
+            retry_inputs = dict(inputs)
+            dropped: List[str] = []
+            for key in ("position_ids", "cache_position"):
+                if key in retry_inputs:
+                    retry_inputs.pop(key, None)
+                    dropped.append(key)
+
+            if "attention_mask" in retry_inputs:
+                retry_inputs.pop("attention_mask", None)
+                dropped.append("attention_mask")
+
+            if not dropped:
+                raise
+
+            warn_count = getattr(CustomTrainer.compute_loss, "_shape_retry_warn_count", 0)
+            if warn_count < 20:
+                logger.warning(
+                    "Retrying compute_loss after shape mismatch by dropping keys=%s. error=%s",
+                    dropped,
+                    message,
+                )
+                setattr(CustomTrainer.compute_loss, "_shape_retry_warn_count", warn_count + 1)
+
+            return super().compute_loss(model, retry_inputs, return_outputs=return_outputs, **kwargs)
 
     def get_train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
