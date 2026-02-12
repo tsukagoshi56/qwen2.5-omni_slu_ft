@@ -3,8 +3,9 @@
 Audio/text mixed SLU training and distributed inference.
 
 - Prompting follows Experiment_RationaleCompare/prompts.py templates.
-- Default training target style is C/J (no R rationale line):
+- Default training target style is C/R/J:
   C: ...
+  R: ...
   J: {"scenario": "...", "action": "...", "entities": [...]}
 - Prediction parsing prioritizes the JSON after "J:".
 """
@@ -3199,8 +3200,8 @@ def main():
         "--no-r-train",
         dest="train_candidates_only",
         action="store_true",
-        default=True,
-        help="Use C+J targets/prompts (no R) for train/eval splits. Default: enabled.",
+        default=False,
+        help="Use C+J targets/prompts (no R) for train/eval splits. Default: disabled.",
     )
     parser.add_argument(
         "--train_with_rationale",
