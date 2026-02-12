@@ -3067,8 +3067,8 @@ def main():
     parser.add_argument(
         "--train_id_sample_ratio",
         type=float,
-        default=0.1,
-        help="Randomly keep only this ratio of unique train SLURP IDs (0.0-1.0). Default: 0.1",
+        default=1.0,
+        help="Randomly keep only this ratio of unique train SLURP IDs (0.0-1.0). Default: 1.0",
     )
     parser.add_argument(
         "--train_id_sample_seed",
