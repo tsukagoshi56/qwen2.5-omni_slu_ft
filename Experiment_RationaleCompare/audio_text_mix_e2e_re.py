@@ -628,6 +628,37 @@ def _model_floating_dtype(model: Any) -> Optional[torch.dtype]:
     return None
 
 
+def _safe_model_device(model: Any) -> torch.device:
+    if model is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    try:
+        device_attr = getattr(model, "device", None)
+        if device_attr is not None:
+            return torch.device(device_attr)
+    except Exception:
+        pass
+
+    for iterator_name in ("parameters", "buffers"):
+        iterator = getattr(model, iterator_name, None)
+        if not callable(iterator):
+            continue
+        try:
+            for tensor in iterator():
+                if torch.is_tensor(tensor):
+                    return tensor.device
+        except Exception:
+            continue
+
+    wrapped = getattr(model, "module", None)
+    if wrapped is not None and wrapped is not model:
+        return _safe_model_device(wrapped)
+
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{torch.cuda.current_device()}")
+    return torch.device("cpu")
+
+
 def _cast_floating_tensors_to_model_dtype(
     inputs: Dict[str, Any],
     model: Any,
@@ -2116,7 +2147,7 @@ class SampleGenerationCallback(TrainerCallback):
             return
 
         samples = random.sample(audio_items, min(self.num_samples, len(audio_items)))
-        device = self.model.device
+        device = _safe_model_device(self.model)
         self.model.eval()
         sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
 
