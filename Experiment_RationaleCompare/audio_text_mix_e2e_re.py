@@ -652,13 +652,27 @@ def build_audio_generation_inputs_or_raise(
 ) -> Dict[str, torch.Tensor]:
     try:
         prompt_chat_text = build_audio_chat_text_or_raise(processor, prompt_text, audio_path)
-        return _call_processor_with_audio_or_raise(
+        direct_inputs = _call_processor_with_audio_or_raise(
             processor,
             text=prompt_chat_text,
             audio=audio,
             sampling_rate=sampling_rate,
             padding=False,
         )
+        normalized = _normalize_tokenized_chat_output(direct_inputs)
+        if normalized is not None and "input_ids" in normalized:
+            return normalized
+        if isinstance(direct_inputs, dict) and "input_ids" in direct_inputs:
+            return direct_inputs
+
+        warn_count = getattr(build_audio_generation_inputs_or_raise, "_missing_input_ids_warn_count", 0)
+        if warn_count < 10:
+            key_list = list(direct_inputs.keys()) if isinstance(direct_inputs, dict) else [type(direct_inputs).__name__]
+            logger.warning(
+                "Processor direct audio encoding returned no input_ids (keys=%s); falling back to tokenized chat-template.",
+                key_list,
+            )
+            setattr(build_audio_generation_inputs_or_raise, "_missing_input_ids_warn_count", warn_count + 1)
     except Exception:
         pass
 
@@ -2705,6 +2719,20 @@ def run_distributed_inference(
                     os.remove(fname)
                 except Exception as exc:
                     logger.error("Merge error %s: %s", fname, exc)
+        merged_count = 0
+        try:
+            with open(output_path, "r", encoding="utf-8") as infile:
+                for line in infile:
+                    if line.strip():
+                        merged_count += 1
+        except Exception as exc:
+            logger.error("Failed to count merged predictions: %s", exc)
+        logger.info("Merged predictions: %d / %d items", merged_count, len(items))
+        if len(items) > 0 and merged_count == 0:
+            raise RuntimeError(
+                "Inference produced 0 predictions although test items were loaded. "
+                "Check warnings/errors above (missing input_ids, audio load failures, or unsupported model kwargs)."
+            )
 
 
 def save_label_only_predictions(full_prediction_path: str, label_only_path: str):
