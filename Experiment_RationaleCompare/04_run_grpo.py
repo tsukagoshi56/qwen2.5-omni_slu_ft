@@ -1223,6 +1223,16 @@ def evaluate_model(
                 raise
 
             local_count += 1.0
+            # Print first 5 eval samples for debugging rationale quality
+            if rank == 0 and local_count <= 5:
+                print(
+                    f"[EVAL-SAMPLE {int(local_count)}] reward={reward:.3f} "
+                    f"format_ok={format_ok} rationale_cov={rationale_cov:.2f} "
+                    f"j_correct={j_fully_correct}\n"
+                    f"  GOLD: {json.dumps(item.gold_label, ensure_ascii=False)}\n"
+                    f"  OUTPUT: {generated_text[:500]}",
+                    flush=True,
+                )
             reward_sum += float(reward)
             scenario_sum += 1.0 if stats["scenario_ok"] else 0.0
             action_sum += 1.0 if stats["action_ok"] else 0.0
