@@ -2108,6 +2108,21 @@ def main():
         help="Training log file path (default: <output_dir>/train.log).",
     )
     parser.add_argument(
+        "--logging_enable",
+        "--logging-enable",
+        dest="logging_enable",
+        action="store_true",
+        default=True,
+        help="Enable file logging (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_logging_enable",
+        "--no-logging-enable",
+        dest="logging_enable",
+        action="store_false",
+        help="Disable file logging.",
+    )
+    parser.add_argument(
         "--recover_prediction_file",
         "--recover-prediction-file",
         dest="recover_prediction_file",
@@ -2136,6 +2151,13 @@ def main():
         dest="recover_only",
         action="store_true",
         help="Run recovery mode only and exit (no train/inference).",
+    )
+    parser.add_argument(
+        "--inference_only",
+        "--inference-only",
+        dest="inference_only",
+        action="store_true",
+        help="Skip train/eval and run test inference only using --model_name_or_path.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -2280,9 +2302,12 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if rank == 0:
-        log_path = args.log_file.strip() if args.log_file.strip() else os.path.join(args.output_dir, "train.log")
-        setup_file_logging(log_path)
-        logger.info("File logging enabled: %s", os.path.abspath(log_path))
+        if args.logging_enable:
+            log_path = args.log_file.strip() if args.log_file.strip() else os.path.join(args.output_dir, "train.log")
+            setup_file_logging(log_path)
+            logger.info("File logging enabled: %s", os.path.abspath(log_path))
+        else:
+            logger.info("File logging disabled.")
 
     metadata = load_metadata(args.metadata_file)
     db_definitions = build_db_definitions(metadata)
@@ -2297,6 +2322,8 @@ def main():
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
 
+    train_items: List[Dict[str, Any]] = []
+    eval_items: List[Dict[str, Any]] = []
     train_max_samples = args.max_samples
     eval_max_samples = args.eval_max_samples
     if eval_max_samples is None:
@@ -2313,199 +2340,209 @@ def main():
     cot_train_file = args.cot_train_file.strip()
     cot_eval_file = args.cot_eval_file.strip()
 
-    if cot_train_file:
-        if rank == 0:
-            logger.info(
-                "Using split multitask train files | label=%s | cot=%s",
+    if not args.inference_only:
+        if cot_train_file:
+            if rank == 0:
+                logger.info(
+                    "Using split multitask train files | label=%s | cot=%s",
+                    args.train_file,
+                    cot_train_file,
+                )
+            label_train_items = build_items_from_rationale_jsonl(
                 args.train_file,
-                cot_train_file,
+                args.audio_dir,
+                add_text_only=args.add_text_only,
+                text_only=args.text_only,
+                max_samples=train_max_samples,
+                allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+                print_audio_search_paths=args.print_audio_search_paths,
+                audio_search_print_limit=args.audio_search_print_limit,
+                strict_audio_missing=args.strict_audio_missing,
+                multitask=False,
             )
-        label_train_items = build_items_from_rationale_jsonl(
-            args.train_file,
-            args.audio_dir,
-            add_text_only=args.add_text_only,
-            text_only=args.text_only,
-            max_samples=train_max_samples,
-            allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
-            print_audio_search_paths=args.print_audio_search_paths,
-            audio_search_print_limit=args.audio_search_print_limit,
-            strict_audio_missing=args.strict_audio_missing,
-            multitask=False,
+            cot_train_items = build_items_from_rationale_jsonl(
+                cot_train_file,
+                args.audio_dir,
+                add_text_only=args.add_text_only,
+                text_only=args.text_only,
+                max_samples=train_max_samples,
+                allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+                print_audio_search_paths=args.print_audio_search_paths,
+                audio_search_print_limit=args.audio_search_print_limit,
+                strict_audio_missing=args.strict_audio_missing,
+                multitask=False,
+            )
+            train_items = build_multisource_multitask_items(
+                label_train_items,
+                cot_train_items,
+                cot_task_mode=cot_train_task_mode,
+            )
+        else:
+            train_items = build_items_from_rationale_jsonl(
+                args.train_file,
+                args.audio_dir,
+                add_text_only=args.add_text_only,
+                text_only=args.text_only,
+                max_samples=train_max_samples,
+                allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+                print_audio_search_paths=args.print_audio_search_paths,
+                audio_search_print_limit=args.audio_search_print_limit,
+                strict_audio_missing=args.strict_audio_missing,
+                multitask=True,
+                cot_task_mode=cot_train_task_mode,
+            )
+        train_items, train_sample_stats = sample_train_items_by_slurp_id(
+            train_items,
+            ratio=args.train_id_sample_ratio,
+            seed=args.train_id_sample_seed,
         )
-        cot_train_items = build_items_from_rationale_jsonl(
-            cot_train_file,
-            args.audio_dir,
-            add_text_only=args.add_text_only,
-            text_only=args.text_only,
-            max_samples=train_max_samples,
-            allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
-            print_audio_search_paths=args.print_audio_search_paths,
-            audio_search_print_limit=args.audio_search_print_limit,
-            strict_audio_missing=args.strict_audio_missing,
-            multitask=False,
-        )
-        train_items = build_multisource_multitask_items(
-            label_train_items,
-            cot_train_items,
-            cot_task_mode=cot_train_task_mode,
-        )
-    else:
-        train_items = build_items_from_rationale_jsonl(
-            args.train_file,
-            args.audio_dir,
-            add_text_only=args.add_text_only,
-            text_only=args.text_only,
-            max_samples=train_max_samples,
-            allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
-            print_audio_search_paths=args.print_audio_search_paths,
-            audio_search_print_limit=args.audio_search_print_limit,
-            strict_audio_missing=args.strict_audio_missing,
-            multitask=True,
-            cot_task_mode=cot_train_task_mode,
-        )
-    train_items, train_sample_stats = sample_train_items_by_slurp_id(
-        train_items,
-        ratio=args.train_id_sample_ratio,
-        seed=args.train_id_sample_seed,
-    )
-    if rank == 0:
-        logger.info(
-            (
-                "Train SLURP-ID subsampling: ratio=%.4f seed=%d "
-                "(unique_ids=%d -> selected_ids=%d, items=%d -> %d)"
-            ),
-            args.train_id_sample_ratio,
-            args.train_id_sample_seed,
-            train_sample_stats["unique_ids"],
-            train_sample_stats["selected_ids"],
-            train_sample_stats["items_before"],
-            train_sample_stats["items_after"],
-        )
-
-    if cot_eval_file:
         if rank == 0:
             logger.info(
-                "Using split multitask eval files | label=%s | cot=%s",
-                args.eval_file,
-                cot_eval_file,
+                (
+                    "Train SLURP-ID subsampling: ratio=%.4f seed=%d "
+                    "(unique_ids=%d -> selected_ids=%d, items=%d -> %d)"
+                ),
+                args.train_id_sample_ratio,
+                args.train_id_sample_seed,
+                train_sample_stats["unique_ids"],
+                train_sample_stats["selected_ids"],
+                train_sample_stats["items_before"],
+                train_sample_stats["items_after"],
             )
-        label_eval_items = build_items_from_rationale_jsonl(
-            args.eval_file,
-            args.audio_dir,
-            add_text_only=args.add_text_only,
-            text_only=args.text_only,
-            max_samples=eval_max_samples,
-            allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
-            print_audio_search_paths=args.print_audio_search_paths,
-            audio_search_print_limit=args.audio_search_print_limit,
-            strict_audio_missing=args.strict_audio_missing,
-            multitask=False,
-        )
-        cot_eval_items = build_items_from_rationale_jsonl(
-            cot_eval_file,
-            args.audio_dir,
-            add_text_only=args.add_text_only,
-            text_only=args.text_only,
-            max_samples=eval_max_samples,
-            allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
-            print_audio_search_paths=args.print_audio_search_paths,
-            audio_search_print_limit=args.audio_search_print_limit,
-            strict_audio_missing=args.strict_audio_missing,
-            multitask=False,
-        )
-        eval_items = build_multisource_multitask_items(
-            label_eval_items,
-            cot_eval_items,
-            cot_task_mode=cot_train_task_mode,
-        )
-    else:
-        eval_items = build_items_from_rationale_jsonl(
-            args.eval_file,
-            args.audio_dir,
-            add_text_only=args.add_text_only,
-            text_only=args.text_only,
-            max_samples=eval_max_samples,
-            allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
-            print_audio_search_paths=args.print_audio_search_paths,
-            audio_search_print_limit=args.audio_search_print_limit,
-            strict_audio_missing=args.strict_audio_missing,
-            multitask=True,
-            cot_task_mode=cot_train_task_mode,
-        )
 
+        if cot_eval_file:
+            if rank == 0:
+                logger.info(
+                    "Using split multitask eval files | label=%s | cot=%s",
+                    args.eval_file,
+                    cot_eval_file,
+                )
+            label_eval_items = build_items_from_rationale_jsonl(
+                args.eval_file,
+                args.audio_dir,
+                add_text_only=args.add_text_only,
+                text_only=args.text_only,
+                max_samples=eval_max_samples,
+                allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+                print_audio_search_paths=args.print_audio_search_paths,
+                audio_search_print_limit=args.audio_search_print_limit,
+                strict_audio_missing=args.strict_audio_missing,
+                multitask=False,
+            )
+            cot_eval_items = build_items_from_rationale_jsonl(
+                cot_eval_file,
+                args.audio_dir,
+                add_text_only=args.add_text_only,
+                text_only=args.text_only,
+                max_samples=eval_max_samples,
+                allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+                print_audio_search_paths=args.print_audio_search_paths,
+                audio_search_print_limit=args.audio_search_print_limit,
+                strict_audio_missing=args.strict_audio_missing,
+                multitask=False,
+            )
+            eval_items = build_multisource_multitask_items(
+                label_eval_items,
+                cot_eval_items,
+                cot_task_mode=cot_train_task_mode,
+            )
+        else:
+            eval_items = build_items_from_rationale_jsonl(
+                args.eval_file,
+                args.audio_dir,
+                add_text_only=args.add_text_only,
+                text_only=args.text_only,
+                max_samples=eval_max_samples,
+                allow_text_fallback_when_audio_missing=not args.no_text_fallback_when_audio_missing,
+                print_audio_search_paths=args.print_audio_search_paths,
+                audio_search_print_limit=args.audio_search_print_limit,
+                strict_audio_missing=args.strict_audio_missing,
+                multitask=True,
+                cot_task_mode=cot_train_task_mode,
+            )
+
+        if rank == 0:
+            logger.info("Train items: %d | Eval items: %d", len(train_items), len(eval_items))
+            train_cot = sum(1 for x in train_items if int(x.get("task_id", -1)) == 0)
+            train_label = sum(1 for x in train_items if int(x.get("task_id", -1)) == 1)
+            eval_cot = sum(1 for x in eval_items if int(x.get("task_id", -1)) == 0)
+            eval_label = sum(1 for x in eval_items if int(x.get("task_id", -1)) == 1)
+            logger.info("CoT branch mode for train/eval: %s", cot_train_task_mode)
+            logger.info(
+                "Multitask split | train: cot=%d label=%d | eval: cot=%d label=%d",
+                train_cot,
+                train_label,
+                eval_cot,
+                eval_label,
+            )
+
+        if len(train_items) == 0:
+            raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
+    elif rank == 0:
+        logger.info("Inference-only mode enabled. Skipping train/eval data build and training.")
+
+    model_path = str(args.model_name_or_path).strip()
+    if not model_path:
+        raise ValueError("--model_name_or_path must be non-empty.")
     if rank == 0:
-        logger.info("Train items: %d | Eval items: %d", len(train_items), len(eval_items))
-        train_cot = sum(1 for x in train_items if int(x.get("task_id", -1)) == 0)
-        train_label = sum(1 for x in train_items if int(x.get("task_id", -1)) == 1)
-        eval_cot = sum(1 for x in eval_items if int(x.get("task_id", -1)) == 0)
-        eval_label = sum(1 for x in eval_items if int(x.get("task_id", -1)) == 1)
-        logger.info("CoT branch mode for train/eval: %s", cot_train_task_mode)
-        logger.info(
-            "Multitask split | train: cot=%d label=%d | eval: cot=%d label=%d",
-            train_cot,
-            train_label,
-            eval_cot,
-            eval_label,
-        )
+        logger.info("Loading processor/model from: %s", model_path)
 
-    if len(train_items) == 0:
-        raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
-
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
 
     model = Qwen2AudioForConditionalGeneration.from_pretrained(
-        args.model_name_or_path,
+        model_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
 
-    # Match the original FT behavior: train both audio tower and multimodal projector.
-    model.audio_tower.requires_grad_(True)
-    model.multi_modal_projector.requires_grad_(True)
+    # Match the original FT behavior during training; disable gradients in inference-only mode.
+    model.audio_tower.requires_grad_(not args.inference_only)
+    model.multi_modal_projector.requires_grad_(not args.inference_only)
     if rank == 0:
         logger.info(
             "Trainability | audio_tower=%s, multi_modal_projector=%s",
-            True,
-            True,
+            not args.inference_only,
+            not args.inference_only,
         )
 
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        bf16=True,
-        logging_steps=1 if args.smoke else 10,
-        eval_strategy="steps" if len(eval_items) > 0 else "no",
-        eval_steps=2 if args.smoke else 50,
-        save_strategy="no",
-        save_total_limit=None,
-        remove_unused_columns=False,
-        ddp_find_unused_parameters=True,
-        report_to="none",
-        disable_tqdm=True,
-    )
+    if not args.inference_only:
+        training_args = TrainingArguments(
+            output_dir=args.output_dir,
+            num_train_epochs=args.num_train_epochs,
+            per_device_train_batch_size=args.batch_size,
+            per_device_eval_batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            learning_rate=args.learning_rate,
+            bf16=True,
+            logging_steps=1 if args.smoke else 10,
+            eval_strategy="steps" if len(eval_items) > 0 else "no",
+            eval_steps=2 if args.smoke else 50,
+            save_strategy="no",
+            save_total_limit=None,
+            remove_unused_columns=False,
+            ddp_find_unused_parameters=True,
+            report_to="none",
+            disable_tqdm=True,
+        )
 
-    trainer = CustomTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=MixedDataset(train_items),
-        eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor, debug=args.smoke),
-        tokenizer=processor.tokenizer,
-    )
+        trainer = CustomTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=MixedDataset(train_items),
+            eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
+            data_collator=SmartCollator(processor, debug=args.smoke),
+            tokenizer=processor.tokenizer,
+        )
 
-    trainer.train()
+        trainer.train()
 
-    if rank == 0:
-        os.makedirs(args.output_dir, exist_ok=True)
-        trainer.save_model(args.output_dir)
-        processor.save_pretrained(args.output_dir)
+        if rank == 0:
+            os.makedirs(args.output_dir, exist_ok=True)
+            trainer.save_model(args.output_dir)
+            processor.save_pretrained(args.output_dir)
 
     if world_size > 1:
         dist.barrier()
