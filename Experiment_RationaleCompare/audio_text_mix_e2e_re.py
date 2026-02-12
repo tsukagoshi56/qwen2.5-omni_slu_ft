@@ -641,7 +641,10 @@ def _generate_with_retry_drop_unused_kwargs(
 
 
 def _model_floating_dtype(model: Any) -> Optional[torch.dtype]:
-    dtype = getattr(model, "dtype", None)
+    try:
+        dtype = getattr(model, "dtype", None)
+    except Exception:
+        dtype = None
     if isinstance(dtype, torch.dtype) and torch.is_floating_point(torch.empty((), dtype=dtype)):
         return dtype
     try:

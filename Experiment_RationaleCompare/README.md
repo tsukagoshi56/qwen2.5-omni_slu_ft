@@ -123,6 +123,27 @@ python Experiment_RationaleCompare/02_generate_success_cot.py \
 
 By default, **text‑mode filtered samples omit `recordings`** to force text‑only inputs in SFT.
 
+### Speech‑MASSIVE: run all configs/splits in one command
+
+`--all` を付けると、Speech‑MASSIVE の全対応 config/split を順番に実行します。  
+出力ファイル名には自動で `speech_massive.<config>.<split>` が付与されます。
+
+```bash
+python Experiment_RationaleCompare/02_generate_success_cot.py \
+  --dataset speech_massive \
+  --all \
+  --massive_dataset_name FBK-MT/Speech-MASSIVE \
+  --massive_cache_dir ~/.cache/huggingface/datasets \
+  --modes text \
+  --output_file Experiment_RationaleCompare/success_cot_raw.jsonl \
+  --filtered_file Experiment_RationaleCompare/success_cot_filtered.jsonl
+```
+
+例:
+- `Experiment_RationaleCompare/success_cot_raw.speech_massive.fr-FR.train_115.jsonl`
+- `Experiment_RationaleCompare/success_cot_raw.speech_massive.de-DE.train.jsonl`
+- `Experiment_RationaleCompare/success_cot_filtered.speech_massive.ko-KR.validation.jsonl`
+
 ### Re-score from existing raw output
 
 If you already generated `success_cot_raw.jsonl`, you can recompute success metrics (including intent/slot candidates) without re-calling models:

@@ -51,6 +51,21 @@ except Exception:
 _DEBUG = False
 DEFAULT_OUTPUT_FILE = "Experiment_RationaleCompare/success_cot_raw.jsonl"
 DEFAULT_FILTERED_FILE = "Experiment_RationaleCompare/success_cot_filtered.jsonl"
+ALL_SPEECH_MASSIVE_CONFIGS = [
+    "ar-SA",
+    "de-DE",
+    "es-ES",
+    "fr-FR",
+    "hu-HU",
+    "ko-KR",
+    "nl-NL",
+    "pl-PL",
+    "pt-PT",
+    "ru-RU",
+    "tr-TR",
+    "vi-VN",
+]
+ALL_SPEECH_MASSIVE_WITH_TRAIN = {"de-DE", "fr-FR"}
 
 
 def _canonicalize_model_name(model_name: str) -> str:
@@ -170,6 +185,86 @@ def _spawn_workers(num_workers: int, base_args: List[str]) -> List[subprocess.Po
         cmd = [sys.executable, script_path] + base_args + ["--worker_rank", str(rank), "--no_spawn_workers"]
         procs.append(subprocess.Popen(cmd, env=os.environ.copy()))
     return procs
+
+
+def _safe_filename_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+
+
+def _append_suffix_to_path(path: str, suffix: str) -> str:
+    root, ext = os.path.splitext(str(path))
+    ext = ext or ".jsonl"
+    safe_suffix = _safe_filename_component(suffix)
+    return f"{root}.{safe_suffix}{ext}"
+
+
+def _all_massive_jobs(args: argparse.Namespace) -> List[Tuple[str, str, str, str, str]]:
+    jobs: List[Tuple[str, str, str, str, str]] = []
+    for config in ALL_SPEECH_MASSIVE_CONFIGS:
+        splits = ["train_115"]
+        if config in ALL_SPEECH_MASSIVE_WITH_TRAIN:
+            splits.append("train")
+        splits.append("validation")
+        for split in splits:
+            suffix = f"speech_massive.{config}.{split}"
+            output_file = _append_suffix_to_path(args.output_file, suffix)
+            filtered_file = _append_suffix_to_path(args.filtered_file, suffix)
+            difficulty_file = _append_suffix_to_path(args.difficulty_file, suffix) if args.difficulty_file.strip() else ""
+            jobs.append((config, split, output_file, filtered_file, difficulty_file))
+    return jobs
+
+
+def _run_all_massive(args: argparse.Namespace) -> None:
+    if args.dataset != "speech_massive":
+        raise ValueError("--all is supported only with --dataset speech_massive.")
+    if args.rescore_raw_file:
+        raise ValueError("--all cannot be combined with --rescore_raw_file.")
+    if args.merge_only:
+        raise ValueError("--all cannot be combined with --merge_only.")
+
+    script_path = os.path.abspath(__file__)
+    base_args = list(sys.argv[1:])
+    base_args = _strip_arg(base_args, "--all", has_value=False)
+    base_args = _strip_arg(base_args, "--massive_dataset_config", has_value=True)
+    base_args = _strip_arg(base_args, "--massive_split", has_value=True)
+    base_args = _strip_arg(base_args, "--output_file", has_value=True)
+    base_args = _strip_arg(base_args, "--filtered_file", has_value=True)
+    base_args = _strip_arg(base_args, "--difficulty_file", has_value=True)
+
+    jobs = _all_massive_jobs(args)
+    print(f"[ALL] Running {len(jobs)} Speech-MASSIVE jobs sequentially.", flush=True)
+    failures: List[Tuple[str, str, int]] = []
+
+    for idx, (config, split, output_file, filtered_file, difficulty_file) in enumerate(jobs, start=1):
+        cmd = [
+            sys.executable,
+            script_path,
+            *base_args,
+            "--massive_dataset_config",
+            config,
+            "--massive_split",
+            split,
+            "--output_file",
+            output_file,
+            "--filtered_file",
+            filtered_file,
+        ]
+        if difficulty_file:
+            cmd.extend(["--difficulty_file", difficulty_file])
+
+        print(
+            f"[ALL][{idx}/{len(jobs)}] config={config} split={split} "
+            f"-> raw={output_file} filtered={filtered_file}",
+            flush=True,
+        )
+        rc = subprocess.call(cmd, env=os.environ.copy())
+        if rc != 0:
+            failures.append((config, split, rc))
+            print(f"[ALL][WARN] failed: config={config} split={split} rc={rc}", flush=True)
+
+    if failures:
+        failure_text = ", ".join([f"{cfg}/{spl}(rc={rc})" for cfg, spl, rc in failures])
+        raise RuntimeError(f"--all finished with failures: {failure_text}")
 
 
 def _extract_asr_1best_text(record: Dict[str, Any]) -> str:
@@ -885,6 +980,14 @@ def main() -> None:
     parser.add_argument("--massive_dataset_name", type=str, default="FBK-MT/Speech-MASSIVE")
     parser.add_argument("--massive_dataset_config", type=str, default="it-IT")
     parser.add_argument("--massive_split", type=str, default="train_115")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Run Speech-MASSIVE for all supported language/split combinations "
+            "sequentially. Output filenames are auto-suffixed with config/split."
+        ),
+    )
     parser.add_argument("--massive_cache_dir", type=str, default=None)
     parser.add_argument("--massive_transcript_field", type=str, default="utt")
     parser.add_argument("--massive_outside_label", type=str, default="Other")
@@ -948,6 +1051,10 @@ def main() -> None:
 
     global _DEBUG
     _DEBUG = args.debug
+
+    if args.all:
+        _run_all_massive(args)
+        return
 
     if args.num_workers > 1:
         # Always shard outputs and auto-merge when using multiple workers.
