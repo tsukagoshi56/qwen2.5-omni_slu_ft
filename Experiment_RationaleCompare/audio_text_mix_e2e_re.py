@@ -2185,8 +2185,33 @@ class CustomTrainer(Trainer):
             sanitized["feature_attention_mask"] = sanitized["input_features_mask"]
         return sanitized
 
+    @staticmethod
+    def _drop_unsupported_feature_masks(model: Any, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            target = model
+            module = getattr(model, "module", None)
+            if module is not None:
+                target = module
+            forward = getattr(target, "forward", None)
+            if forward is None:
+                return inputs
+            sig = inspect.signature(forward)
+            params = sig.parameters
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                return inputs
+            supported = set(params.keys())
+        except Exception:
+            return inputs
+
+        filtered = dict(inputs)
+        for key in ("input_features_mask", "feature_attention_mask"):
+            if key in filtered and key not in supported:
+                filtered.pop(key, None)
+        return filtered
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         inputs = self._sanitize_model_inputs(inputs)
+        inputs = self._drop_unsupported_feature_masks(model, inputs)
         inputs = _cast_floating_tensors_to_model_dtype(inputs, model)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
