@@ -724,6 +724,48 @@ def _pad_tensor_list(tensors: List[torch.Tensor], padding_value: float = 0.0) ->
     return out
 
 
+def _infer_feature_attention_mask(input_features: torch.Tensor) -> torch.Tensor:
+    if not torch.is_tensor(input_features):
+        raise ValueError("input_features must be a tensor.")
+    feat = input_features
+    if feat.dim() == 1:
+        return torch.ones((1, int(feat.shape[0])), dtype=torch.long, device=feat.device)
+    if feat.dim() == 2:
+        # [B, T] or [F, T] (single sample): treat axis-1 as temporal.
+        if feat.shape[0] == 1:
+            return torch.ones((1, int(feat.shape[1])), dtype=torch.long, device=feat.device)
+        feat = feat.unsqueeze(0)
+
+    # Choose temporal axis as the largest non-batch dimension.
+    time_axis = max(range(1, feat.dim()), key=lambda axis: int(feat.shape[axis]))
+    reduce_dims = tuple(axis for axis in range(1, feat.dim()) if axis != time_axis)
+
+    energy = feat.abs()
+    if reduce_dims:
+        energy = energy.sum(dim=reduce_dims)
+
+    if energy.dim() == 1:
+        energy = energy.unsqueeze(0)
+    mask = (energy > 0).long()
+    if int(mask.sum().item()) == 0:
+        mask = torch.ones_like(mask, dtype=torch.long)
+    return mask
+
+
+def _normalize_feature_mask(mask: torch.Tensor) -> torch.Tensor:
+    if not torch.is_tensor(mask):
+        raise ValueError("mask must be a tensor.")
+    out = mask
+    while out.dim() > 1 and int(out.shape[0]) == 1:
+        out = out.squeeze(0)
+    if out.dim() == 1:
+        out = out.unsqueeze(0)
+    if out.dim() > 2:
+        reduce_dims = tuple(range(2, out.dim()))
+        out = (out != 0).any(dim=reduce_dims).long()
+    return out.long()
+
+
 def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
     if hasattr(processor, "decode"):
         try:
@@ -1989,7 +2031,7 @@ class SmartCollator:
                 if key == "input_ids" or not torch.is_tensor(value):
                     continue
                 tensor = value
-                if tensor.dim() > 0 and tensor.shape[0] == 1:
+                while tensor.dim() > 0 and int(tensor.shape[0]) == 1:
                     tensor = tensor.squeeze(0)
                 aux_tensors.setdefault(key, []).append(tensor)
 
@@ -2033,6 +2075,25 @@ class SmartCollator:
 
         if "attention_mask" not in batch_dict:
             batch_dict["attention_mask"] = (batch_dict["input_ids"] != tokenizer.pad_token_id).long()
+        if "input_features" in batch_dict:
+            inferred_mask = _infer_feature_attention_mask(batch_dict["input_features"])
+            existing_fmask = batch_dict.get("feature_attention_mask")
+            existing_imask = batch_dict.get("input_features_mask")
+            if torch.is_tensor(existing_fmask):
+                existing_fmask = _normalize_feature_mask(existing_fmask)
+            if torch.is_tensor(existing_imask):
+                existing_imask = _normalize_feature_mask(existing_imask)
+
+            chosen_mask = existing_fmask if torch.is_tensor(existing_fmask) else existing_imask
+            if (
+                not torch.is_tensor(chosen_mask)
+                or int(chosen_mask.shape[0]) != int(inferred_mask.shape[0])
+                or int(chosen_mask.shape[1]) != int(inferred_mask.shape[1])
+            ):
+                chosen_mask = inferred_mask
+
+            batch_dict["feature_attention_mask"] = chosen_mask
+            batch_dict["input_features_mask"] = chosen_mask
         if "feature_attention_mask" in batch_dict and "input_features_mask" not in batch_dict:
             batch_dict["input_features_mask"] = batch_dict["feature_attention_mask"]
         elif "input_features_mask" in batch_dict and "feature_attention_mask" not in batch_dict:
@@ -2114,22 +2175,58 @@ class CustomTrainer(Trainer):
         ):
             feat = sanitized["input_features"]
             if torch.is_tensor(feat):
-                if feat.dim() >= 2:
-                    bsz = int(feat.shape[0])
-                    tlen = int(feat.shape[1])
-                else:
-                    bsz = 1
-                    tlen = int(feat.shape[0])
-                sanitized["feature_attention_mask"] = torch.ones(
-                    (bsz, tlen),
-                    dtype=torch.long,
-                    device=feat.device,
-                )
-                sanitized["input_features_mask"] = sanitized["feature_attention_mask"]
+                inferred_mask = _infer_feature_attention_mask(feat)
+                sanitized["feature_attention_mask"] = inferred_mask
+                sanitized["input_features_mask"] = inferred_mask
         elif "feature_attention_mask" in sanitized and "input_features_mask" not in sanitized:
-            sanitized["input_features_mask"] = sanitized["feature_attention_mask"]
+            fmask = sanitized["feature_attention_mask"]
+            if torch.is_tensor(fmask):
+                fmask = _normalize_feature_mask(fmask)
+            sanitized["feature_attention_mask"] = fmask
+            sanitized["input_features_mask"] = fmask
         elif "input_features_mask" in sanitized and "feature_attention_mask" not in sanitized:
-            sanitized["feature_attention_mask"] = sanitized["input_features_mask"]
+            imask = sanitized["input_features_mask"]
+            if torch.is_tensor(imask):
+                imask = _normalize_feature_mask(imask)
+            sanitized["input_features_mask"] = imask
+            sanitized["feature_attention_mask"] = imask
+        elif "feature_attention_mask" in sanitized and "input_features_mask" in sanitized:
+            fmask = sanitized["feature_attention_mask"]
+            imask = sanitized["input_features_mask"]
+            if torch.is_tensor(fmask):
+                fmask = _normalize_feature_mask(fmask)
+            if torch.is_tensor(imask):
+                imask = _normalize_feature_mask(imask)
+            sanitized["feature_attention_mask"] = fmask
+            sanitized["input_features_mask"] = imask
+
+        if "input_features" in sanitized and torch.is_tensor(sanitized["input_features"]):
+            feat = sanitized["input_features"]
+            inferred_mask = _infer_feature_attention_mask(feat)
+            fmask = sanitized.get("feature_attention_mask")
+            imask = sanitized.get("input_features_mask")
+            if torch.is_tensor(fmask):
+                fmask = _normalize_feature_mask(fmask)
+            if torch.is_tensor(imask):
+                imask = _normalize_feature_mask(imask)
+            chosen_mask = fmask if torch.is_tensor(fmask) else imask
+            if (
+                not torch.is_tensor(chosen_mask)
+                or int(chosen_mask.shape[0]) != int(inferred_mask.shape[0])
+                or int(chosen_mask.shape[1]) != int(inferred_mask.shape[1])
+            ):
+                warn_count = getattr(CustomTrainer._sanitize_model_inputs, "_feature_mask_warn_count", 0)
+                if warn_count < 20:
+                    logger.warning(
+                        "Adjusted feature mask shape from %s to %s to match input_features=%s",
+                        tuple(chosen_mask.shape) if torch.is_tensor(chosen_mask) else None,
+                        tuple(inferred_mask.shape),
+                        tuple(feat.shape),
+                    )
+                    setattr(CustomTrainer._sanitize_model_inputs, "_feature_mask_warn_count", warn_count + 1)
+                chosen_mask = inferred_mask
+            sanitized["feature_attention_mask"] = chosen_mask
+            sanitized["input_features_mask"] = chosen_mask
         return sanitized
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
