@@ -889,6 +889,79 @@ def candidate_to_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _strip_prefix_case_insensitive(text: str, prefixes: List[str]) -> str:
+    value = str(text or "").strip()
+    lower = value.lower()
+    for prefix in prefixes:
+        p = prefix.lower()
+        if lower.startswith(p):
+            return value[len(prefix):].strip()
+    return value
+
+
+def _clean_intent_candidate(value: str) -> str:
+    text = str(value or "").strip().strip("`'\" ")
+    if not text:
+        return ""
+    text = re.sub(
+        r"^\s*(?:intent\s*candidates?|intentcandidates?|intent\s*candidate|intentcandidate|intents?)\s*[:：\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.replace(":", "_")
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(
+        r"^(?:intent_?candidates?|intent_?candidate|intents?)_+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"_+", "_", text).strip("_ ")
+    if text.lower() in {"intent", "intents", "intentcandidate", "intentcandidates"}:
+        return ""
+    return text
+
+
+def _sanitize_c_line(c_line: str) -> str:
+    if not str(c_line or "").startswith("C:"):
+        return str(c_line or "")
+    body = c_line.split(":", 1)[1].strip() if ":" in c_line else ""
+    if not body:
+        return "C: (none)"
+
+    parts = [p.strip() for p in body.split(";", 1)]
+    intent_part = parts[0] if parts else ""
+    slot_part = parts[1] if len(parts) > 1 else ""
+
+    intent_part = _strip_prefix_case_insensitive(
+        intent_part,
+        ["Intent candidates:", "Intent candidate:", "Intent:", "Intents:"],
+    )
+    slot_part = _strip_prefix_case_insensitive(
+        slot_part,
+        ["Slot candidates:", "Slot candidate:", "Slot:", "Slots:"],
+    )
+
+    intents_raw = [x.strip() for x in intent_part.split("|") if x.strip()]
+    intents_cleaned: List[str] = []
+    seen = set()
+    for cand in intents_raw:
+        cleaned = _clean_intent_candidate(cand)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        intents_cleaned.append(cleaned)
+
+    intent_part_new = " | ".join(intents_cleaned) if intents_cleaned else "(none)"
+    if slot_part:
+        return f"C: Intent candidates: {intent_part_new}; Slot candidates: {slot_part}"
+    return f"C: Intent candidates: {intent_part_new}"
+
+
 def normalize_task_mode(task_mode: Any) -> str:
     mode = str(task_mode or "cot").strip().lower()
     if mode in ("candidates", "cand"):
@@ -964,6 +1037,7 @@ def build_training_target(rationale_text: str, final_json: str) -> str:
         return f"J: {final_json}"
 
     lines = [line.strip() for line in rationale.splitlines() if line.strip()]
+    lines = [_sanitize_c_line(line) if line.startswith("C:") else line for line in lines]
     has_c = any(line.startswith("C:") for line in lines)
     has_r = any(line.startswith("R:") for line in lines)
     has_j = any(line.startswith("J:") for line in lines)
@@ -979,12 +1053,21 @@ def build_label_only_target(final_json: str) -> str:
     return f"J: {final_json}"
 
 
-def build_candidates_only_target(rationale_text: str, final_json: str) -> str:
+def build_candidates_only_target(
+    rationale_text: str,
+    final_json: str,
+    fallback_text: str = "",
+) -> str:
     c_line = ""
-    for line in (rationale_text or "").splitlines():
-        s = line.strip()
-        if s.startswith("C:"):
-            c_line = s
+    for source_text in (rationale_text or "", fallback_text or ""):
+        if not source_text:
+            continue
+        for line in source_text.splitlines():
+            s = line.strip()
+            if s.startswith("C:"):
+                c_line = _sanitize_c_line(s)
+                break
+        if c_line:
             break
     if not c_line:
         c_line = "C: (none)"
@@ -1484,9 +1567,13 @@ def load_rationale_records(path: str) -> List[Dict[str, Any]]:
 def expand_multitask_items(base_item: Dict[str, Any], cot_task_mode: str = "cot") -> List[Dict[str, Any]]:
     target_obj = base_item.get("target_obj", {})
     final_json = json.dumps(target_obj, ensure_ascii=False)
-    cot_mode = str(cot_task_mode or "cot").strip().lower()
+    cot_mode = "candidates" if normalize_task_mode(cot_task_mode) == "candidates" else "cot"
     if cot_mode == "candidates":
-        cot_target = build_candidates_only_target(base_item.get("rationale_text", ""), final_json)
+        cot_target = build_candidates_only_target(
+            base_item.get("rationale_text", ""),
+            final_json,
+            fallback_text=base_item.get("target", ""),
+        )
     else:
         cot_target = base_item.get("target", build_label_only_target(final_json))
     cot_item = {
@@ -1505,7 +1592,7 @@ def expand_multitask_items(base_item: Dict[str, Any], cot_task_mode: str = "cot"
 
 
 def build_task_item(base_item: Dict[str, Any], task_mode: str) -> Dict[str, Any]:
-    mode = str(task_mode or "").strip().lower()
+    mode = normalize_task_mode(task_mode)
     target_obj = base_item.get("target_obj", {})
     final_json = json.dumps(target_obj, ensure_ascii=False)
     if mode == "label":
@@ -1520,7 +1607,11 @@ def build_task_item(base_item: Dict[str, Any], task_mode: str) -> Dict[str, Any]
             **base_item,
             "task_mode": "candidates",
             "task_id": 0,
-            "target": build_candidates_only_target(base_item.get("rationale_text", ""), final_json),
+            "target": build_candidates_only_target(
+                base_item.get("rationale_text", ""),
+                final_json,
+                fallback_text=base_item.get("target", ""),
+            ),
         }
     return {
         **base_item,
@@ -3740,8 +3831,8 @@ def main():
         logger.info("Test task modes: %s", ", ".join(test_modes))
 
     for mode in test_modes:
-        mode_task_id = task_id_from_mode(mode)
-        mode_items = [{**item, "task_mode": mode, "task_id": mode_task_id} for item in test_items]
+        normalized_mode = normalize_task_mode(mode)
+        mode_items = [build_task_item(item, normalized_mode) for item in test_items]
         if raw_output_file:
             base, ext = os.path.splitext(raw_output_file)
             if not ext:
