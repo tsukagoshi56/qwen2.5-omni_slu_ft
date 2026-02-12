@@ -28,6 +28,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
+    AutoTokenizer,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -66,6 +67,19 @@ PROJECTOR_MODULE_NAME_HINTS = (
     "audio_projector",
     "mm_projector",
 )
+_PROCESSOR_TOKENIZER_REGISTRY: Dict[int, Any] = {}
+
+
+class ProcessorWithTokenizerProxy:
+    def __init__(self, base_processor: Any, tokenizer: Any):
+        self._base_processor = base_processor
+        self.tokenizer = tokenizer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base_processor, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._base_processor(*args, **kwargs)
 
 
 def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
@@ -108,8 +122,19 @@ def load_audio_model_from_pretrained(
 
 
 def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) -> int:
-    feature_extractor = getattr(processor, "feature_extractor", None)
-    sampling_rate = getattr(feature_extractor, "sampling_rate", None) if feature_extractor is not None else None
+    sampling_rate = None
+    candidates = [
+        getattr(processor, "feature_extractor", None),
+        getattr(processor, "audio_processor", None),
+        processor,
+    ]
+    for obj in candidates:
+        if obj is None:
+            continue
+        sr = getattr(obj, "sampling_rate", None)
+        if sr is not None:
+            sampling_rate = sr
+            break
     if sampling_rate is None:
         raise ValueError(
             f"Model '{model_name_or_path}' is not audio-ready in this script. "
@@ -121,6 +146,135 @@ def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) ->
         raise ValueError(
             f"Invalid audio sampling rate '{sampling_rate}' for model '{model_name_or_path}'."
         ) from exc
+
+
+def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Tuple[Any, Any]:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name_or_path,
+                trust_remote_code=True,
+                use_fast=False,
+            )
+            logger.warning(
+                "Processor %s has no tokenizer; loaded AutoTokenizer(%s).",
+                type(processor).__name__,
+                model_name_or_path,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Processor '{type(processor).__name__}' has no tokenizer and AutoTokenizer loading failed "
+                f"for '{model_name_or_path}': {exc}"
+            ) from exc
+
+    if getattr(tokenizer, "pad_token", None) is None:
+        eos_token = getattr(tokenizer, "eos_token", None)
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token is not None:
+            tokenizer.pad_token = eos_token
+        if eos_token_id is not None:
+            tokenizer.pad_token_id = eos_token_id
+        if getattr(tokenizer, "pad_token", None) is None:
+            raise ValueError(
+                f"Tokenizer for '{model_name_or_path}' has neither pad_token nor eos_token. "
+                "Set tokenizer special tokens before training."
+            )
+
+    _PROCESSOR_TOKENIZER_REGISTRY[id(processor)] = tokenizer
+    try:
+        if getattr(processor, "tokenizer", None) is None:
+            setattr(processor, "tokenizer", tokenizer)
+    except Exception:
+        processor = ProcessorWithTokenizerProxy(processor, tokenizer)
+    _PROCESSOR_TOKENIZER_REGISTRY[id(processor)] = tokenizer
+    return processor, tokenizer
+
+
+def get_tokenizer_or_raise(processor: Any) -> Any:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        return tokenizer
+    tokenizer = _PROCESSOR_TOKENIZER_REGISTRY.get(id(processor))
+    if tokenizer is not None:
+        return tokenizer
+    base = getattr(processor, "_base_processor", None)
+    if base is not None:
+        tokenizer = _PROCESSOR_TOKENIZER_REGISTRY.get(id(base))
+        if tokenizer is not None:
+            return tokenizer
+    raise AttributeError(
+        f"No tokenizer is registered for processor type {type(processor).__name__}. "
+        "Call ensure_processor_tokenizer_or_raise() before use."
+    )
+
+
+def attach_tokenizer_to_model_for_compat(model: Any, tokenizer: Any) -> None:
+    # Some multimodal generation paths expect `model.tokenizer` to exist.
+    try:
+        if getattr(model, "tokenizer", None) is None:
+            setattr(model, "tokenizer", tokenizer)
+    except Exception:
+        pass
+
+
+def _chat_template_owner_or_raise(processor: Any) -> Any:
+    if hasattr(processor, "apply_chat_template"):
+        return processor
+    tokenizer = get_tokenizer_or_raise(processor)
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer
+    raise RuntimeError(
+        f"Neither processor ({type(processor).__name__}) nor tokenizer has apply_chat_template."
+    )
+
+
+def render_chat_template_as_text_or_raise(
+    processor: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    add_generation_prompt: bool = True,
+) -> str:
+    owner = _chat_template_owner_or_raise(processor)
+    attempts = [
+        {"tokenize": False, "add_generation_prompt": add_generation_prompt},
+        {"tokenize": False},
+        {"add_generation_prompt": add_generation_prompt},
+    ]
+    errors: List[str] = []
+    for kwargs in attempts:
+        try:
+            out = owner.apply_chat_template(messages, **kwargs)
+            if isinstance(out, str):
+                return out
+        except Exception as exc:
+            errors.append(f"{kwargs}: {exc}")
+    detail = " | ".join(errors) if errors else "no chat-template variant accepted"
+    raise RuntimeError(f"Failed to render chat template as text. Details: {detail}")
+
+
+def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
+    if hasattr(processor, "decode"):
+        try:
+            return processor.decode(token_ids, skip_special_tokens=True)
+        except Exception:
+            pass
+    tokenizer = get_tokenizer_or_raise(processor)
+    if hasattr(tokenizer, "decode"):
+        return tokenizer.decode(token_ids, skip_special_tokens=True)
+    raise RuntimeError("Neither processor.decode nor tokenizer.decode is available.")
+
+
+def batch_decode_token_ids(processor: Any, token_ids: torch.Tensor) -> List[str]:
+    if hasattr(processor, "batch_decode"):
+        try:
+            return processor.batch_decode(token_ids, skip_special_tokens=True)
+        except Exception:
+            pass
+    tokenizer = get_tokenizer_or_raise(processor)
+    if hasattr(tokenizer, "batch_decode"):
+        return tokenizer.batch_decode(token_ids, skip_special_tokens=True)
+    return [decode_token_ids(processor, ids) for ids in token_ids]
 
 
 def configure_audio_trainability(
@@ -1226,18 +1380,18 @@ class SmartCollator:
             {"type": "audio", "audio_url": "placeholder"},
             {"type": "text", "text": prompt_text},
         ]
-        return self.processor.apply_chat_template(
+        return render_chat_template_as_text_or_raise(
+            self.processor,
             [{"role": "user", "content": user_content}],
-            tokenize=False,
             add_generation_prompt=True,
         )
 
     def _build_text_chat(self, item: Dict[str, Any]) -> str:
         prompt_text = build_prompt_text(item, include_transcript=True)
         user_content = [{"type": "text", "text": prompt_text}]
-        return self.processor.apply_chat_template(
+        return render_chat_template_as_text_or_raise(
+            self.processor,
             [{"role": "user", "content": user_content}],
-            tokenize=False,
             add_generation_prompt=True,
         )
 
@@ -1245,8 +1399,9 @@ class SmartCollator:
         input_ids_list, labels_list = [], []
         input_features_list, feature_mask_list = [], []
 
-        sr = self.processor.feature_extractor.sampling_rate
-        eos_token = self.processor.tokenizer.eos_token or "<|endoftext|>"
+        tokenizer = get_tokenizer_or_raise(self.processor)
+        sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
+        eos_token = tokenizer.eos_token or "<|endoftext|>"
 
         for item in batch:
             if item.get("audio_path") is None:
@@ -1301,7 +1456,7 @@ class SmartCollator:
             "input_ids": pad_sequence(
                 input_ids_list,
                 batch_first=True,
-                padding_value=self.processor.tokenizer.pad_token_id,
+                padding_value=tokenizer.pad_token_id,
             ),
             "labels": pad_sequence(
                 labels_list,
@@ -1327,8 +1482,9 @@ class SmartCollator:
 
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         input_ids_list, labels_list = [], []
+        tokenizer = get_tokenizer_or_raise(self.processor)
 
-        eos_token = self.processor.tokenizer.eos_token or "<|endoftext|>"
+        eos_token = tokenizer.eos_token or "<|endoftext|>"
         for item in batch:
             if item.get("audio_path") is not None:
                 continue
@@ -1341,8 +1497,8 @@ class SmartCollator:
                 print(f"[DEBUG Visualizer] Target:\n{item['target']}")
                 self._print_count += 1
 
-            inputs = self.processor.tokenizer(full_text, return_tensors="pt")
-            prompt_inputs = self.processor.tokenizer(text_input, return_tensors="pt")
+            inputs = tokenizer(full_text, return_tensors="pt")
+            prompt_inputs = tokenizer(text_input, return_tensors="pt")
             prompt_len = prompt_inputs["input_ids"].shape[1]
 
             ids = inputs["input_ids"][0]
@@ -1355,7 +1511,7 @@ class SmartCollator:
             "input_ids": pad_sequence(
                 input_ids_list,
                 batch_first=True,
-                padding_value=self.processor.tokenizer.pad_token_id,
+                padding_value=tokenizer.pad_token_id,
             ),
             "labels": pad_sequence(
                 labels_list,
@@ -1424,7 +1580,7 @@ class SampleGenerationCallback(TrainerCallback):
         samples = random.sample(audio_items, min(self.num_samples, len(audio_items)))
         device = self.model.device
         self.model.eval()
-        sr = self.processor.feature_extractor.sampling_rate
+        sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
 
         for item in samples:
             try:
@@ -1434,9 +1590,9 @@ class SampleGenerationCallback(TrainerCallback):
                     {"type": "audio", "audio_url": "placeholder"},
                     {"type": "text", "text": prompt_text},
                 ]
-                text_input = self.processor.apply_chat_template(
+                text_input = render_chat_template_as_text_or_raise(
+                    self.processor,
                     [{"role": "user", "content": user_content}],
-                    tokenize=False,
                     add_generation_prompt=True,
                 )
 
@@ -1452,7 +1608,7 @@ class SampleGenerationCallback(TrainerCallback):
                     output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
 
                 input_len = inputs["input_ids"].shape[1]
-                generated_text = self.processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                generated_text = decode_token_ids(self.processor, output_ids[0][input_len:])
                 clean_pred = clean_json_text(generated_text)
 
                 logger.info("-" * 60)
@@ -1697,8 +1853,9 @@ class InferenceCollator:
     processor: Any
 
     def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
-        self.processor.tokenizer.padding_side = "left"
-        sr = self.processor.feature_extractor.sampling_rate
+        tokenizer = get_tokenizer_or_raise(self.processor)
+        tokenizer.padding_side = "left"
+        sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
 
         texts = []
         audios = []
@@ -1721,9 +1878,9 @@ class InferenceCollator:
                 prompt_text = build_prompt_text(item, include_transcript=True)
                 user_content = [{"type": "text", "text": prompt_text}]
 
-            text_input = self.processor.apply_chat_template(
+            text_input = render_chat_template_as_text_or_raise(
+                self.processor,
                 [{"role": "user", "content": user_content}],
-                tokenize=False,
                 add_generation_prompt=True,
             )
             texts.append(text_input)
@@ -1754,6 +1911,7 @@ def _generate_batch(
 
     net_inputs = batch_data["net_inputs"]
     items = batch_data["items"]
+    tokenizer = get_tokenizer_or_raise(processor)
 
     net_inputs = {k: v.to(device) for k, v in net_inputs.items()}
 
@@ -1762,12 +1920,12 @@ def _generate_batch(
             **net_inputs,
             max_new_tokens=max_new_tokens,
             use_cache=True,
-            pad_token_id=processor.tokenizer.pad_token_id,
+            pad_token_id=tokenizer.pad_token_id,
         )
 
     input_len = net_inputs["input_ids"].shape[1]
     generated_ids = output_ids[:, input_len:]
-    raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
+    raw_outputs = batch_decode_token_ids(processor, generated_ids)
 
     results: List[Dict[str, Any]] = []
     for item, raw_output in zip(items, raw_outputs):
@@ -1816,7 +1974,8 @@ def run_distributed_inference(
     my_text_items = [x for x in my_items if x.get("audio_path") is None]
 
     local_results: List[Dict[str, Any]] = []
-    processor.tokenizer.padding_side = "left"
+    tokenizer = get_tokenizer_or_raise(processor)
+    tokenizer.padding_side = "left"
 
     if rank == 0:
         logger.info("Starting Inference. Items: %d (Audio: %d, Text: %d), Batch size: %d",
@@ -2385,9 +2544,7 @@ def main():
         raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    processor, tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
     _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
     model = load_audio_model_from_pretrained(
@@ -2395,6 +2552,7 @@ def main():
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
+    attach_tokenizer_to_model_for_compat(model, tokenizer)
 
     # Keep audio modules trainable by default and keep projector trainable, as in prior behavior.
     audio_matches, projector_matches = configure_audio_trainability(
@@ -2441,7 +2599,7 @@ def main():
         train_dataset=MixedDataset(train_items),
         eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
         data_collator=SmartCollator(processor, debug=args.smoke),
-        tokenizer=processor.tokenizer,
+        tokenizer=tokenizer,
     )
 
     trainer.train()
