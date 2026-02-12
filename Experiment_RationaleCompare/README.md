@@ -126,7 +126,8 @@ By default, **text‑mode filtered samples omit `recordings`** to force text‑o
 ### Speech‑MASSIVE: run all configs/splits in one command
 
 `--all` を付けると、Speech‑MASSIVE の全対応 config/split を順番に実行します。  
-出力ファイル名には自動で `speech_massive.<config>.<split>` が付与されます。
+出力ファイル名には自動で `speech_massive.<config>.<split>` が付与されます。  
+ローカルキャッシュに存在しない config/split は自動で **SKIP** されます。
 
 ```bash
 python Experiment_RationaleCompare/02_generate_success_cot.py \

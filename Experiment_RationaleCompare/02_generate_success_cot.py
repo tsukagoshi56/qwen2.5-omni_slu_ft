@@ -198,6 +198,54 @@ def _append_suffix_to_path(path: str, suffix: str) -> str:
     return f"{root}.{safe_suffix}{ext}"
 
 
+def _error_text(exc: Exception, limit: int = 220) -> str:
+    text = " ".join(str(exc).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _looks_like_missing_cache(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    markers = [
+        "local_files_only=true",
+        "local files only",
+        "not found in local dataset",
+        "couldn't find",
+        "could not find",
+        "no such file",
+        "doesn't exist",
+        "does not exist",
+        "not found",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _is_massive_job_cached(
+    dataset_name: str,
+    dataset_config: str,
+    split: str,
+    cache_dir: Optional[str],
+) -> Tuple[bool, str]:
+    if load_speech_massive_split is None:
+        raise RuntimeError(
+            "Speech-MASSIVE support requires train_qwen2_audio_slurp.py "
+            "(load_speech_massive_split)."
+        )
+    try:
+        _ = load_speech_massive_split(
+            dataset_name=dataset_name,
+            dataset_config=dataset_config,
+            split=split,
+            cache_dir=cache_dir,
+        )
+        return True, ""
+    except Exception as exc:
+        if _looks_like_missing_cache(exc):
+            return False, _error_text(exc)
+        raise
+
+
 def _all_massive_jobs(args: argparse.Namespace) -> List[Tuple[str, str, str, str, str]]:
     jobs: List[Tuple[str, str, str, str, str]] = []
     for config in ALL_SPEECH_MASSIVE_CONFIGS:
@@ -234,8 +282,25 @@ def _run_all_massive(args: argparse.Namespace) -> None:
     jobs = _all_massive_jobs(args)
     print(f"[ALL] Running {len(jobs)} Speech-MASSIVE jobs sequentially.", flush=True)
     failures: List[Tuple[str, str, int]] = []
+    skipped: List[Tuple[str, str, str]] = []
+    executed = 0
 
     for idx, (config, split, output_file, filtered_file, difficulty_file) in enumerate(jobs, start=1):
+        is_cached, reason = _is_massive_job_cached(
+            dataset_name=args.massive_dataset_name,
+            dataset_config=config,
+            split=split,
+            cache_dir=args.massive_cache_dir,
+        )
+        if not is_cached:
+            skipped.append((config, split, reason))
+            print(
+                f"[ALL][{idx}/{len(jobs)}][SKIP] config={config} split={split} "
+                f"(not in local cache: {reason})",
+                flush=True,
+            )
+            continue
+
         cmd = [
             sys.executable,
             script_path,
@@ -257,11 +322,16 @@ def _run_all_massive(args: argparse.Namespace) -> None:
             f"-> raw={output_file} filtered={filtered_file}",
             flush=True,
         )
+        executed += 1
         rc = subprocess.call(cmd, env=os.environ.copy())
         if rc != 0:
             failures.append((config, split, rc))
             print(f"[ALL][WARN] failed: config={config} split={split} rc={rc}", flush=True)
 
+    print(
+        f"[ALL] summary: total={len(jobs)} executed={executed} skipped={len(skipped)} failed={len(failures)}",
+        flush=True,
+    )
     if failures:
         failure_text = ", ".join([f"{cfg}/{spl}(rc={rc})" for cfg, spl, rc in failures])
         raise RuntimeError(f"--all finished with failures: {failure_text}")
