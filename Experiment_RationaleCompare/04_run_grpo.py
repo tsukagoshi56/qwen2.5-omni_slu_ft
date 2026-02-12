@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import gc
+import inspect
 import json
 import math
 import os
@@ -14,15 +15,20 @@ from typing import Any, Dict, List, Optional, Tuple
 import librosa
 import torch
 import torch.distributed as dist
+import transformers as hf_transformers
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
-from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 try:
     from transformers import Qwen2AudioForConditionalGeneration
 except Exception:  # pragma: no cover
     Qwen2AudioForConditionalGeneration = None
+try:
+    from transformers import AudioFlamingo3ForConditionalGeneration
+except Exception:  # pragma: no cover
+    AudioFlamingo3ForConditionalGeneration = None
 try:
     from peft import LoraConfig, TaskType, get_peft_model
     HAS_PEFT = True
@@ -85,18 +91,329 @@ def collate_grpo_items(batch: List[GrpoItem]) -> List[GrpoItem]:
     return batch
 
 
+_PROCESSOR_TOKENIZER_REGISTRY: Dict[int, Any] = {}
+
+
+class ProcessorWithTokenizerProxy:
+    def __init__(self, base_processor: Any, tokenizer: Any):
+        self._base_processor = base_processor
+        self.tokenizer = tokenizer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base_processor, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._base_processor(*args, **kwargs)
+
+
+def _is_tokenizer_like(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return False
+    has_decode = hasattr(value, "decode") or hasattr(value, "batch_decode")
+    has_tokenizer_api = callable(value) or has_decode
+    return bool(has_tokenizer_api and has_decode)
+
+
+def _coerce_tokenizer_candidate(value: Any) -> Optional[Any]:
+    if _is_tokenizer_like(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            candidate = _coerce_tokenizer_candidate(item)
+            if candidate is not None:
+                return candidate
+    if isinstance(value, dict):
+        for key in (
+            "tokenizer",
+            "tokenizers",
+            "text_tokenizer",
+            "text_tokenizers",
+            "lm_tokenizer",
+            "language_tokenizer",
+            "decoder_tokenizer",
+        ):
+            if key in value:
+                candidate = _coerce_tokenizer_candidate(value.get(key))
+                if candidate is not None:
+                    return candidate
+        for item in value.values():
+            candidate = _coerce_tokenizer_candidate(item)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _extract_tokenizer_from_processor(processor: Any) -> Optional[Any]:
+    for attr in (
+        "tokenizer",
+        "tokenizers",
+        "text_tokenizer",
+        "text_tokenizers",
+        "lm_tokenizer",
+        "language_tokenizer",
+        "_tokenizer",
+    ):
+        try:
+            candidate = _coerce_tokenizer_candidate(getattr(processor, attr, None))
+        except Exception:
+            candidate = None
+        if candidate is not None:
+            return candidate
+
+    try:
+        mapping = vars(processor)
+    except Exception:
+        mapping = {}
+    for key, value in mapping.items():
+        if "tokenizer" not in str(key).lower():
+            continue
+        candidate = _coerce_tokenizer_candidate(value)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _load_tokenizer_with_fallbacks(model_name_or_path: str) -> Tuple[Any, str]:
+    attempts = (
+        ("use_fast=False", {"trust_remote_code": True, "use_fast": False}),
+        ("use_fast=True", {"trust_remote_code": True, "use_fast": True}),
+        ("default", {"trust_remote_code": True}),
+    )
+    errors: List[str] = []
+    for label, kwargs in attempts:
+        try:
+            return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs), label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    detail = " | ".join(errors) if errors else "unknown"
+    raise RuntimeError(
+        f"AutoTokenizer loading failed for '{model_name_or_path}' across fallbacks. Details: {detail}"
+    )
+
+
+def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Tuple[Any, Any]:
+    tokenizer = _extract_tokenizer_from_processor(processor)
+    if tokenizer is None:
+        tokenizer, _ = _load_tokenizer_with_fallbacks(model_name_or_path)
+
+    if getattr(tokenizer, "pad_token", None) is None:
+        eos_token = getattr(tokenizer, "eos_token", None)
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token is not None:
+            tokenizer.pad_token = eos_token
+        if eos_token_id is not None:
+            tokenizer.pad_token_id = eos_token_id
+        if getattr(tokenizer, "pad_token", None) is None:
+            raise ValueError(
+                f"Tokenizer for '{model_name_or_path}' has neither pad_token nor eos_token."
+            )
+
+    _PROCESSOR_TOKENIZER_REGISTRY[id(processor)] = tokenizer
+    try:
+        if getattr(processor, "tokenizer", None) is None:
+            setattr(processor, "tokenizer", tokenizer)
+    except Exception:
+        processor = ProcessorWithTokenizerProxy(processor, tokenizer)
+    _PROCESSOR_TOKENIZER_REGISTRY[id(processor)] = tokenizer
+    return processor, tokenizer
+
+
+def get_tokenizer_or_raise(processor: Any) -> Any:
+    tokenizer = _extract_tokenizer_from_processor(processor)
+    if tokenizer is not None:
+        return tokenizer
+    tokenizer = _coerce_tokenizer_candidate(_PROCESSOR_TOKENIZER_REGISTRY.get(id(processor)))
+    if tokenizer is not None:
+        return tokenizer
+    base = getattr(processor, "_base_processor", None)
+    if base is not None:
+        tokenizer = _coerce_tokenizer_candidate(_PROCESSOR_TOKENIZER_REGISTRY.get(id(base)))
+        if tokenizer is not None:
+            return tokenizer
+    raise AttributeError(f"No tokenizer found for processor type {type(processor).__name__}.")
+
+
+def attach_tokenizer_to_model_for_compat(model: Any, tokenizer: Any) -> None:
+    try:
+        if getattr(model, "tokenizer", None) is None:
+            setattr(model, "tokenizer", tokenizer)
+    except Exception:
+        pass
+
+
+def _chat_template_owner_or_raise(processor: Any) -> Any:
+    if hasattr(processor, "apply_chat_template"):
+        return processor
+    tokenizer = get_tokenizer_or_raise(processor)
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer
+    raise RuntimeError(
+        f"Neither processor ({type(processor).__name__}) nor tokenizer has apply_chat_template."
+    )
+
+
+def render_chat_template_as_text_or_raise(
+    processor: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    add_generation_prompt: bool = True,
+) -> str:
+    owner = _chat_template_owner_or_raise(processor)
+    attempts = [
+        {"tokenize": False, "add_generation_prompt": add_generation_prompt},
+        {"tokenize": False},
+        {"add_generation_prompt": add_generation_prompt},
+    ]
+    for kwargs in attempts:
+        try:
+            out = owner.apply_chat_template(messages, **kwargs)
+            if isinstance(out, str):
+                return out
+        except Exception:
+            continue
+    raise RuntimeError("Failed to render chat template as text.")
+
+
+def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
+    if hasattr(processor, "decode"):
+        try:
+            return processor.decode(token_ids, skip_special_tokens=True)
+        except Exception:
+            pass
+    tokenizer = get_tokenizer_or_raise(processor)
+    if hasattr(tokenizer, "decode"):
+        return tokenizer.decode(token_ids, skip_special_tokens=True)
+    raise RuntimeError("Neither processor.decode nor tokenizer.decode is available.")
+
+
+def batch_decode_token_ids(processor: Any, token_ids: torch.Tensor) -> List[str]:
+    if hasattr(processor, "batch_decode"):
+        try:
+            return processor.batch_decode(token_ids, skip_special_tokens=True)
+        except Exception:
+            pass
+    tokenizer = get_tokenizer_or_raise(processor)
+    if hasattr(tokenizer, "batch_decode"):
+        return tokenizer.batch_decode(token_ids, skip_special_tokens=True)
+    return [decode_token_ids(processor, ids) for ids in token_ids]
+
+
+def _infer_model_family(model_name_or_path: str) -> str:
+    name_lc = str(model_name_or_path or "").lower()
+    if "music-flamingo" in name_lc:
+        return "music-flamingo"
+    if "audio-flamingo-3" in name_lc or "flamingo" in name_lc:
+        return "flamingo"
+    if "voxtral" in name_lc:
+        return "voxtral"
+    if "qwen" in name_lc:
+        return "qwen"
+    return "other"
+
+
 def load_audio_model_from_pretrained(
     model_name_or_path: str,
     *,
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
-    attempts: List[Tuple[str, Any]] = [
-        ("AutoModelForCausalLM", AutoModelForCausalLM),
-        ("AutoModel", AutoModel),
-    ]
-    if Qwen2AudioForConditionalGeneration is not None:
-        attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
+    def _optional_transformers_class(*names: str) -> Optional[Any]:
+        for name in names:
+            cls = getattr(hf_transformers, name, None)
+            if cls is not None:
+                return cls
+        return None
+
+    def _append_attempt(
+        attempts_list: List[Tuple[str, Any]],
+        loader_name: str,
+        loader_cls: Any,
+        seen_loader_ids: set,
+    ) -> None:
+        if loader_cls is None:
+            return
+        key = id(loader_cls)
+        if key in seen_loader_ids:
+            return
+        seen_loader_ids.add(key)
+        attempts_list.append((loader_name, loader_cls))
+
+    family = _infer_model_family(model_name_or_path)
+    model_name_lc = str(model_name_or_path or "").lower()
+
+    if family == "qwen":
+        qwen_errors: List[str] = []
+        if "qwen2.5-omni" in model_name_lc:
+            qwen_omni_cls = _optional_transformers_class(
+                "Qwen2_5OmniForConditionalGeneration",
+                "Qwen2_5OmniForCausalLM",
+                "Qwen2OmniForConditionalGeneration",
+                "Qwen2OmniForCausalLM",
+            )
+            if qwen_omni_cls is not None:
+                try:
+                    return qwen_omni_cls.from_pretrained(
+                        model_name_or_path,
+                        torch_dtype=torch_dtype,
+                        trust_remote_code=trust_remote_code,
+                    )
+                except Exception as exc:
+                    qwen_errors.append(f"{qwen_omni_cls.__name__}: {exc}")
+
+        if Qwen2AudioForConditionalGeneration is not None:
+            try:
+                return Qwen2AudioForConditionalGeneration.from_pretrained(
+                    model_name_or_path,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=trust_remote_code,
+                )
+            except Exception as exc:
+                qwen_errors.append(f"Qwen2AudioForConditionalGeneration: {exc}")
+        else:
+            qwen_errors.append("Qwen2AudioForConditionalGeneration unavailable in current transformers.")
+
+        detail = " | ".join(qwen_errors) if qwen_errors else "no qwen loader available"
+        raise RuntimeError(
+            f"Failed to load Qwen model '{model_name_or_path}' with Qwen loaders only. Details: {detail}"
+        )
+
+    attempts: List[Tuple[str, Any]] = []
+    seen_loader_ids = set()
+
+    if family == "flamingo":
+        _append_attempt(
+            attempts,
+            "AudioFlamingo3ForConditionalGeneration",
+            AudioFlamingo3ForConditionalGeneration,
+            seen_loader_ids,
+        )
+        music_flamingo_cls = _optional_transformers_class(
+            "MusicFlamingoForConditionalGeneration",
+            "MusicFlamingoForCausalLM",
+        )
+        _append_attempt(
+            attempts,
+            getattr(music_flamingo_cls, "__name__", "MusicFlamingo*"),
+            music_flamingo_cls,
+            seen_loader_ids,
+        )
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
+    else:
+        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
+        _append_attempt(
+            attempts,
+            "Qwen2AudioForConditionalGeneration",
+            Qwen2AudioForConditionalGeneration,
+            seen_loader_ids,
+        )
+        _append_attempt(
+            attempts,
+            "AudioFlamingo3ForConditionalGeneration",
+            AudioFlamingo3ForConditionalGeneration,
+            seen_loader_ids,
+        )
 
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
@@ -116,8 +433,19 @@ def load_audio_model_from_pretrained(
 
 
 def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) -> int:
-    feature_extractor = getattr(processor, "feature_extractor", None)
-    sampling_rate = getattr(feature_extractor, "sampling_rate", None) if feature_extractor is not None else None
+    sampling_rate = None
+    candidates = [
+        getattr(processor, "feature_extractor", None),
+        getattr(processor, "audio_processor", None),
+        processor,
+    ]
+    for obj in candidates:
+        if obj is None:
+            continue
+        sr = getattr(obj, "sampling_rate", None)
+        if sr is not None:
+            sampling_rate = sr
+            break
     if sampling_rate is None:
         raise ValueError(
             f"Model '{model_name_or_path}' is not audio-ready in this script. "
@@ -129,6 +457,217 @@ def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) ->
         raise ValueError(
             f"Invalid audio sampling rate '{sampling_rate}' for model '{model_name_or_path}'."
         ) from exc
+
+
+def _model_floating_dtype(model: Any) -> Optional[torch.dtype]:
+    try:
+        dtype = getattr(model, "dtype", None)
+    except Exception:
+        dtype = None
+    if isinstance(dtype, torch.dtype) and torch.is_floating_point(torch.empty((), dtype=dtype)):
+        return dtype
+    try:
+        for p in model.parameters():
+            if torch.is_tensor(p) and torch.is_floating_point(p):
+                return p.dtype
+    except Exception:
+        pass
+    return None
+
+
+def _cast_floating_tensors_to_model_dtype(inputs: Dict[str, Any], model: Any) -> Dict[str, Any]:
+    target_dtype = _model_floating_dtype(model)
+    if target_dtype is None:
+        return inputs
+    casted: Dict[str, Any] = {}
+    for key, value in inputs.items():
+        if torch.is_tensor(value) and torch.is_floating_point(value) and value.dtype != target_dtype:
+            casted[key] = value.to(dtype=target_dtype)
+        else:
+            casted[key] = value
+    return casted
+
+
+def _ensure_feature_masks_for_generation(inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    if "input_features" not in inputs:
+        return inputs
+
+    f_mask = inputs.get("feature_attention_mask")
+    i_mask = inputs.get("input_features_mask")
+    if torch.is_tensor(f_mask) and not torch.is_tensor(i_mask):
+        inputs["input_features_mask"] = f_mask
+        return inputs
+    if torch.is_tensor(i_mask) and not torch.is_tensor(f_mask):
+        inputs["feature_attention_mask"] = i_mask
+        return inputs
+    if torch.is_tensor(f_mask) and torch.is_tensor(i_mask):
+        return inputs
+
+    feat = inputs["input_features"]
+    if not torch.is_tensor(feat):
+        return inputs
+    if feat.dim() >= 2:
+        bsz = int(feat.shape[0])
+        tlen = int(max(feat.shape[1:]))
+    else:
+        bsz = 1
+        tlen = int(feat.shape[0])
+    mask = torch.ones((bsz, tlen), dtype=torch.long, device=feat.device)
+    inputs["feature_attention_mask"] = mask
+    inputs["input_features_mask"] = mask
+    return inputs
+
+
+def _extract_unused_model_kwargs_from_exception(exc: Exception) -> List[str]:
+    text = str(exc or "")
+    found: List[str] = []
+    match = re.search(r"not used by the model:\s*\[(.*?)\]", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        body = match.group(1)
+        for part in body.split(","):
+            token = part.strip().strip("\"'`")
+            if token:
+                found.append(token)
+
+    if not found:
+        match = re.search(
+            r"got an unexpected keyword argument\s+['\"]([^'\"]+)['\"]",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            found.append(match.group(1).strip())
+    if not found:
+        match = re.search(
+            r"['\"]([^'\"]+)['\"]\s+is\s+(?:an\s+)?unsupported\s+keyword\s+argument",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            found.append(match.group(1).strip())
+
+    normalized: List[str] = []
+    seen = set()
+    for token in found:
+        variants = [token, token.replace(" ", "_"), token.replace("_", " ")]
+        for variant in variants:
+            key = variant.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(variant.strip())
+    return normalized
+
+
+def _drop_unsupported_feature_masks_for_generate(
+    model: Any,
+    inputs: Dict[str, torch.Tensor],
+) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+    candidate_keys = ("input_features_mask", "feature_attention_mask")
+    present_keys = [k for k in candidate_keys if k in inputs]
+    if not present_keys:
+        return inputs, []
+
+    try:
+        target = model.module if hasattr(model, "module") and getattr(model, "module") is not None else model
+        accepted: set = set()
+
+        forward = getattr(target, "forward", None)
+        if callable(forward):
+            sig = inspect.signature(forward)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return inputs, []
+            accepted.update(sig.parameters.keys())
+
+        prep = getattr(target, "prepare_inputs_for_generation", None)
+        if callable(prep):
+            sig = inspect.signature(prep)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return inputs, []
+            accepted.update(sig.parameters.keys())
+
+        if not accepted:
+            return inputs, []
+    except Exception:
+        return inputs, []
+
+    filtered = dict(inputs)
+    dropped: List[str] = []
+    for key in present_keys:
+        if key not in accepted:
+            filtered.pop(key, None)
+            dropped.append(key)
+    return filtered, dropped
+
+
+def _generate_with_retry_drop_unused_kwargs(
+    model: Any,
+    *,
+    net_inputs: Dict[str, torch.Tensor],
+    max_new_tokens: int,
+    pad_token_id: Optional[int],
+    do_sample: bool,
+    temperature: float,
+    top_p: float,
+) -> Tuple[torch.Tensor, List[str]]:
+    working = dict(net_inputs)
+    working = _cast_floating_tensors_to_model_dtype(working, model)
+    dropped: List[str] = []
+    working, dropped_pre = _drop_unsupported_feature_masks_for_generate(model, working)
+    dropped.extend(dropped_pre)
+    for _ in range(6):
+        try:
+            with torch.no_grad():
+                out = model.generate(
+                    **working,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=do_sample,
+                    temperature=temperature,
+                    top_p=top_p,
+                    use_cache=True,
+                    pad_token_id=pad_token_id,
+                )
+            return out, dropped
+        except Exception as exc:
+            unused = _extract_unused_model_kwargs_from_exception(exc)
+            if not unused:
+                raise
+            removed_here: List[str] = []
+            for key in list(working.keys()):
+                key_norm = key.replace("_", " ").strip().lower()
+                for candidate in unused:
+                    cand_norm = candidate.replace("_", " ").strip().lower()
+                    if key_norm == cand_norm:
+                        working.pop(key, None)
+                        removed_here.append(key)
+                        break
+            if not removed_here:
+                raise
+            dropped.extend(removed_here)
+    raise RuntimeError(
+        f"generate() retry limit exceeded while dropping unsupported kwargs. dropped={dropped}"
+    )
+
+
+def _drop_unsupported_feature_masks_for_forward(model: Any, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        target = model.module if hasattr(model, "module") and getattr(model, "module") is not None else model
+        forward = getattr(target, "forward", None)
+        if forward is None:
+            return inputs
+        sig = inspect.signature(forward)
+        params = sig.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return inputs
+        supported = set(params.keys())
+    except Exception:
+        return inputs
+
+    filtered = dict(inputs)
+    for key in ("input_features_mask", "feature_attention_mask"):
+        if key in filtered and key not in supported:
+            filtered.pop(key, None)
+    return filtered
 
 
 def build_items(input_file: str, audio_dir: str, include_text: bool) -> List[GrpoItem]:
@@ -440,9 +979,9 @@ def build_chat_input(processor: AutoProcessor, prompt: str, audio: bool) -> str:
         ]
     else:
         user_content = [{"type": "text", "text": prompt}]
-    return processor.apply_chat_template(
+    return render_chat_template_as_text_or_raise(
+        processor,
         [{"role": "user", "content": user_content}],
-        tokenize=False,
         add_generation_prompt=True,
     )
 
@@ -568,16 +1107,34 @@ def prepare_inputs(
     audio: Optional[torch.Tensor],
     device: torch.device,
 ) -> Dict[str, torch.Tensor]:
+    tokenizer = get_tokenizer_or_raise(processor)
     if audio is None:
         inputs = processor(text=full_text, return_tensors="pt")
         prompt_inputs = processor(text=prompt_text, return_tensors="pt")
     else:
-        sr = processor.feature_extractor.sampling_rate
+        sr = get_audio_sampling_rate_or_raise(processor, type(processor).__name__)
         inputs = processor(text=full_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
         prompt_inputs = processor(text=prompt_text, audio=[audio], sampling_rate=sr, return_tensors="pt")
 
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    prompt_inputs = {k: v.to(device) for k, v in prompt_inputs.items()}
+    inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
+    prompt_inputs = {k: v.to(device) for k, v in prompt_inputs.items() if torch.is_tensor(v)}
+    if "input_ids" not in inputs:
+        tok_full = tokenizer(full_text, return_tensors="pt")
+        if "input_ids" in tok_full:
+            inputs["input_ids"] = tok_full["input_ids"].to(device)
+        if "attention_mask" in tok_full:
+            inputs["attention_mask"] = tok_full["attention_mask"].to(device)
+    if "input_ids" not in prompt_inputs:
+        tok_prompt = tokenizer(prompt_text, return_tensors="pt")
+        if "input_ids" in tok_prompt:
+            prompt_inputs["input_ids"] = tok_prompt["input_ids"].to(device)
+        if "attention_mask" in tok_prompt:
+            prompt_inputs["attention_mask"] = tok_prompt["attention_mask"].to(device)
+    if "input_ids" not in inputs or "input_ids" not in prompt_inputs:
+        raise RuntimeError("Failed to build token ids for GRPO inputs.")
+    if "attention_mask" not in inputs:
+        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
+    inputs = _ensure_feature_masks_for_generation(inputs)
     inputs["_prompt_len"] = prompt_inputs["input_ids"].shape[1]
     return inputs
 
@@ -589,10 +1146,16 @@ def model_forward(model: Any, inputs: Dict[str, torch.Tensor]):
         # Disable KV cache for training/logprob passes to reduce memory.
         "use_cache": False,
     }
+    if kwargs["attention_mask"] is None:
+        kwargs.pop("attention_mask", None)
     if "input_features" in inputs:
         kwargs["input_features"] = inputs["input_features"]
     if "feature_attention_mask" in inputs:
         kwargs["feature_attention_mask"] = inputs["feature_attention_mask"]
+    if "input_features_mask" in inputs:
+        kwargs["input_features_mask"] = inputs["input_features_mask"]
+    kwargs = _drop_unsupported_feature_masks_for_forward(model, kwargs)
+    kwargs = _cast_floating_tensors_to_model_dtype(kwargs, model)
     return model(**kwargs)
 
 
@@ -629,32 +1192,43 @@ def generate_samples(
     do_sample: bool,
 ) -> List[str]:
     text_input = build_chat_input(processor, prompt_text, audio is not None)
+    tokenizer = get_tokenizer_or_raise(processor)
     if audio is None:
         inputs = processor(text=text_input, return_tensors="pt")
     else:
-        sr = processor.feature_extractor.sampling_rate
+        sr = get_audio_sampling_rate_or_raise(processor, type(processor).__name__)
         inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
+    if "input_ids" not in inputs:
+        tok = tokenizer(text_input, return_tensors="pt")
+        if "input_ids" in tok:
+            inputs["input_ids"] = tok["input_ids"].to(device)
+        if "attention_mask" in tok:
+            inputs["attention_mask"] = tok["attention_mask"].to(device)
+    if "input_ids" not in inputs:
+        raise RuntimeError("Failed to prepare generation input_ids.")
+    if "attention_mask" not in inputs:
+        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
+    inputs = _ensure_feature_masks_for_generation(inputs)
 
     # Switch to eval mode for generation to disable dropout etc.
     was_training = model.training
     model.eval()
 
     outputs: List[str] = []
-    with torch.no_grad():
-        for _ in range(group_size):
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature,
-                top_p=top_p,
-                use_cache=True,
-                pad_token_id=processor.tokenizer.pad_token_id,
-            )
-            input_len = inputs["input_ids"].shape[1]
-            generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
-            outputs.append(generated_text)
+    for _ in range(group_size):
+        output_ids, _ = _generate_with_retry_drop_unused_kwargs(
+            model,
+            net_inputs=inputs,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=getattr(tokenizer, "pad_token_id", None),
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        input_len = inputs["input_ids"].shape[1]
+        generated_text = decode_token_ids(processor, output_ids[0][input_len:])
+        outputs.append(generated_text)
 
     # Restore previous mode.
     if was_training:
@@ -1185,6 +1759,8 @@ def evaluate_model(
     eval_model = _unwrap_model(model)
     was_training = eval_model.training
     eval_model.eval()
+    tokenizer = get_tokenizer_or_raise(processor)
+    audio_sr = get_audio_sampling_rate_or_raise(processor, type(processor).__name__)
 
     local_items = items[rank::world_size] if world_size > 1 else items
     local_count = 0.0
@@ -1211,8 +1787,7 @@ def evaluate_model(
                 audio = None
                 if item.audio_path:
                     try:
-                        sr = processor.feature_extractor.sampling_rate
-                        audio, _ = librosa.load(item.audio_path, sr=sr)
+                        audio, _ = librosa.load(item.audio_path, sr=audio_sr)
                     except Exception:
                         continue
 
@@ -1228,19 +1803,31 @@ def evaluate_model(
                 if audio is None:
                     inputs = processor(text=text_input, return_tensors="pt")
                 else:
-                    sr = processor.feature_extractor.sampling_rate
-                    inputs = processor(text=text_input, audio=[audio], sampling_rate=sr, return_tensors="pt")
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                    inputs = processor(text=text_input, audio=[audio], sampling_rate=audio_sr, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
+                if "input_ids" not in inputs:
+                    tok = tokenizer(text_input, return_tensors="pt")
+                    if "input_ids" in tok:
+                        inputs["input_ids"] = tok["input_ids"].to(device)
+                    if "attention_mask" in tok:
+                        inputs["attention_mask"] = tok["attention_mask"].to(device)
+                if "input_ids" not in inputs:
+                    continue
+                if "attention_mask" not in inputs:
+                    inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
+                inputs = _ensure_feature_masks_for_generation(inputs)
 
-                output_ids = eval_model.generate(
-                    **inputs,
+                output_ids, _ = _generate_with_retry_drop_unused_kwargs(
+                    eval_model,
+                    net_inputs=inputs,
                     max_new_tokens=max_new_tokens,
+                    pad_token_id=getattr(tokenizer, "pad_token_id", None),
                     do_sample=False,
-                    use_cache=True,
-                    pad_token_id=processor.tokenizer.pad_token_id,
+                    temperature=1.0,
+                    top_p=1.0,
                 )
                 input_len = inputs["input_ids"].shape[1]
-                generated_text = processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                generated_text = decode_token_ids(processor, output_ids[0][input_len:])
                 formatted_text, pred_label, format_ok = _format_model_output(
                     generated_text,
                     no_cot=no_cot,
@@ -2207,16 +2794,15 @@ def main() -> None:
     else:
         device = torch.device(args.device)
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
-    _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
+    processor, tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
+    audio_sampling_rate = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
     model = load_audio_model_from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
+    attach_tokenizer_to_model_for_compat(model, tokenizer)
     if args.use_lora:
         lora_base_targets = _parse_lora_targets(args.lora_target_modules)
         if not lora_base_targets:
@@ -2266,6 +2852,7 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
+    attach_tokenizer_to_model_for_compat(ref_model, tokenizer)
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad_(False)
@@ -2367,8 +2954,7 @@ def main() -> None:
                 try:
                     audio = None
                     if item.audio_path:
-                        sr = processor.feature_extractor.sampling_rate
-                        audio, _ = librosa.load(item.audio_path, sr=sr)
+                        audio, _ = librosa.load(item.audio_path, sr=audio_sampling_rate)
 
                     prompt = build_grpo_prompt(
                         item.mode,
