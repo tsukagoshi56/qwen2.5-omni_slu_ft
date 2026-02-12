@@ -3086,7 +3086,11 @@ def main():
         dest="output_file",
         type=str,
         default="",
-        help="Prediction output JSONL path (default: <output_dir>/prediction.jsonl).",
+        help=(
+            "Prediction output JSONL path. "
+            "Default: <output_dir>/prediction_<mode>.jsonl. "
+            "When --test_task_mode both is used, '_cot' and '_label' are appended."
+        ),
     )
     parser.add_argument(
         "--log_file",
@@ -3194,9 +3198,9 @@ def main():
     parser.add_argument(
         "--test_task_mode",
         type=str,
-        choices=["cot", "candidates", "label"],
+        choices=["cot", "candidates", "label", "both"],
         default="cot",
-        help="Prompt/output mode used only for test inference (default: cot).",
+        help="Prompt/output mode used only for test inference (default: cot). Use 'both' to run cot and label.",
     )
     parser.add_argument(
         "--candidates_only",
@@ -3221,6 +3225,16 @@ def main():
         action="store_const",
         const="cot",
         help="Alias for --test_task_mode cot (C/R/J generation at test time).",
+    )
+    parser.add_argument(
+        "--test_both_modes",
+        "--test-both-modes",
+        "--both_test_modes",
+        "--both-test-modes",
+        dest="test_task_mode",
+        action="store_const",
+        const="both",
+        help="Run both test modes in one execution: cot and label.",
     )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
@@ -3568,50 +3582,62 @@ def main():
         strict_audio_missing=args.strict_audio_missing,
         multitask=False,
     )
-    for item in test_items:
-        item["task_mode"] = args.test_task_mode
+    requested_test_mode = str(args.test_task_mode or "cot").strip().lower()
+    test_modes = ["cot", "label"] if requested_test_mode == "both" else [requested_test_mode]
+    raw_output_file = args.output_file.strip()
 
-    output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
-    output_parent = os.path.dirname(output_jsonl)
-    if output_parent:
-        os.makedirs(output_parent, exist_ok=True)
     if rank == 0:
         logger.info("Test inference DataLoader workers: %d", args.inference_num_workers)
-        logger.info("Test task mode: %s", args.test_task_mode)
-        logger.info("Prediction output file: %s", output_jsonl)
-    run_distributed_inference(
-        model=model,
-        processor=processor,
-        items=test_items,
-        output_path=output_jsonl,
-        model_name_or_path=model_path,
-        device=device,
-        rank=rank,
-        world_size=world_size,
-        batch_size=args.batch_size,
-        max_new_tokens=args.max_new_tokens,
-        num_workers=args.inference_num_workers,
-    )
+        logger.info("Test task modes: %s", ", ".join(test_modes))
 
-    if world_size > 1:
-        dist.barrier()
+    for mode in test_modes:
+        mode_items = [{**item, "task_mode": mode} for item in test_items]
+        if raw_output_file:
+            base, ext = os.path.splitext(raw_output_file)
+            if not ext:
+                ext = ".jsonl"
+            output_jsonl = f"{base}_{mode}{ext}" if len(test_modes) > 1 else raw_output_file
+        else:
+            output_jsonl = os.path.join(args.output_dir, f"prediction_{mode}.jsonl")
 
-    if rank == 0 and args.export_label_eval:
-        eval_output_dir = os.path.dirname(output_jsonl) or "."
-        label_only_path = os.path.join(eval_output_dir, "prediction_labels_only.jsonl")
-        save_label_only_predictions(output_jsonl, label_only_path)
+        output_parent = os.path.dirname(output_jsonl)
+        if output_parent:
+            os.makedirs(output_parent, exist_ok=True)
 
-        metrics = evaluate_prediction_file(output_jsonl)
-        metrics_path = os.path.join(eval_output_dir, "metrics_label_only.json")
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, ensure_ascii=False, indent=2)
+        if rank == 0:
+            logger.info("Test task mode: %s", mode)
+            logger.info("Prediction output file: %s", output_jsonl)
 
-        logger.info("Label-only evaluation metrics: %s", json.dumps(metrics, ensure_ascii=False))
-        logger.info("Saved full predictions: %s", output_jsonl)
-        logger.info("Saved label-only predictions: %s", label_only_path)
-        logger.info("Saved metrics: %s", metrics_path)
-    elif rank == 0:
-        logger.info("Saved predictions: %s", output_jsonl)
+        run_distributed_inference(
+            model=model,
+            processor=processor,
+            items=mode_items,
+            output_path=output_jsonl,
+            model_name_or_path=model_path,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            batch_size=args.batch_size,
+            max_new_tokens=args.max_new_tokens,
+            num_workers=args.inference_num_workers,
+        )
+
+        if rank == 0 and args.export_label_eval:
+            eval_output_dir = os.path.dirname(output_jsonl) or "."
+            label_only_path = os.path.join(eval_output_dir, f"prediction_labels_only_{mode}.jsonl")
+            save_label_only_predictions(output_jsonl, label_only_path)
+
+            metrics = evaluate_prediction_file(output_jsonl)
+            metrics_path = os.path.join(eval_output_dir, f"metrics_label_only_{mode}.json")
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+            logger.info("Label-only evaluation metrics (%s): %s", mode, json.dumps(metrics, ensure_ascii=False))
+            logger.info("Saved full predictions (%s): %s", mode, output_jsonl)
+            logger.info("Saved label-only predictions (%s): %s", mode, label_only_path)
+            logger.info("Saved metrics (%s): %s", mode, metrics_path)
+        elif rank == 0:
+            logger.info("Saved predictions (%s): %s", mode, output_jsonl)
 
     if world_size > 1:
         dist.barrier()
