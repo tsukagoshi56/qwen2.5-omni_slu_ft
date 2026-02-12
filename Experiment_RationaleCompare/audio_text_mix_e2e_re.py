@@ -37,6 +37,10 @@ try:
     from transformers import Qwen2AudioForConditionalGeneration
 except Exception:  # pragma: no cover
     Qwen2AudioForConditionalGeneration = None
+try:
+    from transformers import AudioFlamingo3ForConditionalGeneration
+except Exception:  # pragma: no cover
+    AudioFlamingo3ForConditionalGeneration = None
 from common import build_db_definitions, load_metadata
 
 try:
@@ -101,7 +105,9 @@ def _coerce_tokenizer_candidate(value: Any) -> Optional[Any]:
     if isinstance(value, dict):
         preferred_keys = (
             "tokenizer",
+            "tokenizers",
             "text_tokenizer",
+            "text_tokenizers",
             "lm_tokenizer",
             "language_tokenizer",
             "decoder_tokenizer",
@@ -121,7 +127,9 @@ def _coerce_tokenizer_candidate(value: Any) -> Optional[Any]:
 def _extract_tokenizer_from_processor(processor: Any) -> Optional[Any]:
     preferred_attrs = (
         "tokenizer",
+        "tokenizers",
         "text_tokenizer",
+        "text_tokenizers",
         "lm_tokenizer",
         "language_tokenizer",
         "_tokenizer",
@@ -180,12 +188,20 @@ def load_audio_model_from_pretrained(
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
-    attempts: List[Tuple[str, Any]] = [
-        ("AutoModelForCausalLM", AutoModelForCausalLM),
-        ("AutoModel", AutoModel),
-    ]
+    model_name_lc = str(model_name_or_path).lower()
+    attempts: List[Tuple[str, Any]] = []
+    if "audio-flamingo-3" in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
+        attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
+    attempts.extend(
+        [
+            ("AutoModelForCausalLM", AutoModelForCausalLM),
+            ("AutoModel", AutoModel),
+        ]
+    )
     if Qwen2AudioForConditionalGeneration is not None:
         attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
+    if "audio-flamingo-3" not in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
+        attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
 
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
