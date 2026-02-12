@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
+import transformers as hf_transformers
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
@@ -73,6 +74,14 @@ PROJECTOR_MODULE_NAME_HINTS = (
     "mm_projector",
 )
 _PROCESSOR_TOKENIZER_REGISTRY: Dict[int, Any] = {}
+
+
+def _optional_transformers_class(*names: str) -> Optional[Any]:
+    for name in names:
+        cls = getattr(hf_transformers, name, None)
+        if cls is not None:
+            return cls
+    return None
 
 
 class ProcessorWithTokenizerProxy:
@@ -191,6 +200,13 @@ def load_audio_model_from_pretrained(
 ):
     model_name_lc = str(model_name_or_path).lower()
     attempts: List[Tuple[str, Any]] = []
+    if "voxtral" in model_name_lc:
+        voxtral_cls = _optional_transformers_class(
+            "VoxtralForConditionalGeneration",
+            "VoxtralForCausalLM",
+        )
+        if voxtral_cls is not None:
+            attempts.append((voxtral_cls.__name__, voxtral_cls))
     if "audio-flamingo-3" in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
         attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
     attempts.extend(
