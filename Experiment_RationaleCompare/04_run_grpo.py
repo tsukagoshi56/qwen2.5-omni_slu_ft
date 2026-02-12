@@ -1223,8 +1223,8 @@ def evaluate_model(
                 raise
 
             local_count += 1.0
-            # Print eval sample every 10 samples for debugging rationale quality
-            if rank == 0 and int(local_count) % 10 == 1:
+            # Print first 5 eval samples for debugging rationale quality
+            if rank == 0 and local_count <= 5:
                 print(
                     f"[EVAL-SAMPLE {int(local_count)}] reward={reward:.3f} "
                     f"format_ok={format_ok} rationale_cov={rationale_cov:.2f} "
@@ -1623,7 +1623,7 @@ def main() -> None:
         default=0,
         help="Maximum number of GRPO training steps. 0 means no step cap (use epochs only).",
     )
-    parser.add_argument("--eval_every", type=int, default=50, help="Run eval every N global steps (0 disables).")
+    parser.add_argument("--eval_every", type=int, default=100, help="Run eval every N global steps (0 disables).")
     parser.add_argument(
         "--eval_max_samples",
         type=int,
