@@ -250,6 +250,50 @@ def resolve_audio_path(audio_root: str, filename: str) -> Optional[str]:
     return None
 
 
+def _mojibake_score(text: str) -> int:
+    markers = ("Ã", "Â", "â€", "â€™", "â€œ", "â€\x9d", "ã\x81", "ã\x82", "ã\x83", "ð\x9f", "�")
+    score = sum(text.count(marker) for marker in markers)
+    score += sum(1 for ch in text if 0x80 <= ord(ch) <= 0x9F)
+    return score
+
+
+def _maybe_fix_mojibake_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    best_text = text
+    best_score = _mojibake_score(text)
+    if best_score == 0:
+        return text
+    for enc in ("latin-1", "cp1252"):
+        try:
+            candidate = text.encode(enc).decode("utf-8")
+        except Exception:
+            continue
+        cand_score = _mojibake_score(candidate)
+        if cand_score < best_score:
+            best_text = candidate
+            best_score = cand_score
+    return best_text
+
+
+def _normalize_massive_scenario_action(
+    scenario_value: Any, intent_value: Any
+) -> Tuple[str, str, str]:
+    scenario = str(scenario_value or "").strip()
+    intent = str(intent_value or "").strip().replace(":", "_")
+    action = intent
+    scenario_norm = scenario.replace(":", "_")
+    if scenario_norm and intent.startswith(f"{scenario_norm}_"):
+        action = intent[len(scenario_norm) + 1 :]
+    elif (not scenario_norm) and "_" in intent:
+        scenario2, action2 = intent.split("_", 1)
+        if scenario2:
+            scenario = scenario2
+            action = action2
+    return scenario, action, intent
+
+
 def build_massive_entities(
     tokens: Sequence[str], labels: Sequence[str], outside_label: str
 ) -> List[Dict[str, str]]:
@@ -280,10 +324,17 @@ def build_massive_entities(
 def build_massive_target(
     record: Dict[str, Any], outside_label: str
 ) -> str:
-    scenario = record.get("scenario_str") or str(record.get("scenario", ""))
-    action = record.get("intent_str") or str(record.get("intent", ""))
-    tokens = record.get("tokens") or []
+    scenario, action, intent = _normalize_massive_scenario_action(
+        record.get("scenario_str") or record.get("scenario", ""),
+        record.get("intent_str") or record.get("intent", ""),
+    )
+    tokens = [_maybe_fix_mojibake_text(tok) for tok in (record.get("tokens") or [])]
     labels = record.get("labels") or []
+    if _DEBUG_SPEECH_MASSIVE and intent and action != intent:
+        _debug_speech_massive(
+            f"normalized intent/action in build_massive_target: "
+            f"scenario={scenario!r}, intent={intent!r}, action={action!r}"
+        )
     entities = build_massive_entities(tokens, labels, outside_label)
     payload = {
         "scenario": scenario,
@@ -548,12 +599,27 @@ class SpeechMassiveDataset(Dataset):
             text_only = False
 
         record = self.dataset[base_idx]
-        transcript = (
+        raw_transcript = (
             record.get(self.transcript_field)
             or record.get("utt")
             or record.get("text")
             or ""
         )
+        transcript = _maybe_fix_mojibake_text(raw_transcript)
+        scenario, action, intent = _normalize_massive_scenario_action(
+            record.get("scenario_str") or record.get("scenario", ""),
+            record.get("intent_str") or record.get("intent", ""),
+        )
+        if _DEBUG_SPEECH_MASSIVE:
+            base_id = record.get("id") or record.get("utt_id") or record.get("audio_id") or "unknown"
+            raw_transcript_text = str(raw_transcript or "").strip()
+            if raw_transcript_text and transcript != raw_transcript_text:
+                _debug_speech_massive(f"fixed mojibake transcript for id={base_id!r}")
+            if intent and action != intent:
+                _debug_speech_massive(
+                    f"normalized action for id={base_id!r}: "
+                    f"scenario={scenario!r}, intent={intent!r}, action={action!r}"
+                )
         target = build_massive_target(record, self.outside_label)
         audio = None if text_only else record.get("audio")
         audio_ref = None
@@ -569,8 +635,8 @@ class SpeechMassiveDataset(Dataset):
             # Extra fields for evaluation
             "tokens": record.get("tokens", []),
             "labels": record.get("labels", []),
-            "scenario": record.get("scenario_str") or record.get("scenario", ""),
-            "action": record.get("intent_str") or record.get("intent", ""),
+            "scenario": scenario,
+            "action": action,
         }
 
 

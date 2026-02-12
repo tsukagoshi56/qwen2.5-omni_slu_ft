@@ -197,6 +197,48 @@ def _select_input_text(record: Dict[str, Any], use_asr_transcript: bool) -> Tupl
     return text, "gold_transcript"
 
 
+def _mojibake_score(text: str) -> int:
+    markers = ("Ã", "Â", "â€", "â€™", "â€œ", "â€\x9d", "ã\x81", "ã\x82", "ã\x83", "ð\x9f", "�")
+    score = sum(text.count(marker) for marker in markers)
+    score += sum(1 for ch in text if 0x80 <= ord(ch) <= 0x9F)
+    return score
+
+
+def _maybe_fix_mojibake_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    best_text = text
+    best_score = _mojibake_score(text)
+    if best_score == 0:
+        return text
+    for enc in ("latin-1", "cp1252"):
+        try:
+            candidate = text.encode(enc).decode("utf-8")
+        except Exception:
+            continue
+        cand_score = _mojibake_score(candidate)
+        if cand_score < best_score:
+            best_text = candidate
+            best_score = cand_score
+    return best_text
+
+
+def _normalize_massive_scenario_action(scenario_value: Any, intent_value: Any) -> Tuple[str, str, str]:
+    scenario = str(scenario_value or "").strip()
+    intent = normalize_intent_label(str(intent_value or "").strip())
+    action = intent
+    scenario_norm = normalize_intent_label(scenario)
+    if scenario_norm and intent.startswith(f"{scenario_norm}_"):
+        action = intent[len(scenario_norm) + 1 :]
+    elif (not scenario_norm) and intent:
+        scenario2, action2 = split_intent(intent)
+        if scenario2:
+            scenario = scenario2
+            action = action2
+    return scenario, action, intent
+
+
 def _unique_keep_order(values: Sequence[str]) -> List[str]:
     seen = set()
     ordered: List[str] = []
@@ -265,17 +307,19 @@ def _normalize_speech_massive_record(
     transcript_field: str,
     outside_label: str,
 ) -> Dict[str, Any]:
-    transcript = str(
+    raw_transcript = (
         record.get(transcript_field)
         or record.get("utt")
         or record.get("text")
         or ""
-    ).strip()
-    scenario = str(record.get("scenario_str") or record.get("scenario") or "").strip()
-    action = str(record.get("intent_str") or record.get("intent") or "").strip()
+    )
+    transcript = _maybe_fix_mojibake_text(raw_transcript)
+    raw_scenario = record.get("scenario_str") or record.get("scenario") or ""
+    raw_intent = record.get("intent_str") or record.get("intent") or ""
+    scenario, action, intent = _normalize_massive_scenario_action(raw_scenario, raw_intent)
     token_values = record.get("tokens") if isinstance(record.get("tokens"), list) else []
     label_values = record.get("labels") if isinstance(record.get("labels"), list) else []
-    tokens = [str(tok) for tok in token_values]
+    tokens = [_maybe_fix_mojibake_text(tok) for tok in token_values]
     labels = [str(lbl) for lbl in label_values]
     entities = _massive_entities_to_common(tokens, labels, outside_label) if (tokens and labels) else []
     audio_path = _extract_massive_audio_path(record)
@@ -289,6 +333,16 @@ def _normalize_speech_massive_record(
         or str(index)
     )
     slurp_id = f"massive-{dataset_config}-{base_id}"
+    if _DEBUG:
+        raw_transcript_text = str(raw_transcript or "").strip()
+        if raw_transcript_text and raw_transcript_text != transcript:
+            _log_debug(f"[DEBUG] fixed mojibake transcript for {slurp_id}")
+        raw_intent_text = normalize_intent_label(str(raw_intent or "").strip())
+        if raw_intent_text and raw_intent_text != action:
+            _log_debug(
+                f"[DEBUG] normalized Speech-MASSIVE intent/action for {slurp_id}: "
+                f"scenario={scenario!r}, intent={raw_intent_text!r}, action={action!r}"
+            )
 
     return {
         "slurp_id": slurp_id,
@@ -297,6 +351,7 @@ def _normalize_speech_massive_record(
         "recordings": recordings,
         "scenario": scenario,
         "action": action,
+        "intent": intent,
         "entities": entities,
         "tokens": [{"surface": tok} for tok in tokens],
         "massive_tokens": tokens,
