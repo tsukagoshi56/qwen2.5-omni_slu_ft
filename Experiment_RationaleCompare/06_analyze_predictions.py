@@ -102,7 +102,7 @@ def load_gold_from_test_jsonl(path: str) -> Dict[str, Dict[str, Any]]:
                     tokens[i]["surface"].lower() for i in span if i < len(tokens)
                 )
                 entities.append({"type": ent_type, "filler": filler})
-            res = {
+            base = {
                 "scenario": example["scenario"],
                 "action": example["action"],
                 "entities": entities,
@@ -110,6 +110,9 @@ def load_gold_from_test_jsonl(path: str) -> Dict[str, Dict[str, Any]]:
             for rec in example.get("recordings", []):
                 fname = rec.get("file", "")
                 if fname:
+                    res = dict(base)
+                    res["wer"] = rec.get("wer")          # recording 固有
+                    res["ent_wer"] = rec.get("ent_wer")
                     gold_map[fname] = res
     return gold_map
 
@@ -396,6 +399,7 @@ class ModelResult:
     intent_metric: FMeasureAccumulator = field(default_factory=FMeasureAccumulator)
     entity_metric: SpanFMeasureAccumulator = field(default_factory=SpanFMeasureAccumulator)
     intent_pairs: List[Tuple[str, str]] = field(default_factory=list)
+    wer_list: List[Optional[float]] = field(default_factory=list)  # per-sample WER
     matched: List[Tuple[Dict, Dict]] = field(default_factory=list)
     error_breakdown: Dict[str, int] = field(default_factory=dict)
 
@@ -509,6 +513,7 @@ def process_model(
         r.intent_metric.add(f"{gs}_{ga}", f"{ps}_{pa}")
         r.entity_metric.add(gold["entities"], pred["entities"])
         r.intent_pairs.append((f"{gs}_{ga}", f"{ps}_{pa}"))
+        r.wer_list.append(gold.get("wer"))
 
     sp, sr, sf = r.scenario_metric.overall()
     ap, ar, af = r.action_metric.overall()
@@ -817,6 +822,120 @@ def print_entity_type_confusion_comparison(models: List[ModelResult], top_n: int
         print("\n  Entity Type 入れ替え: (なし)")
 
 
+WER_BINS = [
+    (0.0,  0.0,   "WER=0 (exact)"),
+    (0.0,  0.20,  "0<WER<=0.20"),
+    (0.20, 0.50,  "0.20<WER<=0.50"),
+    (0.50, float("inf"), "WER>0.50"),
+]
+
+
+def _in_wer_bin(w: float, lo: float, hi: float) -> bool:
+    if lo == 0.0 and hi == 0.0:
+        return w == 0.0
+    if hi == float("inf"):
+        return w > lo
+    return lo < w <= hi
+
+
+def _compute_bin_metrics(
+    intent_pairs: List[Tuple[str, str]],
+    matched: List[Tuple[Dict, Dict]],
+    wer_list: List[Optional[float]],
+    lo: float, hi: float,
+) -> Dict[str, Any]:
+    """指定 WER 範囲のサンプルだけで Intent Acc / Entity F1 を算出。"""
+    intent_m = FMeasureAccumulator()
+    entity_m = SpanFMeasureAccumulator()
+    n = 0
+    for i, w in enumerate(wer_list):
+        if w is None:
+            continue
+        if not _in_wer_bin(w, lo, hi):
+            continue
+        gi, pi = intent_pairs[i]
+        intent_m.add(gi, pi)
+        pred, gold = matched[i]
+        entity_m.add(gold["entities"], pred["entities"])
+        n += 1
+    _, _, ef = entity_m.overall()
+    return {
+        "n": n,
+        "intent_acc": intent_m.accuracy if n > 0 else 0.0,
+        "entity_f1": ef,
+    }
+
+
+def print_wer_analysis_comparison(models: List[ModelResult]):
+    print_section("K. WER 別 Intent Accuracy / Entity F1 比較")
+
+    # Check if any model has wer data
+    has_wer = any(
+        any(w is not None for w in m.wer_list)
+        for m in models
+    )
+    if not has_wer:
+        print("  (WER データなし — --gold で test.jsonl を指定してください)")
+        return
+
+    names = [m.name for m in models]
+    # Build header
+    sub_cols = []
+    for n in names:
+        sub_cols.extend([f"{n} IntAcc", f"{n} EntF1"])
+    headers = ["WER range", "N"] + sub_cols
+
+    rows = []
+    for lo, hi, label in WER_BINS:
+        # N is based on first model (same gold)
+        bins_data = [_compute_bin_metrics(m.intent_pairs, m.matched, m.wer_list, lo, hi)
+                     for m in models]
+        n_samples = max(d["n"] for d in bins_data) if bins_data else 0
+        if n_samples == 0:
+            continue
+        row: List[Any] = [label, n_samples]
+        for d in bins_data:
+            row.append(_f4(d["intent_acc"]))
+            row.append(_f4(d["entity_f1"]))
+        rows.append(row)
+
+    # ALL row
+    row_all: List[Any] = ["ALL", max(m.n_matched for m in models)]
+    for m in models:
+        row_all.append(_f4(m.intent_acc))
+        row_all.append(_f4(m.entity_f1))
+    rows.append(row_all)
+
+    print_table(headers, rows)
+
+    # Error type breakdown per WER bin
+    print(f"\n  --- WER 別 Intent エラー分類 (各モデル) ---")
+    for m in models:
+        has_m_wer = any(w is not None for w in m.wer_list)
+        if not has_m_wer:
+            continue
+        print(f"\n  [{m.name}]")
+        bin_headers = ["WER range", "N", "Err", "ErrRate", "同Scen/異Act", "異Scen/同Act", "両方異なる"]
+        bin_rows = []
+        for lo, hi, label in WER_BINS:
+            # Filter indices
+            idxs = [i for i, w in enumerate(m.wer_list)
+                    if w is not None and _in_wer_bin(w, lo, hi)]
+            if not idxs:
+                continue
+            sub_pairs = [m.intent_pairs[i] for i in idxs]
+            bd = error_type_breakdown(sub_pairs)
+            n_err = sum(bd.values())
+            bin_rows.append([
+                label, len(idxs), n_err,
+                _pct(n_err, len(idxs)),
+                str(bd["same_scenario_diff_action"]),
+                str(bd["diff_scenario_same_action"]),
+                str(bd["diff_both"]),
+            ])
+        print_table(bin_headers, bin_rows)
+
+
 def print_scenario_acc_comparison(models: List[ModelResult]):
     print_section("J. Scenario 別 Intent Accuracy 比較")
 
@@ -995,6 +1114,7 @@ def main():
 
     print_entity_type_confusion_comparison(models, args.top)
     print_scenario_acc_comparison(models)
+    print_wer_analysis_comparison(models)
 
     # ================================================================
     # Summary JSON
