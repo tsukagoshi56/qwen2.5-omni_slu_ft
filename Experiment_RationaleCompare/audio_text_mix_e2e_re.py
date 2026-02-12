@@ -598,9 +598,11 @@ def _infer_audio_input_mode(
                 if isinstance(value, str) and value.strip():
                     probes.append(value.lower())
     family = _infer_model_family(" ".join(probes))
-    if family in {"flamingo", "music-flamingo"}:
-        return "tokenized_chat_template"
-    return "processor_audio"
+    # For Qwen/Flamingo families, keep audio waveform path explicit via processor(..., audio=[...]).
+    # Tokenized chat-template can succeed without real audio features on some model versions.
+    if family in {"qwen", "flamingo", "music-flamingo", "voxtral"}:
+        return "processor_audio"
+    return "tokenized_chat_template"
 
 
 def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
