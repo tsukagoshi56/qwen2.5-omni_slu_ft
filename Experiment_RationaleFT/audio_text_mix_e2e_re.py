@@ -11,6 +11,7 @@ Audio+N-best+Rationale training and distributed inference for SLU labels.
 
 import argparse
 import glob
+import inspect
 import json
 import logging
 import os
@@ -38,6 +39,10 @@ try:
     from transformers import Qwen2AudioForConditionalGeneration
 except Exception:  # pragma: no cover
     Qwen2AudioForConditionalGeneration = None
+try:
+    from transformers import AudioFlamingo3ForConditionalGeneration
+except Exception:  # pragma: no cover
+    AudioFlamingo3ForConditionalGeneration = None
 
 try:
     import jiwer
@@ -76,6 +81,93 @@ class ProcessorWithTokenizerProxy:
         return self._base_processor(*args, **kwargs)
 
 
+def _is_tokenizer_like(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return False
+    has_decode = hasattr(value, "decode") or hasattr(value, "batch_decode")
+    has_tokenizer_api = callable(value) or has_decode
+    return bool(has_tokenizer_api and has_decode)
+
+
+def _coerce_tokenizer_candidate(value: Any) -> Optional[Any]:
+    if _is_tokenizer_like(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            candidate = _coerce_tokenizer_candidate(item)
+            if candidate is not None:
+                return candidate
+    if isinstance(value, dict):
+        preferred_keys = (
+            "tokenizer",
+            "tokenizers",
+            "text_tokenizer",
+            "text_tokenizers",
+            "lm_tokenizer",
+            "language_tokenizer",
+            "decoder_tokenizer",
+        )
+        for key in preferred_keys:
+            if key in value:
+                candidate = _coerce_tokenizer_candidate(value.get(key))
+                if candidate is not None:
+                    return candidate
+        for item in value.values():
+            candidate = _coerce_tokenizer_candidate(item)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _extract_tokenizer_from_processor(processor: Any) -> Optional[Any]:
+    preferred_attrs = (
+        "tokenizer",
+        "tokenizers",
+        "text_tokenizer",
+        "text_tokenizers",
+        "lm_tokenizer",
+        "language_tokenizer",
+        "_tokenizer",
+    )
+    for attr in preferred_attrs:
+        try:
+            candidate = _coerce_tokenizer_candidate(getattr(processor, attr, None))
+        except Exception:
+            candidate = None
+        if candidate is not None:
+            return candidate
+
+    try:
+        mapping = vars(processor)
+    except Exception:
+        mapping = {}
+    for key, value in mapping.items():
+        if "tokenizer" not in str(key).lower():
+            continue
+        candidate = _coerce_tokenizer_candidate(value)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _load_tokenizer_with_fallbacks(model_name_or_path: str) -> Tuple[Any, str]:
+    attempts = (
+        ("use_fast=False", {"trust_remote_code": True, "use_fast": False}),
+        ("use_fast=True", {"trust_remote_code": True, "use_fast": True}),
+        ("default", {"trust_remote_code": True}),
+    )
+    errors: List[str] = []
+    for label, kwargs in attempts:
+        try:
+            return AutoTokenizer.from_pretrained(model_name_or_path, **kwargs), label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    detail = " | ".join(errors) if errors else "unknown"
+    raise RuntimeError(
+        f"AutoTokenizer loading failed for '{model_name_or_path}' across fallbacks. Details: {detail}"
+    )
+
+
 PROMPT_HEADER = (
     "Predict the final SLU label from ASR n-best and rationale.\n"
     "Output JSON only with keys: scenario, action, entities."
@@ -88,12 +180,20 @@ def load_audio_model_from_pretrained(
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
-    attempts: List[Tuple[str, Any]] = [
-        ("AutoModelForCausalLM", AutoModelForCausalLM),
-        ("AutoModel", AutoModel),
-    ]
+    model_name_lc = str(model_name_or_path).lower()
+    attempts: List[Tuple[str, Any]] = []
+    if "audio-flamingo-3" in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
+        attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
+    attempts.extend(
+        [
+            ("AutoModelForCausalLM", AutoModelForCausalLM),
+            ("AutoModel", AutoModel),
+        ]
+    )
     if Qwen2AudioForConditionalGeneration is not None:
         attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
+    if "audio-flamingo-3" not in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
+        attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
 
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
@@ -140,18 +240,15 @@ def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) ->
 
 
 def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Tuple[Any, Any]:
-    tokenizer = getattr(processor, "tokenizer", None)
+    tokenizer = _extract_tokenizer_from_processor(processor)
     if tokenizer is None:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name_or_path,
-                trust_remote_code=True,
-                use_fast=False,
-            )
+            tokenizer, load_mode = _load_tokenizer_with_fallbacks(model_name_or_path)
             logger.warning(
-                "Processor %s has no tokenizer; loaded AutoTokenizer(%s).",
+                "Processor %s has no tokenizer; loaded AutoTokenizer(%s) with %s.",
                 type(processor).__name__,
                 model_name_or_path,
+                load_mode,
             )
         except Exception as exc:
             raise ValueError(
@@ -184,21 +281,31 @@ def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str)
 
 
 def get_tokenizer_or_raise(processor: Any) -> Any:
-    tokenizer = getattr(processor, "tokenizer", None)
+    tokenizer = _extract_tokenizer_from_processor(processor)
     if tokenizer is not None:
         return tokenizer
-    tokenizer = _PROCESSOR_TOKENIZER_REGISTRY.get(id(processor))
+    tokenizer = _coerce_tokenizer_candidate(_PROCESSOR_TOKENIZER_REGISTRY.get(id(processor)))
     if tokenizer is not None:
         return tokenizer
     base = getattr(processor, "_base_processor", None)
     if base is not None:
-        tokenizer = _PROCESSOR_TOKENIZER_REGISTRY.get(id(base))
+        tokenizer = _coerce_tokenizer_candidate(_PROCESSOR_TOKENIZER_REGISTRY.get(id(base)))
         if tokenizer is not None:
             return tokenizer
     raise AttributeError(
         f"No tokenizer is registered for processor type {type(processor).__name__}. "
         "Call ensure_processor_tokenizer_or_raise() before use."
     )
+
+
+def attach_tokenizer_to_model_for_compat(model: Any, tokenizer: Any) -> None:
+    # Some multimodal model implementations (including certain AudioFlamingo stacks)
+    # access `self.tokenizer` inside generation utilities.
+    try:
+        if getattr(model, "tokenizer", None) is None:
+            setattr(model, "tokenizer", tokenizer)
+    except Exception:
+        pass
 
 
 def _chat_template_owner_or_raise(processor: Any) -> Any:
@@ -2247,6 +2354,7 @@ def main():
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
+    attach_tokenizer_to_model_for_compat(model, tokenizer)
 
     # Keep the original lightweight FT setup by default.
     audio_matches, projector_matches = configure_audio_trainability(
@@ -2287,14 +2395,24 @@ def main():
         disable_tqdm=True,
     )
 
-    trainer = CustomTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=MixedDataset(train_items),
-        eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor, debug=args.smoke),
-        tokenizer=tokenizer,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": MixedDataset(train_items),
+        "eval_dataset": MixedDataset(eval_items) if len(eval_items) > 0 else None,
+        "data_collator": SmartCollator(processor, debug=args.smoke),
+    }
+    trainer_init_params = inspect.signature(CustomTrainer.__init__).parameters
+    if "tokenizer" in trainer_init_params:
+        trainer_kwargs["tokenizer"] = tokenizer
+    elif "processing_class" in trainer_init_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        logger.warning(
+            "Trainer init has neither 'tokenizer' nor 'processing_class'. "
+            "Proceeding without explicitly passing tokenizer."
+        )
+    trainer = CustomTrainer(**trainer_kwargs)
 
     trainer.train()
 

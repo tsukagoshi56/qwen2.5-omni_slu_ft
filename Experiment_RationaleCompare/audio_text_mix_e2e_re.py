@@ -11,6 +11,7 @@ Audio/text mixed SLU training and distributed inference.
 
 import argparse
 import glob
+import inspect
 import json
 import logging
 import os
@@ -2689,14 +2690,24 @@ def main():
         disable_tqdm=True,
     )
 
-    trainer = CustomTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=MixedDataset(train_items),
-        eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        data_collator=SmartCollator(processor, debug=args.smoke),
-        tokenizer=tokenizer,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": MixedDataset(train_items),
+        "eval_dataset": MixedDataset(eval_items) if len(eval_items) > 0 else None,
+        "data_collator": SmartCollator(processor, debug=args.smoke),
+    }
+    trainer_init_params = inspect.signature(CustomTrainer.__init__).parameters
+    if "tokenizer" in trainer_init_params:
+        trainer_kwargs["tokenizer"] = tokenizer
+    elif "processing_class" in trainer_init_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        logger.warning(
+            "Trainer init has neither 'tokenizer' nor 'processing_class'. "
+            "Proceeding without explicitly passing tokenizer."
+        )
+    trainer = CustomTrainer(**trainer_kwargs)
 
     trainer.train()
 
