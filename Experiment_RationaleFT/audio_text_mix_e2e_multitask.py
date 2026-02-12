@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -207,6 +208,62 @@ def _build_candidates_only_target(item: Dict[str, Any]) -> str:
         target_obj.get("entities", []),
     )
     return f"C: (none)\nJ: {final_json}"
+
+
+def _build_random_cot_pool(items: List[Dict[str, Any]]) -> Dict[str, List[int]]:
+    grouped: Dict[str, List[int]] = {}
+    for idx, item in enumerate(items):
+        task_tag = str(item.get("task_tag", "")).strip()
+        if task_tag != "<ras>":
+            continue
+        sample_id = str(item.get("id", "")).strip()
+        if not sample_id:
+            continue
+        grouped.setdefault(sample_id, []).append(idx)
+    return grouped
+
+
+def _build_derangement(ids: List[str], rng: random.Random) -> List[str]:
+    if len(ids) <= 1:
+        return ids[:]
+    shuffled = ids[:]
+    rng.shuffle(shuffled)
+    for shift in range(len(shuffled)):
+        candidate = shuffled[shift:] + shuffled[:shift]
+        if all(src != dst for src, dst in zip(ids, candidate)):
+            return candidate
+    # Deterministic fallback.
+    return ids[1:] + ids[:1]
+
+
+def apply_random_cot_ablation(
+    items: List[Dict[str, Any]],
+    seed: int = 42,
+) -> int:
+    grouped = _build_random_cot_pool(items)
+    ras_ids = [sample_id for sample_id, ras_indices in grouped.items() if ras_indices]
+    if len(ras_ids) <= 1:
+        logger.warning("random_cot enabled but <ras> samples are insufficient: %d", len(ras_ids))
+        return 0
+
+    rng = random.Random(seed)
+    donor_ids = _build_derangement(ras_ids, rng)
+
+    for receiver_id, donor_id in zip(ras_ids, donor_ids):
+        donor_ras = items[grouped[donor_id][0]]
+        donor_rationale = str(
+            donor_ras.get("rationale_text")
+            or donor_ras.get("target")
+            or ""
+        ).strip()
+
+        for idx in grouped[receiver_id]:
+            item = items[idx]
+            item["rationale_text"] = donor_rationale
+            item["target"] = donor_rationale
+            item["random_cot_source_id"] = donor_id
+
+    return len(ras_ids)
 
 
 def build_multitask_items_from_rationale(
@@ -462,6 +519,20 @@ def main():
     parser.add_argument("--disable_ras", action="store_true", help="Disable <ras> samples.")
     parser.add_argument("--disable_rationale_slu", action="store_true", help="Disable <slu> samples from rationale files.")
     parser.add_argument("--train_audio_encoder", action="store_true")
+    parser.add_argument(
+        "--random_cot",
+        action="store_true",
+        help=(
+            "Ablation mode: randomize only <ras> teacher targets by swapping rationale "
+            "text across different samples during training."
+        ),
+    )
+    parser.add_argument(
+        "--random_cot_seed",
+        type=int,
+        default=42,
+        help="Random seed for --random_cot pairing.",
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--export_label_eval", action="store_true")
     parser.add_argument(
@@ -542,6 +613,18 @@ def main():
             input_format=args.input_format,
         )
     )
+
+    if args.random_cot:
+        randomized = apply_random_cot_ablation(
+            train_items,
+            seed=args.random_cot_seed,
+        )
+        if rank == 0:
+            logger.info(
+                "random_cot=True: randomized <ras> targets for %d sample ids (seed=%d).",
+                randomized,
+                args.random_cot_seed,
+            )
 
     if len(train_items) == 0:
         raise RuntimeError("No train items were built.")
