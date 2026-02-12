@@ -889,25 +889,69 @@ def candidate_to_text(value: Any) -> str:
     return str(value).strip()
 
 
-def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
+def normalize_task_mode(task_mode: Any) -> str:
+    mode = str(task_mode or "cot").strip().lower()
+    if mode in ("candidates", "cand"):
+        return "candidates"
+    if mode == "label":
+        return "label"
+    return "cot"
+
+
+def task_id_from_mode(task_mode: Any) -> int:
+    return 1 if normalize_task_mode(task_mode) == "label" else 0
+
+
+def build_prompt_text(
+    item: Dict[str, Any],
+    include_transcript: bool = False,
+    include_user_prompt: bool = False,
+) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
-    task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
+    task_mode = normalize_task_mode(item.get("task_mode", "cot"))
     if task_mode == "label":
         output_format = PROMPT_OUTPUT_FORMAT_LABEL_ONLY
-    elif task_mode in ("candidates", "cand"):
+        mode_rule = "Output only J. Do not output C or R."
+    elif task_mode == "candidates":
         output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
+        mode_rule = "Output C and J only. Do not output R."
     else:
         output_format = PROMPT_OUTPUT_FORMAT
+        mode_rule = "Output C, R, and J in this order."
+
+    user_prompt = ""
+    if include_user_prompt:
+        user_prompt = str(item.get("prompt_text", "") or "").strip()
+        user_prompt = re.sub(r"\s+", " ", user_prompt)
+    if not user_prompt:
+        user_prompt = "Predict SLU labels from the given input."
+    db_definitions = str(PROMPT_DB_DEFINITIONS or "").strip()
+    if not db_definitions:
+        db_definitions = "Intents: (none)\nSlot Types: (none)"
 
     if include_transcript and transcript:
         return (
             f"{SYSTEM_PROMPT_TEXT}\n\n"
+            "[Task]\n"
+            f"- Mode: {task_mode}\n"
+            f"- {mode_rule}\n\n"
+            "[Instruction]\n"
+            f"- {user_prompt}\n\n"
+            "[DB Definitions]\n"
+            f"{db_definitions}\n\n"
             "[Input Data]\n"
             f"- Transcript: {transcript}\n\n"
             f"{output_format}"
         )
     return (
         f"{SYSTEM_PROMPT_AUDIO}\n\n"
+        "[Task]\n"
+        f"- Mode: {task_mode}\n"
+        f"- {mode_rule}\n\n"
+        "[Instruction]\n"
+        f"- {user_prompt}\n\n"
+        "[DB Definitions]\n"
+        f"{db_definitions}\n\n"
         "[Input Data]\n"
         "- Audio: <AUDIO>\n\n"
         f"{output_format}"
@@ -2509,7 +2553,7 @@ class InferenceCollator:
                     if not audio_path:
                         continue
                     audio, _ = load_audio_or_raise(audio_path, sr=sr)
-                    prompt_text = build_prompt_text(item)
+                    prompt_text = build_prompt_text(item, include_user_prompt=True)
                     user_content = [
                         {"type": "audio", "audio_url": "placeholder"},
                         {"type": "text", "text": prompt_text},
@@ -2532,7 +2576,11 @@ class InferenceCollator:
                         if "attention_mask" in tok:
                             net_inputs["attention_mask"] = tok["attention_mask"]
                 else:
-                    prompt_text = build_prompt_text(item, include_transcript=True)
+                    prompt_text = build_prompt_text(
+                        item,
+                        include_transcript=True,
+                        include_user_prompt=True,
+                    )
                     text_input = render_chat_template_as_text_or_raise(
                         self.processor,
                         [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
@@ -2576,13 +2624,17 @@ class InferenceCollator:
                         continue
                     audio, _ = load_audio_or_raise(audio_path, sr=sr)
                     audios.append(audio)
-                    prompt_text = build_prompt_text(item)
+                    prompt_text = build_prompt_text(item, include_user_prompt=True)
                     user_content = [
                         {"type": "audio", "audio_url": "placeholder"},
                         {"type": "text", "text": prompt_text},
                     ]
                 else:
-                    prompt_text = build_prompt_text(item, include_transcript=True)
+                    prompt_text = build_prompt_text(
+                        item,
+                        include_transcript=True,
+                        include_user_prompt=True,
+                    )
                     user_content = [{"type": "text", "text": prompt_text}]
 
                 text_input = render_chat_template_as_text_or_raise(
@@ -2659,6 +2711,7 @@ def _generate_batch(
         for item, raw_output in zip(items, raw_outputs):
             pred_label = parse_prediction_label(raw_output)
             wer_score = calculate_wer(item.get("transcript", ""), raw_output)
+            task_mode = normalize_task_mode(item.get("task_mode", "cot"))
             result_entry = {
                 "scenario": pred_label["scenario"],
                 "action": pred_label["action"],
@@ -2675,6 +2728,8 @@ def _generate_batch(
                 "target": item.get("target", ""),
                 "target_label": item.get("target_obj", {}),
                 "type": "audio" if item.get("audio_path") else "text",
+                "task_mode": task_mode,
+                "task_id": int(item.get("task_id", task_id_from_mode(task_mode))),
             }
             results.append(result_entry)
         return results
@@ -2701,6 +2756,7 @@ def _generate_batch(
         raw_output = decode_token_ids(processor, output_ids[0][input_len:])
         pred_label = parse_prediction_label(raw_output)
         wer_score = calculate_wer(item.get("transcript", ""), raw_output)
+        task_mode = normalize_task_mode(item.get("task_mode", "cot"))
 
         result_entry = {
             "scenario": pred_label["scenario"],
@@ -2718,6 +2774,8 @@ def _generate_batch(
             "target": item.get("target", ""),
             "target_label": item.get("target_obj", {}),
             "type": "audio" if item.get("audio_path") else "text",
+            "task_mode": task_mode,
+            "task_id": int(item.get("task_id", task_id_from_mode(task_mode))),
         }
         results.append(result_entry)
 
@@ -3005,6 +3063,67 @@ def sample_train_items_by_slurp_id(
     )
 
 
+def _build_derangement(ids: List[str], rng: random.Random) -> List[str]:
+    if len(ids) <= 1:
+        return ids[:]
+    shuffled = ids[:]
+    rng.shuffle(shuffled)
+    for shift in range(len(shuffled)):
+        candidate = shuffled[shift:] + shuffled[:shift]
+        if all(src != dst for src, dst in zip(ids, candidate)):
+            return candidate
+    # Deterministic fallback.
+    return ids[1:] + ids[:1]
+
+
+def _is_cot_branch_item(item: Dict[str, Any]) -> bool:
+    task_id = item.get("task_id")
+    try:
+        task_id_int = int(task_id)
+    except Exception:
+        task_id_int = None
+    if task_id_int == 0:
+        return True
+    if task_id_int == 1:
+        return False
+    task_mode = str(item.get("task_mode", "") or "").strip().lower()
+    return task_mode in {"cot", "candidates", "cand"}
+
+
+def apply_random_cot_target_ablation(
+    items: List[Dict[str, Any]],
+    seed: int = 42,
+) -> int:
+    cot_groups: Dict[str, List[int]] = {}
+    cot_targets: Dict[str, str] = {}
+
+    for idx, item in enumerate(items):
+        if not _is_cot_branch_item(item):
+            continue
+        sample_id = pick_first_nonempty(item.get("slurp_id"), item.get("id"))
+        if not sample_id:
+            sample_id = f"__missing_id_{idx}"
+        cot_groups.setdefault(sample_id, []).append(idx)
+        if sample_id not in cot_targets:
+            cot_targets[sample_id] = str(item.get("target", "") or "")
+
+    cot_ids = sorted(cot_groups.keys())
+    if len(cot_ids) <= 1:
+        logger.warning("random_cot enabled but CoT items are insufficient: %d", len(cot_ids))
+        return 0
+
+    rng = random.Random(seed)
+    donor_ids = _build_derangement(cot_ids, rng)
+
+    for receiver_id, donor_id in zip(cot_ids, donor_ids):
+        donor_target = cot_targets.get(donor_id, "")
+        for idx in cot_groups[receiver_id]:
+            items[idx]["target"] = donor_target
+            items[idx]["random_cot_source_id"] = donor_id
+
+    return len(cot_ids)
+
+
 # ==============================================================================
 # Main
 # ==============================================================================
@@ -3173,6 +3292,25 @@ def main():
         "--train_audio_encoder",
         action="store_true",
         help="Enable training of audio-related encoder parameters.",
+    )
+    parser.add_argument(
+        "--random_cot",
+        "--random-cot",
+        "--rondom_cot",
+        "--rondom-cot",
+        dest="random_cot",
+        action="store_true",
+        help=(
+            "Ablation mode: randomize CoT-branch teacher targets across samples "
+            "while keeping label-branch J targets unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--random_cot_seed",
+        "--random-cot-seed",
+        type=int,
+        default=42,
+        help="Random seed for --random_cot target shuffling.",
     )
     parser.add_argument(
         "--export_label_eval",
@@ -3399,6 +3537,17 @@ def main():
             ratio=args.train_id_sample_ratio,
             seed=args.train_id_sample_seed,
         )
+        if args.random_cot:
+            randomized = apply_random_cot_target_ablation(
+                train_items,
+                seed=args.random_cot_seed,
+            )
+            if rank == 0:
+                logger.info(
+                    "random_cot=True: randomized CoT targets for %d sample ids (seed=%d).",
+                    randomized,
+                    args.random_cot_seed,
+                )
         if rank == 0:
             logger.info(
                 (
@@ -3591,7 +3740,8 @@ def main():
         logger.info("Test task modes: %s", ", ".join(test_modes))
 
     for mode in test_modes:
-        mode_items = [{**item, "task_mode": mode} for item in test_items]
+        mode_task_id = task_id_from_mode(mode)
+        mode_items = [{**item, "task_mode": mode, "task_id": mode_task_id} for item in test_items]
         if raw_output_file:
             base, ext = os.path.splitext(raw_output_file)
             if not ext:
