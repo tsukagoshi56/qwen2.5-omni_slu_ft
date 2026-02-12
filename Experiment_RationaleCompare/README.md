@@ -27,6 +27,62 @@ export API_ENDPOINT=https://api.deepseek.com
 # export DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
+### Audio Flamingo 3 troubleshooting (`WhisperFeatureExtractor` / tokenizer error)
+
+If you see errors like:
+- `Processor WhisperFeatureExtractor has no tokenizer`
+- `list object has no attribute keys`
+
+use the following exact steps on the server.
+
+1. Ensure model id is exact (no typo, no spaces):
+```bash
+export AF3_MODEL_ID="nvidia/audio-flamingo-3-hf"
+```
+
+2. Upgrade **the same Python environment** used to run training:
+```bash
+python -m pip install -U pip
+python -m pip install --upgrade --force-reinstall --no-cache-dir \
+  "git+https://github.com/huggingface/transformers" accelerate
+```
+
+3. Clear stale HF cache for AF3:
+```bash
+rm -rf ~/.cache/huggingface/hub/models--nvidia--audio-flamingo-3-hf
+```
+
+4. Verify imports and processor class:
+```bash
+python - <<'PY'
+import sys, transformers
+print("python:", sys.executable)
+print("transformers:", transformers.__version__)
+print("transformers_file:", transformers.__file__)
+
+from transformers import AutoProcessor, AudioFlamingo3ForConditionalGeneration
+p = AutoProcessor.from_pretrained("nvidia/audio-flamingo-3-hf", trust_remote_code=True)
+print("processor_type:", type(p).__name__)
+print("tokenizer_type:", type(getattr(p, "tokenizer", None)).__name__)
+PY
+```
+
+Expected:
+- `processor_type` should be `AudioFlamingo3Processor` (not `WhisperFeatureExtractor`).
+
+5. In scripts, always load AF3 with `trust_remote_code=True`:
+```python
+from transformers import AudioFlamingo3ForConditionalGeneration, AutoProcessor
+
+model_id = "nvidia/audio-flamingo-3-hf"
+processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
+    model_id,
+    trust_remote_code=True,
+    device_map="auto",
+)
+```
+
 ---
 
 ## 1) Oracle CoT generation (Method 2)
