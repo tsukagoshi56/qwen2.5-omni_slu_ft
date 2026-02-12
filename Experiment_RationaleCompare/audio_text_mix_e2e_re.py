@@ -3024,9 +3024,9 @@ def main():
     ).to(device)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
 
-    # Enable audio-encoder FT only when explicitly requested; some backbones
-    # (e.g. Qwen2-Audio variants) may expose no trainable params under audio_tower.
-    train_audio_encoder_enabled = bool(args.train_audio_encoder)
+    # Keep prior experiment setting: audio-encoder FT is enabled by default.
+    # If a backbone exposes no matched audio params, we only warn and continue.
+    train_audio_encoder_enabled = True
     audio_matches, projector_matches = configure_audio_trainability(
         model,
         train_audio_encoder=train_audio_encoder_enabled,
