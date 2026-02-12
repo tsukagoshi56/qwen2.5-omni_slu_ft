@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import librosa
 import torch
@@ -36,6 +36,16 @@ from common import (
     write_jsonl,
 )
 from prompts import render_infer_audio_prompt, render_infer_text_prompt
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+try:
+    from train_qwen2_audio_slurp import build_massive_entities, load_speech_massive_split
+except Exception:
+    build_massive_entities = None
+    load_speech_massive_split = None
 
 
 _DEBUG = False
@@ -185,6 +195,184 @@ def _select_input_text(record: Dict[str, Any], use_asr_transcript: bool) -> Tupl
         return _extract_asr_1best_text(record), "asr_1best"
     text = str(record.get("sentence", "") or record.get("text", "") or "").strip()
     return text, "gold_transcript"
+
+
+def _unique_keep_order(values: Sequence[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _extract_massive_audio_path(record: Dict[str, Any]) -> str:
+    direct = record.get("path")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    audio = record.get("audio")
+    if isinstance(audio, dict):
+        path = audio.get("path")
+        if isinstance(path, str) and path.strip():
+            return path.strip()
+    return ""
+
+
+def _massive_entities_to_common(
+    tokens: Sequence[str],
+    labels: Sequence[str],
+    outside_label: str,
+) -> List[Dict[str, str]]:
+    if build_massive_entities is None:
+        raise RuntimeError(
+            "Speech-MASSIVE support requires train_qwen2_audio_slurp.py "
+            "(build_massive_entities/load_speech_massive_split)."
+        )
+    raw_entities = build_massive_entities(tokens, labels, outside_label)
+    entities: List[Dict[str, str]] = []
+    for ent in raw_entities:
+        if not isinstance(ent, dict):
+            continue
+        slot_type = ""
+        slot_value = ""
+        if "type" in ent:
+            slot_type = str(ent.get("type", "")).strip()
+            filler = ent.get("filler")
+            if filler is None:
+                filler = ent.get("filter")
+            if filler is None:
+                filler = ent.get("value")
+            slot_value = "" if filler is None else str(filler).strip()
+        else:
+            for key, value in ent.items():
+                slot_type = str(key).strip()
+                slot_value = "" if value is None else str(value).strip()
+                break
+        if not slot_type:
+            continue
+        entities.append({"type": slot_type, "filler": slot_value})
+    return entities
+
+
+def _normalize_speech_massive_record(
+    record: Dict[str, Any],
+    dataset_config: str,
+    split: str,
+    index: int,
+    transcript_field: str,
+    outside_label: str,
+) -> Dict[str, Any]:
+    transcript = str(
+        record.get(transcript_field)
+        or record.get("utt")
+        or record.get("text")
+        or ""
+    ).strip()
+    scenario = str(record.get("scenario_str") or record.get("scenario") or "").strip()
+    action = str(record.get("intent_str") or record.get("intent") or "").strip()
+    token_values = record.get("tokens") if isinstance(record.get("tokens"), list) else []
+    label_values = record.get("labels") if isinstance(record.get("labels"), list) else []
+    tokens = [str(tok) for tok in token_values]
+    labels = [str(lbl) for lbl in label_values]
+    entities = _massive_entities_to_common(tokens, labels, outside_label) if (tokens and labels) else []
+    audio_path = _extract_massive_audio_path(record)
+    recordings = [{"file": audio_path}] if audio_path else []
+
+    base_id = (
+        record.get("id")
+        or record.get("utt_id")
+        or record.get("audio_id")
+        or os.path.basename(audio_path)
+        or str(index)
+    )
+    slurp_id = f"massive-{dataset_config}-{base_id}"
+
+    return {
+        "slurp_id": slurp_id,
+        "sentence": transcript,
+        "text": transcript,
+        "recordings": recordings,
+        "scenario": scenario,
+        "action": action,
+        "entities": entities,
+        "tokens": [{"surface": tok} for tok in tokens],
+        "massive_tokens": tokens,
+        "massive_labels": labels,
+        "dataset": "speech_massive",
+        "dataset_config": dataset_config,
+        "dataset_split": split,
+    }
+
+
+def _load_speech_massive_items(
+    dataset_name: str,
+    dataset_configs: Sequence[str],
+    split: str,
+    cache_dir: Optional[str],
+    transcript_field: str,
+    outside_label: str,
+) -> List[Dict[str, Any]]:
+    if load_speech_massive_split is None:
+        raise RuntimeError(
+            "Speech-MASSIVE support requires train_qwen2_audio_slurp.py "
+            "(load_speech_massive_split)."
+        )
+
+    items: List[Dict[str, Any]] = []
+    for dataset_config in dataset_configs:
+        ds = load_speech_massive_split(
+            dataset_name=dataset_name,
+            dataset_config=dataset_config,
+            split=split,
+            cache_dir=cache_dir,
+        )
+        for idx, row in enumerate(ds):
+            if not isinstance(row, dict):
+                continue
+            items.append(
+                _normalize_speech_massive_record(
+                    record=row,
+                    dataset_config=dataset_config,
+                    split=split,
+                    index=idx,
+                    transcript_field=transcript_field,
+                    outside_label=outside_label,
+                )
+            )
+    return items
+
+
+def _build_metadata_from_items(items: Sequence[Dict[str, Any]]) -> Dict[str, List[str]]:
+    scenarios: List[str] = []
+    actions: List[str] = []
+    intents: List[str] = []
+    slot_types: List[str] = []
+    for item in items:
+        gold = label_from_record(item)
+        scenario = str(gold.get("scenario", "")).strip()
+        action = str(gold.get("action", "")).strip()
+        if scenario:
+            scenarios.append(scenario)
+        if action:
+            actions.append(action)
+        if scenario or action:
+            intents.append(normalize_intent_label(f"{scenario}_{action}".strip("_")))
+        entities = gold.get("entities", []) if isinstance(gold.get("entities"), list) else []
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            slot_type = str(ent.get("type", "")).strip()
+            if slot_type:
+                slot_types.append(slot_type)
+    return {
+        "scenarios": _unique_keep_order(scenarios),
+        "actions": _unique_keep_order(actions),
+        "intents": _unique_keep_order(intents),
+        "slot_types": _unique_keep_order(slot_types),
+    }
 
 
 def _generate_audio_local(
@@ -433,6 +621,10 @@ def _make_filtered_row(raw_row: Dict[str, Any], coverage_fallback: bool = False)
     recordings = raw_row.get("recordings")
     if raw_row.get("mode") == "audio" and isinstance(recordings, list):
         filtered_row["recordings"] = recordings
+    for key in ("dataset", "dataset_config", "dataset_split"):
+        value = raw_row.get(key)
+        if value is not None and str(value).strip():
+            filtered_row[key] = value
     return filtered_row
 
 
@@ -583,9 +775,16 @@ def _build_filtered_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Success-Filtered CoT (text and audio).")
+    parser.add_argument("--dataset", type=str, choices=["slurp", "speech_massive"], default="slurp")
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
     parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
     parser.add_argument("--audio_dir", type=str, default="slurp/audio/slurp_real")
+    parser.add_argument("--massive_dataset_name", type=str, default="FBK-MT/Speech-MASSIVE")
+    parser.add_argument("--massive_dataset_config", type=str, default="it-IT")
+    parser.add_argument("--massive_split", type=str, default="train_115")
+    parser.add_argument("--massive_cache_dir", type=str, default=None)
+    parser.add_argument("--massive_transcript_field", type=str, default="utt")
+    parser.add_argument("--massive_outside_label", type=str, default="Other")
     parser.add_argument("--output_file", type=str, default=DEFAULT_OUTPUT_FILE)
     parser.add_argument("--filtered_file", type=str, default=DEFAULT_FILTERED_FILE)
     parser.add_argument(
@@ -753,10 +952,24 @@ def main() -> None:
     ):
         worker_procs = _spawn_workers(args.num_workers, sys.argv[1:])
 
-    metadata = load_metadata(metadata_path)
+    if args.dataset == "speech_massive":
+        dataset_configs = [cfg.strip() for cfg in args.massive_dataset_config.split(",") if cfg.strip()]
+        if not dataset_configs:
+            raise ValueError("massive_dataset_config must contain at least one config (e.g., it-IT).")
+        items = _load_speech_massive_items(
+            dataset_name=args.massive_dataset_name,
+            dataset_configs=dataset_configs,
+            split=args.massive_split,
+            cache_dir=args.massive_cache_dir,
+            transcript_field=args.massive_transcript_field,
+            outside_label=args.massive_outside_label,
+        )
+        metadata = _build_metadata_from_items(items)
+    else:
+        items = read_jsonl(input_path)
+        metadata = load_metadata(metadata_path)
     db_definitions = build_db_definitions(metadata)
 
-    items = read_jsonl(input_path)
     if args.smoke:
         args.limit = 100
     if args.limit:
@@ -885,6 +1098,9 @@ def main() -> None:
                 "sentence": gold_text,
                 "input_text_source": text_source,
                 "recordings": recordings,
+                "dataset": record.get("dataset", args.dataset),
+                "dataset_config": record.get("dataset_config", ""),
+                "dataset_split": record.get("dataset_split", ""),
                 "mode": mode,
                 "method": "sf-cot",
                 "rationale_text": formatted_output.strip(),
