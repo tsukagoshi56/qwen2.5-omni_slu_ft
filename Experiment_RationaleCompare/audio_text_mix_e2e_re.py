@@ -350,6 +350,93 @@ def render_chat_template_as_text_or_raise(
     raise RuntimeError(f"Failed to render chat template as text. Details: {detail}")
 
 
+def _normalize_tokenized_chat_output(out: Any) -> Optional[Dict[str, torch.Tensor]]:
+    if out is None:
+        return None
+    if torch.is_tensor(out):
+        ids = out
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids, dtype=torch.long)}
+    if isinstance(out, list):
+        try:
+            ids = torch.tensor(out, dtype=torch.long)
+        except Exception:
+            return None
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids, dtype=torch.long)}
+    if not isinstance(out, dict):
+        return None
+
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in out.items():
+        if torch.is_tensor(value):
+            tensor = value
+        else:
+            try:
+                tensor = torch.tensor(value)
+            except Exception:
+                continue
+        if key in {"input_ids", "attention_mask"} and tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0)
+        normalized[key] = tensor
+
+    if "input_ids" not in normalized:
+        return None
+    if "attention_mask" not in normalized:
+        normalized["attention_mask"] = torch.ones_like(normalized["input_ids"], dtype=torch.long)
+    return normalized
+
+
+def _apply_chat_template_tokenized_or_raise(
+    processor: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    add_generation_prompt: bool = True,
+) -> Dict[str, torch.Tensor]:
+    owner = _chat_template_owner_or_raise(processor)
+    attempts = [
+        {
+            "tokenize": True,
+            "add_generation_prompt": add_generation_prompt,
+            "return_dict": True,
+            "return_tensors": "pt",
+        },
+        {
+            "tokenize": True,
+            "add_generation_prompt": add_generation_prompt,
+            "return_tensors": "pt",
+        },
+        {
+            "tokenize": True,
+            "add_generation_prompt": add_generation_prompt,
+        },
+    ]
+    errors: List[str] = []
+    for kwargs in attempts:
+        try:
+            out = owner.apply_chat_template(messages, **kwargs)
+            normalized = _normalize_tokenized_chat_output(out)
+            if normalized is not None:
+                return normalized
+        except Exception as exc:
+            errors.append(f"{kwargs}: {exc}")
+    detail = " | ".join(errors) if errors else "no tokenized chat-template variant accepted"
+    raise RuntimeError(f"Failed to tokenize chat template. Details: {detail}")
+
+
+def _audio_chat_content_variants(prompt_text: str, audio_ref: str) -> List[List[Dict[str, Any]]]:
+    ref = str(audio_ref or "placeholder")
+    return [
+        [{"type": "text", "text": prompt_text}, {"type": "audio", "path": ref}],
+        [{"type": "audio", "path": ref}, {"type": "text", "text": prompt_text}],
+        [{"type": "audio", "audio_url": ref}, {"type": "text", "text": prompt_text}],
+        [{"type": "audio", "url": ref}, {"type": "text", "text": prompt_text}],
+        [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}],
+    ]
+
+
 def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
     if hasattr(processor, "decode"):
         try:
@@ -467,7 +554,7 @@ def _ensure_feature_masks_for_generation(inputs: Dict[str, torch.Tensor]) -> Dic
         return inputs
     if feat.dim() >= 2:
         bsz = int(feat.shape[0])
-        tlen = int(feat.shape[1])
+        tlen = int(max(feat.shape[1:]))
     else:
         bsz = 1
         tlen = int(feat.shape[0])
@@ -2152,64 +2239,78 @@ class InferenceCollator:
         sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
         is_audio_batch = batch[0].get("audio_path") is not None
 
-        texts = []
-        audios = []
-        valid_items = []
+        net_inputs_list: List[Dict[str, torch.Tensor]] = []
+        valid_items: List[Dict[str, Any]] = []
 
         for item in batch:
-            if item.get("audio_path"):
-                try:
-                    audio, _ = load_audio_or_raise(item["audio_path"], sr=sr)
-                    audios.append(audio)
+            try:
+                if is_audio_batch:
+                    audio_path = item.get("audio_path")
+                    if not audio_path:
+                        continue
                     prompt_text = build_prompt_text(item)
-                    user_content = [
-                        {"type": "audio", "audio_url": "placeholder"},
-                        {"type": "text", "text": prompt_text},
-                    ]
-                except Exception as e:
-                    logger.warning(f"Failed to load audio for {item.get('id')}: {e}")
+                    net_inputs: Optional[Dict[str, torch.Tensor]] = None
+
+                    for content in _audio_chat_content_variants(prompt_text, audio_path):
+                        messages = [{"role": "user", "content": content}]
+                        try:
+                            net_inputs = _apply_chat_template_tokenized_or_raise(
+                                self.processor,
+                                messages,
+                                add_generation_prompt=True,
+                            )
+                            break
+                        except Exception:
+                            continue
+
+                    if net_inputs is None:
+                        audio, _ = load_audio_or_raise(audio_path, sr=sr)
+                        user_content = [
+                            {"type": "audio", "audio_url": "placeholder"},
+                            {"type": "text", "text": prompt_text},
+                        ]
+                        text_input = render_chat_template_as_text_or_raise(
+                            self.processor,
+                            [{"role": "user", "content": user_content}],
+                            add_generation_prompt=True,
+                        )
+                        net_inputs = self.processor(
+                            text=text_input,
+                            audio=[audio],
+                            sampling_rate=sr,
+                            return_tensors="pt",
+                        )
+                        if "input_ids" not in net_inputs:
+                            tok = tokenizer(text_input, return_tensors="pt")
+                            if "input_ids" in tok:
+                                net_inputs["input_ids"] = tok["input_ids"]
+                            if "attention_mask" in tok:
+                                net_inputs["attention_mask"] = tok["attention_mask"]
+                else:
+                    prompt_text = build_prompt_text(item, include_transcript=True)
+                    text_input = render_chat_template_as_text_or_raise(
+                        self.processor,
+                        [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
+                        add_generation_prompt=True,
+                    )
+                    net_inputs = tokenizer(text_input, return_tensors="pt")
+
+                net_inputs = {k: v for k, v in net_inputs.items() if torch.is_tensor(v)}
+                if "input_ids" not in net_inputs:
+                    logger.warning("Skip item %s because input_ids is missing after encoding.", item.get("id"))
                     continue
-            else:
-                prompt_text = build_prompt_text(item, include_transcript=True)
-                user_content = [{"type": "text", "text": prompt_text}]
+                if "attention_mask" not in net_inputs:
+                    net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
+                net_inputs = _ensure_feature_masks_for_generation(net_inputs)
+                net_inputs_list.append(net_inputs)
+                valid_items.append(item)
+            except Exception as e:
+                logger.warning("Failed to build inference input for %s: %s", item.get("id"), e)
+                continue
 
-            text_input = render_chat_template_as_text_or_raise(
-                self.processor,
-                [{"role": "user", "content": user_content}],
-                add_generation_prompt=True,
-            )
-            texts.append(text_input)
-            valid_items.append(item)
-
-        if not texts:
+        if not net_inputs_list:
             return {}
-
-        processor_kwargs: Dict[str, Any] = {
-            "text": texts,
-            "sampling_rate": sr,
-            "padding": True,
-            "return_tensors": "pt",
-        }
-        if is_audio_batch:
-            processor_kwargs["audio"] = audios
-
-        inputs = self.processor(**processor_kwargs)
-        if "input_ids" not in inputs:
-            tok = get_tokenizer_or_raise(self.processor)(
-                texts,
-                padding=True,
-                return_tensors="pt",
-            )
-            if "input_ids" in tok:
-                inputs["input_ids"] = tok["input_ids"]
-            if "attention_mask" in tok:
-                inputs["attention_mask"] = tok["attention_mask"]
-        # Avoid passing non-tensor/None entries (can break downstream generate in some model impls).
-        inputs = {k: v for k, v in inputs.items() if torch.is_tensor(v)}
-        if "attention_mask" not in inputs and "input_ids" in inputs:
-            inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-        inputs = _ensure_feature_masks_for_generation(inputs)
-        return {"net_inputs": inputs, "items": valid_items}
+        return {"net_inputs_list": net_inputs_list, "items": valid_items}
 
 
 def _generate_batch(
@@ -2222,36 +2323,40 @@ def _generate_batch(
     if not batch_data:
         return []
 
-    net_inputs = batch_data["net_inputs"]
+    net_inputs_list = batch_data.get("net_inputs_list")
+    if net_inputs_list is None:
+        net_inputs = batch_data.get("net_inputs")
+        net_inputs_list = [net_inputs] if net_inputs is not None else []
     items = batch_data["items"]
     tokenizer = get_tokenizer_or_raise(processor)
 
-    net_inputs = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
-    if "input_ids" not in net_inputs:
-        logger.warning("Skip generation batch because input_ids is missing.")
-        return []
-    if "attention_mask" not in net_inputs:
-        net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
-    net_inputs = _ensure_feature_masks_for_generation(net_inputs)
-
-    output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
-        model,
-        net_inputs=net_inputs,
-        max_new_tokens=max_new_tokens,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-    if dropped:
-        logger.warning(
-            "Dropped unsupported model kwargs during inference: %s",
-            sorted(set(dropped)),
-        )
-
-    input_len = net_inputs["input_ids"].shape[1]
-    generated_ids = output_ids[:, input_len:]
-    raw_outputs = batch_decode_token_ids(processor, generated_ids)
-
     results: List[Dict[str, Any]] = []
-    for item, raw_output in zip(items, raw_outputs):
+    for item, net_inputs in zip(items, net_inputs_list):
+        if not isinstance(net_inputs, dict):
+            continue
+        net_inputs = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
+        if "input_ids" not in net_inputs:
+            logger.warning("Skip generation item %s because input_ids is missing.", item.get("id"))
+            continue
+        if "attention_mask" not in net_inputs:
+            net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
+        net_inputs = _ensure_feature_masks_for_generation(net_inputs)
+
+        output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
+            model,
+            net_inputs=net_inputs,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if dropped:
+            logger.warning(
+                "Dropped unsupported model kwargs during inference id=%s: %s",
+                item.get("id"),
+                sorted(set(dropped)),
+            )
+
+        input_len = int(net_inputs["input_ids"].shape[1])
+        raw_output = decode_token_ids(processor, output_ids[0][input_len:])
         pred_label = parse_prediction_label(raw_output)
         wer_score = calculate_wer(item.get("transcript", ""), raw_output)
 
