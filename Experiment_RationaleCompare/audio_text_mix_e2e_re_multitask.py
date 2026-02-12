@@ -984,47 +984,20 @@ def build_prompt_text(
     task_mode = normalize_task_mode(item.get("task_mode", "cot"))
     if task_mode == "label":
         output_format = PROMPT_OUTPUT_FORMAT_LABEL_ONLY
-        mode_rule = "Output only J. Do not output C or R."
     elif task_mode == "candidates":
         output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
-        mode_rule = "Output C and J only. Do not output R."
     else:
         output_format = PROMPT_OUTPUT_FORMAT
-        mode_rule = "Output C, R, and J in this order."
-
-    user_prompt = ""
-    if include_user_prompt:
-        user_prompt = str(item.get("prompt_text", "") or "").strip()
-        user_prompt = re.sub(r"\s+", " ", user_prompt)
-    if not user_prompt:
-        user_prompt = "Predict SLU labels from the given input."
-    db_definitions = str(PROMPT_DB_DEFINITIONS or "").strip()
-    if not db_definitions:
-        db_definitions = "Intents: (none)\nSlot Types: (none)"
 
     if include_transcript and transcript:
         return (
             f"{SYSTEM_PROMPT_TEXT}\n\n"
-            "[Task]\n"
-            f"- Mode: {task_mode}\n"
-            f"- {mode_rule}\n\n"
-            "[Instruction]\n"
-            f"- {user_prompt}\n\n"
-            "[DB Definitions]\n"
-            f"{db_definitions}\n\n"
             "[Input Data]\n"
             f"- Transcript: {transcript}\n\n"
             f"{output_format}"
         )
     return (
         f"{SYSTEM_PROMPT_AUDIO}\n\n"
-        "[Task]\n"
-        f"- Mode: {task_mode}\n"
-        f"- {mode_rule}\n\n"
-        "[Instruction]\n"
-        f"- {user_prompt}\n\n"
-        "[DB Definitions]\n"
-        f"{db_definitions}\n\n"
         "[Input Data]\n"
         "- Audio: <AUDIO>\n\n"
         f"{output_format}"
@@ -2985,6 +2958,17 @@ def run_distributed_inference(
                     os.remove(fname)
                 except Exception as exc:
                     logger.error("Merge error %s: %s", fname, exc)
+        merged_count = 0
+        with open(output_path, "r", encoding="utf-8") as infile:
+            for line in infile:
+                if line.strip():
+                    merged_count += 1
+        logger.info("Merged predictions: %d / %d items", merged_count, len(items))
+        if len(items) > 0 and merged_count == 0:
+            raise RuntimeError(
+                "Inference produced 0 predictions although test items were loaded. "
+                "Check warnings/errors above."
+            )
 
 
 def save_label_only_predictions(full_prediction_path: str, label_only_path: str):
@@ -3550,6 +3534,10 @@ def main():
             logger.warning("metadata_file not found: %s (using empty DB Definitions)", args.metadata_file)
         if args.text_only:
             logger.info("text_only=True: all splits will use text-only items.")
+        logger.info(
+            "Train/eval target mode: label=J only, cot=%s",
+            "C+J (no R)" if args.train_candidates_only else "C/R/J",
+        )
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
@@ -3793,6 +3781,11 @@ def main():
             trainer_kwargs["tokenizer"] = tokenizer
         elif "processing_class" in trainer_init_params:
             trainer_kwargs["processing_class"] = tokenizer
+        else:
+            logger.warning(
+                "Trainer init has neither 'tokenizer' nor 'processing_class'. "
+                "Proceeding without explicitly passing tokenizer."
+            )
         trainer = CustomTrainer(**trainer_kwargs)
 
         trainer.train()

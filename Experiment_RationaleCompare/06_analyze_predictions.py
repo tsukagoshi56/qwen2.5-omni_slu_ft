@@ -642,15 +642,22 @@ def print_error_breakdown_comparison(models: List[ModelResult]):
         for m in models:
             row.append(str(m.error_breakdown.get(t, 0)))
         for i, m in enumerate(models):
-            row.append(_pct(m.error_breakdown.get(t, 0), totals[i]))
+            row.append(_pct(m.error_breakdown.get(t, 0), m.n_matched))
         rows.append(row)
     # total row
-    row_total: List[Any] = ["TOTAL"]
+    row_total: List[Any] = ["TOTAL errors"]
     for tot in totals:
         row_total.append(str(tot))
     for i, m in enumerate(models):
         row_total.append(_pct(totals[i], m.n_matched))
     rows.append(row_total)
+    # correct row
+    row_correct: List[Any] = ["CORRECT"]
+    for i, m in enumerate(models):
+        row_correct.append(str(m.n_matched - totals[i]))
+    for i, m in enumerate(models):
+        row_correct.append(_pct(m.n_matched - totals[i], m.n_matched))
+    rows.append(row_correct)
     print_table(headers, rows)
 
 
