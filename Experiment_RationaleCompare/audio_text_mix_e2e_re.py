@@ -2188,7 +2188,11 @@ class CustomTrainer(Trainer):
             # AF3 occasionally throws shape mismatches around embed_positions when stale
             # position-related kwargs are passed through. Retry once with those removed.
             message = str(exc or "")
-            if "expanded size of the tensor" not in message:
+            is_shape_mismatch = (
+                "expanded size of the tensor" in message
+                or "must match the size" in message
+            )
+            if not is_shape_mismatch:
                 raise
 
             retry_inputs = dict(inputs)
