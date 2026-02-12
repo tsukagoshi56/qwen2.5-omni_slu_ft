@@ -517,6 +517,31 @@ def _audio_chat_content_variants(prompt_text: str, audio_ref: str) -> List[List[
     ]
 
 
+def _is_qwen_processor_or_tokenizer(processor: Any, tokenizer: Optional[Any] = None) -> bool:
+    probes: List[str] = []
+    for obj in (processor, tokenizer, getattr(processor, "tokenizer", None)):
+        if obj is None:
+            continue
+        probes.append(type(obj).__name__.lower())
+        for attr in ("name_or_path", "_name_or_path", "model_type"):
+            try:
+                value = getattr(obj, attr, None)
+            except Exception:
+                value = None
+            if isinstance(value, str) and value.strip():
+                probes.append(value.lower())
+        cfg = getattr(obj, "config", None)
+        if cfg is not None:
+            for attr in ("name_or_path", "_name_or_path", "model_type"):
+                try:
+                    value = getattr(cfg, attr, None)
+                except Exception:
+                    value = None
+                if isinstance(value, str) and value.strip():
+                    probes.append(value.lower())
+    return any("qwen" in text for text in probes)
+
+
 def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
     if hasattr(processor, "decode"):
         try:
@@ -2444,6 +2469,7 @@ class InferenceCollator:
             return {}
         tokenizer = get_tokenizer_or_raise(self.processor)
         tokenizer.padding_side = "left"
+        use_qwen_audio_flow = _is_qwen_processor_or_tokenizer(self.processor, tokenizer)
         sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
         is_audio_batch = batch[0].get("audio_path") is not None
 
@@ -2457,21 +2483,7 @@ class InferenceCollator:
                     if not audio_path:
                         continue
                     prompt_text = build_prompt_text(item)
-                    net_inputs: Optional[Dict[str, torch.Tensor]] = None
-
-                    for content in _audio_chat_content_variants(prompt_text, audio_path):
-                        messages = [{"role": "user", "content": content}]
-                        try:
-                            net_inputs = _apply_chat_template_tokenized_or_raise(
-                                self.processor,
-                                messages,
-                                add_generation_prompt=True,
-                            )
-                            break
-                        except Exception:
-                            continue
-
-                    if net_inputs is None:
+                    if use_qwen_audio_flow:
                         audio, _ = load_audio_or_raise(audio_path, sr=sr)
                         user_content = [
                             {"type": "audio", "audio_url": "placeholder"},
@@ -2494,6 +2506,43 @@ class InferenceCollator:
                                 net_inputs["input_ids"] = tok["input_ids"]
                             if "attention_mask" in tok:
                                 net_inputs["attention_mask"] = tok["attention_mask"]
+                    else:
+                        net_inputs = None
+                        for content in _audio_chat_content_variants(prompt_text, audio_path):
+                            messages = [{"role": "user", "content": content}]
+                            try:
+                                net_inputs = _apply_chat_template_tokenized_or_raise(
+                                    self.processor,
+                                    messages,
+                                    add_generation_prompt=True,
+                                )
+                                break
+                            except Exception:
+                                continue
+
+                        if net_inputs is None:
+                            audio, _ = load_audio_or_raise(audio_path, sr=sr)
+                            user_content = [
+                                {"type": "audio", "audio_url": "placeholder"},
+                                {"type": "text", "text": prompt_text},
+                            ]
+                            text_input = render_chat_template_as_text_or_raise(
+                                self.processor,
+                                [{"role": "user", "content": user_content}],
+                                add_generation_prompt=True,
+                            )
+                            net_inputs = self.processor(
+                                text=text_input,
+                                audio=[audio],
+                                sampling_rate=sr,
+                                return_tensors="pt",
+                            )
+                            if "input_ids" not in net_inputs:
+                                tok = tokenizer(text_input, return_tensors="pt")
+                                if "input_ids" in tok:
+                                    net_inputs["input_ids"] = tok["input_ids"]
+                                if "attention_mask" in tok:
+                                    net_inputs["attention_mask"] = tok["attention_mask"]
                 else:
                     prompt_text = build_prompt_text(item, include_transcript=True)
                     text_input = render_chat_template_as_text_or_raise(
