@@ -1554,17 +1554,23 @@ class SmartCollator:
     ignore_index: int = -100
     debug: bool = False
     _print_count: int = 0
+    _audio_fallback_warn_count: int = 0
 
     def __post_init__(self):
         self._print_count = 0
+        self._audio_fallback_warn_count = 0
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0:
-            return {}
+            raise RuntimeError("SmartCollator received an empty batch.")
         is_audio_batch = batch[0].get("audio_path") is not None
         if is_audio_batch:
-            return self._collate_audio(batch)
-        return self._collate_text(batch)
+            out = self._collate_audio(batch)
+        else:
+            out = self._collate_text(batch)
+        if not out or ("input_ids" not in out) or ("labels" not in out):
+            raise RuntimeError("SmartCollator produced an invalid batch without input_ids/labels.")
+        return out
 
     def _build_audio_chat(self, item: Dict[str, Any]) -> str:
         prompt_text = build_prompt_text(item)
@@ -1633,7 +1639,17 @@ class SmartCollator:
                 aux_tensors.setdefault(key, []).append(tensor)
 
         if not input_ids_list:
-            return {}
+            # Keep training alive when every audio sample in this batch fails decoding/processor parsing.
+            # We degrade to text-only for this step instead of returning an empty dict.
+            if self._audio_fallback_warn_count < 20:
+                batch_ids = [str(x.get("id", "")) for x in batch[:8]]
+                logger.warning(
+                    "All audio samples in a batch were skipped; fallback to text-only. ids(head)=%s",
+                    batch_ids,
+                )
+                self._audio_fallback_warn_count += 1
+            text_fallback_batch = [{**item, "audio_path": None} for item in batch]
+            return self._collate_text(text_fallback_batch)
 
         batch_dict: Dict[str, torch.Tensor] = {
             "input_ids": pad_sequence(
@@ -1689,6 +1705,9 @@ class SmartCollator:
             lbs[:prompt_len] = self.ignore_index
             input_ids_list.append(ids)
             labels_list.append(lbs)
+
+        if not input_ids_list:
+            raise RuntimeError("Text collator produced an empty batch after filtering.")
 
         return {
             "input_ids": pad_sequence(
