@@ -1880,6 +1880,24 @@ class SampleGenerationCallback(TrainerCallback):
                 elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
                     inputs["feature_attention_mask"] = inputs["input_features_mask"]
 
+                # --- Align mask length to input_features time dimension ---
+                if "input_features" in inputs:
+                    feat = inputs["input_features"]
+                    feat_time = feat.shape[1] if feat.dim() >= 2 else feat.shape[0]
+                    for mask_key in ("feature_attention_mask", "input_features_mask"):
+                        if mask_key in inputs:
+                            m = inputs[mask_key]
+                            mask_time = m.shape[-1]
+                            if mask_time != feat_time:
+                                if mask_time > feat_time:
+                                    inputs[mask_key] = m[..., :feat_time]
+                                else:
+                                    pad = torch.zeros(
+                                        *m.shape[:-1], feat_time - mask_time,
+                                        dtype=m.dtype, device=m.device,
+                                    )
+                                    inputs[mask_key] = torch.cat([m, pad], dim=-1)
+
                 output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
                     self.model,
                     net_inputs=inputs,
@@ -2205,6 +2223,23 @@ class InferenceCollator:
             inputs["input_features_mask"] = inputs["feature_attention_mask"]
         elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
             inputs["feature_attention_mask"] = inputs["input_features_mask"]
+        # --- Align mask length to input_features time dimension ---
+        if "input_features" in inputs:
+            feat = inputs["input_features"]
+            feat_time = feat.shape[1] if feat.dim() >= 2 else feat.shape[0]
+            for mask_key in ("feature_attention_mask", "input_features_mask"):
+                if mask_key in inputs:
+                    m = inputs[mask_key]
+                    mask_time = m.shape[-1]
+                    if mask_time != feat_time:
+                        if mask_time > feat_time:
+                            inputs[mask_key] = m[..., :feat_time]
+                        else:
+                            pad = torch.zeros(
+                                *m.shape[:-1], feat_time - mask_time,
+                                dtype=m.dtype, device=m.device,
+                            )
+                            inputs[mask_key] = torch.cat([m, pad], dim=-1)
         return {"net_inputs": inputs, "items": valid_items}
 
 
@@ -2252,6 +2287,28 @@ def _generate_batch(
         net_inputs["input_features_mask"] = net_inputs["feature_attention_mask"]
     elif "input_features_mask" in net_inputs and "feature_attention_mask" not in net_inputs:
         net_inputs["feature_attention_mask"] = net_inputs["input_features_mask"]
+
+    # --- Align mask length to input_features time dimension ---
+    if "input_features" in net_inputs:
+        feat = net_inputs["input_features"]
+        feat_time = feat.shape[1] if feat.dim() >= 2 else feat.shape[0]
+        for mask_key in ("feature_attention_mask", "input_features_mask"):
+            if mask_key in net_inputs:
+                m = net_inputs[mask_key]
+                mask_time = m.shape[-1]
+                if mask_time != feat_time:
+                    logger.debug(
+                        "Realigning %s from %d to %d to match input_features.",
+                        mask_key, mask_time, feat_time,
+                    )
+                    if mask_time > feat_time:
+                        net_inputs[mask_key] = m[..., :feat_time]
+                    else:
+                        pad = torch.zeros(
+                            *m.shape[:-1], feat_time - mask_time,
+                            dtype=m.dtype, device=m.device,
+                        )
+                        net_inputs[mask_key] = torch.cat([m, pad], dim=-1)
 
     output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
         model,
