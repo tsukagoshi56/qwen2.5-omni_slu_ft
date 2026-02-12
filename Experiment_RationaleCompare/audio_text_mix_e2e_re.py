@@ -23,7 +23,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
-import transformers as hf_transformers
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
@@ -74,14 +73,6 @@ PROJECTOR_MODULE_NAME_HINTS = (
     "mm_projector",
 )
 _PROCESSOR_TOKENIZER_REGISTRY: Dict[int, Any] = {}
-
-
-def _optional_transformers_class(*names: str) -> Optional[Any]:
-    for name in names:
-        cls = getattr(hf_transformers, name, None)
-        if cls is not None:
-            return cls
-    return None
 
 
 class ProcessorWithTokenizerProxy:
@@ -200,13 +191,6 @@ def load_audio_model_from_pretrained(
 ):
     model_name_lc = str(model_name_or_path).lower()
     attempts: List[Tuple[str, Any]] = []
-    if "voxtral" in model_name_lc:
-        voxtral_cls = _optional_transformers_class(
-            "VoxtralForConditionalGeneration",
-            "VoxtralForCausalLM",
-        )
-        if voxtral_cls is not None:
-            attempts.append((voxtral_cls.__name__, voxtral_cls))
     if "audio-flamingo-3" in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
         attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
     attempts.extend(
@@ -2901,7 +2885,6 @@ def main():
         dist.init_process_group(backend="nccl")
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-        torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
     else:
         rank = 0
@@ -3010,26 +2993,24 @@ def main():
     ).to(device)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
 
-    # Keep prior experiment setting: audio-encoder FT is enabled by default.
-    # If a backbone exposes no matched audio params, we only warn and continue.
-    train_audio_encoder_enabled = True
+    # Keep audio modules trainable by default and keep projector trainable, as in prior behavior.
     audio_matches, projector_matches = configure_audio_trainability(
         model,
-        train_audio_encoder=train_audio_encoder_enabled,
+        train_audio_encoder=True,
         freeze_projector=False,
     )
     if rank == 0:
         logger.info(
             "Trainability | audio_params=%d (enabled=%s), projector_params=%d (enabled=%s)",
             audio_matches,
-            train_audio_encoder_enabled,
+            True,
             projector_matches,
             True,
         )
-        if train_audio_encoder_enabled and audio_matches == 0:
+        if audio_matches == 0:
             logger.warning(
                 "No audio-related parameters were detected by name hints. "
-                "Proceeding without audio-encoder FT for this run."
+                "Model loading succeeded, but verify fine-tuning targets for this architecture."
             )
 
     training_args = TrainingArguments(
