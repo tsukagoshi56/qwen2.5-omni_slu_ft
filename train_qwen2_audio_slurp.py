@@ -285,16 +285,29 @@ def load_speech_massive_split(
     cache_dir: Optional[str],
 ) -> Any:
     try:
-        from datasets import Audio, load_dataset
+        from datasets import Audio, DatasetDict, DownloadConfig, load_dataset, load_from_disk
     except Exception as exc:
         raise RuntimeError("datasets is required for Speech-MASSIVE.") from exc
 
-    dataset = load_dataset(
-        dataset_name,
-        dataset_config,
-        split=split,
-        cache_dir=cache_dir,
-    )
+    if os.path.isdir(dataset_name):
+        dataset = load_from_disk(dataset_name)
+        if isinstance(dataset, DatasetDict):
+            if split not in dataset:
+                available = ", ".join(dataset.keys())
+                raise ValueError(
+                    f"Split '{split}' not found in local dataset '{dataset_name}'. "
+                    f"Available splits: {available}"
+                )
+            dataset = dataset[split]
+    else:
+        dataset = load_dataset(
+            dataset_name,
+            dataset_config,
+            split=split,
+            cache_dir=cache_dir,
+            download_config=DownloadConfig(local_files_only=True),
+            download_mode="reuse_dataset_if_exists",
+        )
     if "audio" in dataset.column_names:
         dataset = dataset.cast_column("audio", Audio(decode=False))
     return dataset
