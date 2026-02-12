@@ -16,6 +16,21 @@ from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallb
 
 # Performance: Enable debug output via environment variable
 _DEBUG_AUDIO = os.environ.get("DEBUG_AUDIO", "0") == "1"
+_DEBUG_SPEECH_MASSIVE = os.environ.get("DEBUG_SPEECH_MASSIVE", "0") == "1"
+
+
+def _debug_speech_massive(message: str) -> None:
+    if _DEBUG_SPEECH_MASSIVE:
+        print(f"[speech-massive-debug] {message}", flush=True)
+
+
+def _expand_path_like(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return text
+    return os.path.abspath(os.path.expanduser(text))
 
 try:
     from transformers import Qwen2AudioForConditionalGeneration
@@ -289,25 +304,63 @@ def load_speech_massive_split(
     except Exception as exc:
         raise RuntimeError("datasets is required for Speech-MASSIVE.") from exc
 
-    if os.path.isdir(dataset_name):
-        dataset = load_from_disk(dataset_name)
+    raw_dataset_name = str(dataset_name or "").strip()
+    expanded_dataset_name = _expand_path_like(raw_dataset_name) or raw_dataset_name
+    expanded_cache_dir = _expand_path_like(cache_dir)
+
+    _debug_speech_massive(
+        "load request: "
+        f"dataset_name(raw)={raw_dataset_name!r}, "
+        f"dataset_name(expanded)={expanded_dataset_name!r}, "
+        f"dataset_config={dataset_config!r}, split={split!r}, "
+        f"cache_dir(raw)={cache_dir!r}, cache_dir(expanded)={expanded_cache_dir!r}"
+    )
+    _debug_speech_massive(
+        "offline env: "
+        f"HF_DATASETS_OFFLINE={os.environ.get('HF_DATASETS_OFFLINE')!r}, "
+        f"HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE')!r}, "
+        f"TRANSFORMERS_OFFLINE={os.environ.get('TRANSFORMERS_OFFLINE')!r}"
+    )
+
+    if os.path.isdir(expanded_dataset_name):
+        _debug_speech_massive(f"loading local dataset directory via load_from_disk: {expanded_dataset_name}")
+        dataset = load_from_disk(expanded_dataset_name)
         if isinstance(dataset, DatasetDict):
             if split not in dataset:
                 available = ", ".join(dataset.keys())
                 raise ValueError(
-                    f"Split '{split}' not found in local dataset '{dataset_name}'. "
+                    f"Split '{split}' not found in local dataset '{expanded_dataset_name}'. "
                     f"Available splits: {available}"
                 )
             dataset = dataset[split]
     else:
-        dataset = load_dataset(
-            dataset_name,
-            dataset_config,
-            split=split,
-            cache_dir=cache_dir,
-            download_config=DownloadConfig(local_files_only=True),
-            download_mode="reuse_dataset_if_exists",
+        if raw_dataset_name.startswith(("~", ".", os.path.sep)):
+            raise FileNotFoundError(
+                f"Local dataset path does not exist: {raw_dataset_name!r} "
+                f"(expanded: {expanded_dataset_name!r})"
+            )
+        _debug_speech_massive(
+            "loading HuggingFace dataset with local_files_only=True "
+            "(no network download should occur)"
         )
+        try:
+            dataset = load_dataset(
+                raw_dataset_name,
+                dataset_config,
+                split=split,
+                cache_dir=expanded_cache_dir,
+                download_config=DownloadConfig(local_files_only=True),
+                download_mode="reuse_dataset_if_exists",
+            )
+        except Exception as exc:
+            _debug_speech_massive(f"load_dataset failed: {type(exc).__name__}: {exc}")
+            raise RuntimeError(
+                "Failed to load Speech-MASSIVE with local_files_only=True. "
+                f"dataset_name={raw_dataset_name!r}, dataset_config={dataset_config!r}, "
+                f"split={split!r}, cache_dir={expanded_cache_dir!r}. "
+                "If you prepared a local dataset directory with save_to_disk(), pass that path "
+                "to --massive_dataset_name."
+            ) from exc
     if "audio" in dataset.column_names:
         dataset = dataset.cast_column("audio", Audio(decode=False))
     return dataset
@@ -916,6 +969,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--massive_train_split", default="train_115")
     parser.add_argument("--massive_eval_split", default="validation")
     parser.add_argument("--massive_cache_dir", default=None)
+    parser.add_argument(
+        "--debug_speech_massive",
+        action="store_true",
+        help="Print detailed diagnostics for Speech-MASSIVE loading and offline flags.",
+    )
     parser.add_argument("--massive_transcript_field", default="utt")
     parser.add_argument("--massive_outside_label", default="Other")
     parser.add_argument("--train_file", default="train.jsonl")
@@ -1047,6 +1105,8 @@ def main() -> None:
     parser = build_arg_parser()
     parser.add_argument("--partition_audio", action="store_true", help="Partition audio data across epochs (1/N per epoch)")
     args = parser.parse_args()
+    global _DEBUG_SPEECH_MASSIVE
+    _DEBUG_SPEECH_MASSIVE = bool(_DEBUG_SPEECH_MASSIVE or args.debug_speech_massive)
     set_seed(args.seed)
 
     eval_items: List[Dict[str, Any]] = []
@@ -1132,7 +1192,22 @@ def main() -> None:
             train_text_only=args.train_text_only,
         )
 
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True, fix_mistral_regex=True)
+    raw_model_name = str(args.model_name_or_path or "").strip()
+    expanded_model_path = _expand_path_like(raw_model_name) or raw_model_name
+    model_source = expanded_model_path if os.path.exists(expanded_model_path) else raw_model_name
+    _debug_speech_massive(
+        "model load request: "
+        f"model_name_or_path(raw)={raw_model_name!r}, "
+        f"model_name_or_path(expanded)={expanded_model_path!r}, "
+        f"selected_source={model_source!r}, "
+        f"source_exists={os.path.exists(expanded_model_path)}"
+    )
+    if model_source == raw_model_name and not os.path.exists(expanded_model_path):
+        _debug_speech_massive(
+            "model source is not a local directory; transformers.from_pretrained may consult Hugging Face Hub."
+        )
+
+    processor = AutoProcessor.from_pretrained(model_source, trust_remote_code=True, fix_mistral_regex=True)
     sampling_rate = None
     if hasattr(processor, "feature_extractor") and hasattr(
         processor.feature_extractor, "sampling_rate"
@@ -1156,9 +1231,7 @@ def main() -> None:
     }
 
 
-    model = MODEL_CLS.from_pretrained(
-        args.model_name_or_path, **model_kwargs
-    )
+    model = MODEL_CLS.from_pretrained(model_source, **model_kwargs)
     
     # Critical: Resize embeddings if tokenizer size > model vocab size
     # This ensures consistency for any added special tokens
