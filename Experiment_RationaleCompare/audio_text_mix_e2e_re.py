@@ -502,6 +502,7 @@ def _generate_with_retry_drop_unused_kwargs(
     pad_token_id: Optional[int],
 ) -> Tuple[torch.Tensor, List[str]]:
     working = dict(net_inputs)
+    working = _cast_floating_tensors_to_model_dtype(working, model)
     dropped: List[str] = []
     for _ in range(6):
         try:
@@ -532,6 +533,35 @@ def _generate_with_retry_drop_unused_kwargs(
     raise RuntimeError(
         f"generate() retry limit exceeded while dropping unsupported kwargs. dropped={dropped}"
     )
+
+
+def _model_floating_dtype(model: Any) -> Optional[torch.dtype]:
+    dtype = getattr(model, "dtype", None)
+    if isinstance(dtype, torch.dtype) and torch.is_floating_point(torch.empty((), dtype=dtype)):
+        return dtype
+    try:
+        for p in model.parameters():
+            if torch.is_tensor(p) and torch.is_floating_point(p):
+                return p.dtype
+    except Exception:
+        pass
+    return None
+
+
+def _cast_floating_tensors_to_model_dtype(
+    inputs: Dict[str, Any],
+    model: Any,
+) -> Dict[str, Any]:
+    target_dtype = _model_floating_dtype(model)
+    if target_dtype is None:
+        return inputs
+    casted: Dict[str, Any] = {}
+    for key, value in inputs.items():
+        if torch.is_tensor(value) and torch.is_floating_point(value) and value.dtype != target_dtype:
+            casted[key] = value.to(dtype=target_dtype)
+        else:
+            casted[key] = value
+    return casted
 
 
 def _ensure_feature_masks_for_generation(inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -1891,6 +1921,7 @@ class CustomTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         inputs = self._sanitize_model_inputs(inputs)
+        inputs = _cast_floating_tensors_to_model_dtype(inputs, model)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
     def get_train_dataloader(self) -> DataLoader:
