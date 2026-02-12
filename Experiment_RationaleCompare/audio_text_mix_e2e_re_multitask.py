@@ -2484,8 +2484,14 @@ def calculate_wer(reference: str, hypothesis: str) -> float:
 @dataclass
 class InferenceCollator:
     processor: Any
+    per_sample: bool = True
 
     def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
+        if self.per_sample:
+            return self._collate_per_sample(batch)
+        return self._collate_batched(batch)
+
+    def _collate_per_sample(self, batch: List[Dict]) -> Dict[str, Any]:
         if not batch:
             return {}
         tokenizer = get_tokenizer_or_raise(self.processor)
@@ -2550,6 +2556,70 @@ class InferenceCollator:
             return {}
         return {"net_inputs_list": net_inputs_list, "items": valid_items}
 
+    def _collate_batched(self, batch: List[Dict]) -> Dict[str, Any]:
+        if not batch:
+            return {}
+        tokenizer = get_tokenizer_or_raise(self.processor)
+        tokenizer.padding_side = "left"
+        sr = get_audio_sampling_rate_or_raise(self.processor, type(self.processor).__name__)
+        is_audio_batch = batch[0].get("audio_path") is not None
+
+        texts: List[str] = []
+        audios: List[Any] = []
+        valid_items: List[Dict[str, Any]] = []
+
+        for item in batch:
+            try:
+                if is_audio_batch:
+                    audio_path = item.get("audio_path")
+                    if not audio_path:
+                        continue
+                    audio, _ = load_audio_or_raise(audio_path, sr=sr)
+                    audios.append(audio)
+                    prompt_text = build_prompt_text(item)
+                    user_content = [
+                        {"type": "audio", "audio_url": "placeholder"},
+                        {"type": "text", "text": prompt_text},
+                    ]
+                else:
+                    prompt_text = build_prompt_text(item, include_transcript=True)
+                    user_content = [{"type": "text", "text": prompt_text}]
+
+                text_input = render_chat_template_as_text_or_raise(
+                    self.processor,
+                    [{"role": "user", "content": user_content}],
+                    add_generation_prompt=True,
+                )
+                texts.append(text_input)
+                valid_items.append(item)
+            except Exception as e:
+                logger.warning("Failed to build batched inference input for %s: %s", item.get("id"), e)
+                continue
+
+        if not texts:
+            return {}
+
+        net_inputs = self.processor(
+            text=texts,
+            audio=audios if is_audio_batch else None,
+            sampling_rate=sr,
+            padding=True,
+            return_tensors="pt",
+        )
+        net_inputs = {k: v for k, v in net_inputs.items() if torch.is_tensor(v)}
+        if "input_ids" not in net_inputs:
+            tok = tokenizer(texts, padding=True, return_tensors="pt")
+            if "input_ids" in tok:
+                net_inputs["input_ids"] = tok["input_ids"]
+            if "attention_mask" in tok:
+                net_inputs["attention_mask"] = tok["attention_mask"]
+        if "input_ids" not in net_inputs:
+            return {}
+        if "attention_mask" not in net_inputs:
+            net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
+        net_inputs = _ensure_feature_masks_for_generation(net_inputs)
+        return {"net_inputs": net_inputs, "items": valid_items}
+
 
 def _generate_batch(
     model,
@@ -2562,11 +2632,52 @@ def _generate_batch(
         return []
 
     net_inputs_list = batch_data.get("net_inputs_list")
-    if net_inputs_list is None:
-        net_inputs = batch_data.get("net_inputs")
-        net_inputs_list = [net_inputs] if net_inputs is not None else []
     items = batch_data["items"]
     tokenizer = get_tokenizer_or_raise(processor)
+
+    if net_inputs_list is None:
+        net_inputs = batch_data.get("net_inputs")
+        if not isinstance(net_inputs, dict):
+            return []
+        net_inputs = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
+        if "input_ids" not in net_inputs:
+            return []
+        if "attention_mask" not in net_inputs:
+            net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
+        net_inputs = _ensure_feature_masks_for_generation(net_inputs)
+
+        output_ids, _ = _generate_with_retry_drop_unused_kwargs(
+            model,
+            net_inputs=net_inputs,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        input_len = int(net_inputs["input_ids"].shape[1])
+        raw_outputs = batch_decode_token_ids(processor, output_ids[:, input_len:])
+
+        results: List[Dict[str, Any]] = []
+        for item, raw_output in zip(items, raw_outputs):
+            pred_label = parse_prediction_label(raw_output)
+            wer_score = calculate_wer(item.get("transcript", ""), raw_output)
+            result_entry = {
+                "scenario": pred_label["scenario"],
+                "action": pred_label["action"],
+                "entities": pred_label["entities"],
+                "pred_label": pred_label,
+                "file": item.get("file"),
+                "slurp_id": item.get("slurp_id"),
+                "id": item.get("id"),
+                "wer": wer_score,
+                "transcript": item.get("transcript", ""),
+                "candidates": item.get("candidates", []),
+                "rationale_text": item.get("rationale_text", ""),
+                "raw_output": raw_output,
+                "target": item.get("target", ""),
+                "target_label": item.get("target_obj", {}),
+                "type": "audio" if item.get("audio_path") else "text",
+            }
+            results.append(result_entry)
+        return results
 
     results: List[Dict[str, Any]] = []
     for item, net_inputs in zip(items, net_inputs_list):
@@ -2618,6 +2729,7 @@ def run_distributed_inference(
     processor,
     items,
     output_path,
+    model_name_or_path: str,
     device,
     rank,
     world_size,
@@ -2635,10 +2747,13 @@ def run_distributed_inference(
     local_results: List[Dict[str, Any]] = []
     tokenizer = get_tokenizer_or_raise(processor)
     tokenizer.padding_side = "left"
+    family = _infer_model_family(model_name_or_path)
+    per_sample_inference = family in {"flamingo", "music-flamingo"}
 
     if rank == 0:
         logger.info("Starting Inference. Items: %d (Audio: %d, Text: %d), Batch size: %d",
                     len(my_items), len(my_audio_items), len(my_text_items), batch_size)
+        logger.info("Inference mode: %s (family=%s)", "per-sample" if per_sample_inference else "batched", family)
 
     # Audio Loader
     if my_audio_items:
@@ -2646,7 +2761,7 @@ def run_distributed_inference(
             MixedDataset(my_audio_items),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=InferenceCollator(processor),
+            collate_fn=InferenceCollator(processor, per_sample=per_sample_inference),
             drop_last=False,
             shuffle=False,
         )
@@ -2674,7 +2789,7 @@ def run_distributed_inference(
             MixedDataset(my_text_items),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=InferenceCollator(processor),
+            collate_fn=InferenceCollator(processor, per_sample=per_sample_inference),
             drop_last=False,
             shuffle=False,
         )
@@ -3469,6 +3584,7 @@ def main():
         processor=processor,
         items=test_items,
         output_path=output_jsonl,
+        model_name_or_path=model_path,
         device=device,
         rank=rank,
         world_size=world_size,
