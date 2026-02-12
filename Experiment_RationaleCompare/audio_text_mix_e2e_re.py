@@ -717,8 +717,8 @@ def configure_audio_trainability(
         if any(hint in lname for hint in AUDIO_ENCODER_MODULE_NAME_HINTS):
             param.requires_grad_(bool(train_audio_encoder))
             audio_matches += 1
-        if freeze_projector and any(hint in lname for hint in PROJECTOR_MODULE_NAME_HINTS):
-            param.requires_grad_(False)
+        if any(hint in lname for hint in PROJECTOR_MODULE_NAME_HINTS):
+            param.requires_grad_(not bool(freeze_projector))
             projector_matches += 1
 
     if audio_matches == 0:
@@ -736,7 +736,7 @@ def configure_audio_trainability(
             ),
             bool(train_audio_encoder),
         )
-    if freeze_projector and projector_matches == 0:
+    if projector_matches == 0:
         projector_matches = _apply_requires_grad_from_modules(
             model,
             (
@@ -749,7 +749,7 @@ def configure_audio_trainability(
                 "mm_projector",
                 "model.mm_projector",
             ),
-            False,
+            not bool(freeze_projector),
         )
     return audio_matches, projector_matches
 
