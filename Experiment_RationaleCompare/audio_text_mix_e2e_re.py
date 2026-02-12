@@ -447,6 +447,36 @@ def _generate_with_retry_drop_unused_kwargs(
     )
 
 
+def _ensure_feature_masks_for_generation(inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    if "input_features" not in inputs:
+        return inputs
+
+    f_mask = inputs.get("feature_attention_mask")
+    i_mask = inputs.get("input_features_mask")
+    if torch.is_tensor(f_mask) and not torch.is_tensor(i_mask):
+        inputs["input_features_mask"] = f_mask
+        return inputs
+    if torch.is_tensor(i_mask) and not torch.is_tensor(f_mask):
+        inputs["feature_attention_mask"] = i_mask
+        return inputs
+    if torch.is_tensor(f_mask) and torch.is_tensor(i_mask):
+        return inputs
+
+    feat = inputs["input_features"]
+    if not torch.is_tensor(feat):
+        return inputs
+    if feat.dim() >= 2:
+        bsz = int(feat.shape[0])
+        tlen = int(feat.shape[1])
+    else:
+        bsz = 1
+        tlen = int(feat.shape[0])
+    mask = torch.ones((bsz, tlen), dtype=torch.long, device=feat.device)
+    inputs["feature_attention_mask"] = mask
+    inputs["input_features_mask"] = mask
+    return inputs
+
+
 def configure_audio_trainability(
     model: Any,
     *,
@@ -1855,10 +1885,7 @@ class SampleGenerationCallback(TrainerCallback):
                             inputs["attention_mask"] = tok["attention_mask"].to(device)
                 if "attention_mask" not in inputs and "input_ids" in inputs:
                     inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-                # Drop feature masks — audio encoder downsamples features but
-                # not the mask, causing size-mismatch inside generate().
-                inputs.pop("feature_attention_mask", None)
-                inputs.pop("input_features_mask", None)
+                inputs = _ensure_feature_masks_for_generation(inputs)
 
                 output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
                     self.model,
@@ -2181,10 +2208,7 @@ class InferenceCollator:
         inputs = {k: v for k, v in inputs.items() if torch.is_tensor(v)}
         if "attention_mask" not in inputs and "input_ids" in inputs:
             inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-        # Drop feature masks — audio encoder downsamples features but not the
-        # mask, causing size-mismatch inside generate().
-        inputs.pop("feature_attention_mask", None)
-        inputs.pop("input_features_mask", None)
+        inputs = _ensure_feature_masks_for_generation(inputs)
         return {"net_inputs": inputs, "items": valid_items}
 
 
@@ -2208,12 +2232,7 @@ def _generate_batch(
         return []
     if "attention_mask" not in net_inputs:
         net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
-    # Remove feature masks before generate() — the audio encoder internally
-    # downsamples input_features (e.g. 1500 → 259) but does NOT downsample
-    # the mask, causing a size-mismatch crash inside the model.  Dropping
-    # the masks lets the model handle masking on its own.
-    net_inputs.pop("feature_attention_mask", None)
-    net_inputs.pop("input_features_mask", None)
+    net_inputs = _ensure_feature_masks_for_generation(net_inputs)
 
     output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
         model,
