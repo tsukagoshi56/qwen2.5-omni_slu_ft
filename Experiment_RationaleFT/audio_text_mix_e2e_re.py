@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import librosa
 import torch
 import torch.distributed as dist
+import transformers as hf_transformers
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
@@ -79,6 +80,14 @@ class ProcessorWithTokenizerProxy:
 
     def __call__(self, *args, **kwargs):
         return self._base_processor(*args, **kwargs)
+
+
+def _optional_transformers_class(*names: str) -> Optional[Any]:
+    for name in names:
+        cls = getattr(hf_transformers, name, None)
+        if cls is not None:
+            return cls
+    return None
 
 
 def _is_tokenizer_like(value: Any) -> bool:
@@ -182,6 +191,29 @@ def load_audio_model_from_pretrained(
 ):
     model_name_lc = str(model_name_or_path).lower()
     attempts: List[Tuple[str, Any]] = []
+    if "qwen2.5-omni" in model_name_lc:
+        qwen_omni_cls = _optional_transformers_class(
+            "Qwen2_5OmniForConditionalGeneration",
+            "Qwen2_5OmniForCausalLM",
+            "Qwen2OmniForConditionalGeneration",
+            "Qwen2OmniForCausalLM",
+        )
+        if qwen_omni_cls is not None:
+            attempts.append((qwen_omni_cls.__name__, qwen_omni_cls))
+    if "voxtral" in model_name_lc:
+        voxtral_cls = _optional_transformers_class(
+            "VoxtralForConditionalGeneration",
+            "VoxtralForCausalLM",
+        )
+        if voxtral_cls is not None:
+            attempts.append((voxtral_cls.__name__, voxtral_cls))
+    if "music-flamingo" in model_name_lc:
+        music_flamingo_cls = _optional_transformers_class(
+            "MusicFlamingoForConditionalGeneration",
+            "MusicFlamingoForCausalLM",
+        )
+        if music_flamingo_cls is not None:
+            attempts.append((music_flamingo_cls.__name__, music_flamingo_cls))
     if "audio-flamingo-3" in model_name_lc and AudioFlamingo3ForConditionalGeneration is not None:
         attempts.append(("AudioFlamingo3ForConditionalGeneration", AudioFlamingo3ForConditionalGeneration))
     attempts.extend(
