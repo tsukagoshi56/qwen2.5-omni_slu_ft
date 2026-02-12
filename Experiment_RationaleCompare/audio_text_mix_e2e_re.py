@@ -766,6 +766,86 @@ def _normalize_feature_mask(mask: torch.Tensor) -> torch.Tensor:
     return out.long()
 
 
+def _align_feature_shapes(batch: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure all feature-related tensor pairs have matching temporal dimensions.
+
+    Aligns:
+      - feature_attention_mask / input_features_mask  ↔  input_features (temporal dim)
+      - attention_mask  ↔  input_ids (seq_len)
+      - labels  ↔  input_ids (seq_len)
+    Operates in-place on *batch* and returns it.
+    """
+    # --- input_features vs feature masks ---
+    if "input_features" in batch and torch.is_tensor(batch["input_features"]):
+        feat = batch["input_features"]
+        # Ensure at least 3-D  [B, F, T]
+        if feat.dim() == 1:
+            feat = feat.unsqueeze(0).unsqueeze(0)
+            batch["input_features"] = feat
+        elif feat.dim() == 2:
+            feat = feat.unsqueeze(0)
+            batch["input_features"] = feat
+
+        # Temporal dim is the *last* axis for [B, F, T] layout (Whisper / Qwen convention).
+        t_feat = int(feat.shape[-1])
+        b_feat = int(feat.shape[0])
+
+        for mask_key in ("feature_attention_mask", "input_features_mask"):
+            if mask_key in batch and torch.is_tensor(batch[mask_key]):
+                mask = _normalize_feature_mask(batch[mask_key])  # → [b, t']
+                t_mask = int(mask.shape[-1])
+                if t_mask != t_feat:
+                    if t_mask < t_feat:
+                        mask = torch.nn.functional.pad(mask, (0, t_feat - t_mask), value=0)
+                    else:
+                        mask = mask[:, :t_feat]
+                # Align batch dim
+                if int(mask.shape[0]) == 1 and b_feat > 1:
+                    mask = mask.expand(b_feat, -1).contiguous()
+                elif int(mask.shape[0]) != b_feat:
+                    mask = mask[:b_feat] if int(mask.shape[0]) > b_feat else mask.repeat(
+                        (b_feat + int(mask.shape[0]) - 1) // int(mask.shape[0]), 1
+                    )[:b_feat]
+                batch[mask_key] = mask.long()
+
+        # Ensure both alias keys exist and are identical
+        if "feature_attention_mask" in batch and torch.is_tensor(batch["feature_attention_mask"]):
+            batch["input_features_mask"] = batch["feature_attention_mask"]
+        elif "input_features_mask" in batch and torch.is_tensor(batch["input_features_mask"]):
+            batch["feature_attention_mask"] = batch["input_features_mask"]
+        else:
+            # Neither mask exists → infer from features
+            inferred = _infer_feature_attention_mask(feat)
+            batch["feature_attention_mask"] = inferred
+            batch["input_features_mask"] = inferred
+
+    # --- attention_mask / labels vs input_ids ---
+    if "input_ids" in batch and torch.is_tensor(batch["input_ids"]):
+        seq_len = int(batch["input_ids"].shape[-1])
+
+        if "attention_mask" in batch and torch.is_tensor(batch["attention_mask"]):
+            am_len = int(batch["attention_mask"].shape[-1])
+            if am_len != seq_len:
+                if am_len < seq_len:
+                    batch["attention_mask"] = torch.nn.functional.pad(
+                        batch["attention_mask"], (0, seq_len - am_len), value=0,
+                    )
+                else:
+                    batch["attention_mask"] = batch["attention_mask"][:, :seq_len]
+
+        if "labels" in batch and torch.is_tensor(batch["labels"]):
+            lb_len = int(batch["labels"].shape[-1])
+            if lb_len != seq_len:
+                if lb_len < seq_len:
+                    batch["labels"] = torch.nn.functional.pad(
+                        batch["labels"], (0, seq_len - lb_len), value=-100,
+                    )
+                else:
+                    batch["labels"] = batch["labels"][:, :seq_len]
+
+    return batch
+
+
 def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
     if hasattr(processor, "decode"):
         try:
@@ -2035,6 +2115,23 @@ class SmartCollator:
                     tensor = tensor.squeeze(0)
                 aux_tensors.setdefault(key, []).append(tensor)
 
+            # Per-sample: sync feature_attention_mask temporal dim with input_features
+            if "input_features" in aux_tensors and "feature_attention_mask" in aux_tensors:
+                fl = aux_tensors["input_features"]
+                ml = aux_tensors["feature_attention_mask"]
+                if len(fl) == len(ml):
+                    idx = len(fl) - 1
+                    f, m = fl[idx], ml[idx]
+                    if f.dim() >= 2 and m.dim() >= 1:
+                        t_f = int(f.shape[-1])
+                        t_m = int(m.shape[-1])
+                        if t_m != t_f:
+                            if t_m < t_f:
+                                m = torch.nn.functional.pad(m, (0, t_f - t_m), value=0)
+                            else:
+                                m = m[..., :t_f]
+                            ml[idx] = m
+
         if not input_ids_list:
             # Keep training alive when every audio sample in this batch fails decoding/processor parsing.
             # We degrade to text-only for this step instead of returning an empty dict.
@@ -2075,22 +2172,8 @@ class SmartCollator:
 
         if "attention_mask" not in batch_dict:
             batch_dict["attention_mask"] = (batch_dict["input_ids"] != tokenizer.pad_token_id).long()
-        if "feature_attention_mask" in batch_dict:
-            fmask = batch_dict["feature_attention_mask"]
-            if torch.is_tensor(fmask):
-                fmask = _normalize_feature_mask(fmask)
-                batch_dict["feature_attention_mask"] = fmask
-                batch_dict["input_features_mask"] = fmask
-        elif "input_features_mask" in batch_dict:
-            imask = batch_dict["input_features_mask"]
-            if torch.is_tensor(imask):
-                imask = _normalize_feature_mask(imask)
-                batch_dict["input_features_mask"] = imask
-                batch_dict["feature_attention_mask"] = imask
-        elif "input_features" in batch_dict and torch.is_tensor(batch_dict["input_features"]):
-            fmask = _infer_feature_attention_mask(batch_dict["input_features"])
-            batch_dict["feature_attention_mask"] = fmask
-            batch_dict["input_features_mask"] = fmask
+
+        batch_dict = _align_feature_shapes(batch_dict)
         return batch_dict
 
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -2161,23 +2244,7 @@ class CustomTrainer(Trainer):
             if torch.is_tensor(input_ids):
                 sanitized["attention_mask"] = torch.ones_like(input_ids, dtype=torch.long)
 
-        if "feature_attention_mask" in sanitized:
-            fmask = sanitized["feature_attention_mask"]
-            if torch.is_tensor(fmask):
-                fmask = _normalize_feature_mask(fmask)
-            sanitized["feature_attention_mask"] = fmask
-            if "input_features_mask" not in sanitized:
-                sanitized["input_features_mask"] = fmask
-        elif "input_features_mask" in sanitized:
-            imask = sanitized["input_features_mask"]
-            if torch.is_tensor(imask):
-                imask = _normalize_feature_mask(imask)
-            sanitized["input_features_mask"] = imask
-            sanitized["feature_attention_mask"] = imask
-        elif "input_features" in sanitized and torch.is_tensor(sanitized["input_features"]):
-            fmask = _infer_feature_attention_mask(sanitized["input_features"])
-            sanitized["feature_attention_mask"] = fmask
-            sanitized["input_features_mask"] = fmask
+        sanitized = _align_feature_shapes(sanitized)
         return sanitized
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -2185,18 +2252,18 @@ class CustomTrainer(Trainer):
         try:
             return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
         except RuntimeError as exc:
-            # AF3 occasionally throws shape mismatches around embed_positions when stale
-            # position-related kwargs are passed through. Retry once with those removed.
             message = str(exc or "")
             is_shape_mismatch = (
                 "expanded size of the tensor" in message
                 or "must match the size" in message
+                or "mat1 and mat2" in message
             )
             if not is_shape_mismatch:
                 raise
 
             retry_inputs = dict(inputs)
             dropped: List[str] = []
+
             for key in ("position_ids", "cache_position"):
                 if key in retry_inputs:
                     retry_inputs.pop(key, None)
@@ -2205,6 +2272,17 @@ class CustomTrainer(Trainer):
             if "attention_mask" in retry_inputs:
                 retry_inputs.pop("attention_mask", None)
                 dropped.append("attention_mask")
+
+            # Regenerate feature masks from input_features to guarantee alignment
+            if "input_features" in retry_inputs and torch.is_tensor(retry_inputs["input_features"]):
+                for mask_key in ("feature_attention_mask", "input_features_mask"):
+                    if mask_key in retry_inputs:
+                        retry_inputs.pop(mask_key, None)
+                        dropped.append(mask_key)
+                fmask = _infer_feature_attention_mask(retry_inputs["input_features"])
+                retry_inputs["feature_attention_mask"] = fmask
+                retry_inputs["input_features_mask"] = fmask
+                dropped.append("(regenerated feature masks)")
 
             if not dropped:
                 raise
@@ -2284,30 +2362,7 @@ class SampleGenerationCallback(TrainerCallback):
                 inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
                 if "attention_mask" not in inputs and "input_ids" in inputs:
                     inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-                if (
-                    "input_features" in inputs
-                    and "feature_attention_mask" not in inputs
-                    and "input_features_mask" not in inputs
-                ):
-                    feat = inputs["input_features"]
-                    if feat.dim() >= 2:
-                        mask = torch.ones(
-                            (feat.shape[0], feat.shape[1]),
-                            dtype=torch.long,
-                            device=feat.device,
-                        )
-                    else:
-                        mask = torch.ones(
-                            (1, feat.shape[0]),
-                            dtype=torch.long,
-                            device=feat.device,
-                        )
-                    inputs["feature_attention_mask"] = mask
-                    inputs["input_features_mask"] = mask
-                elif "feature_attention_mask" in inputs and "input_features_mask" not in inputs:
-                    inputs["input_features_mask"] = inputs["feature_attention_mask"]
-                elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
-                    inputs["feature_attention_mask"] = inputs["input_features_mask"]
+                inputs = _align_feature_shapes(inputs)
 
                 output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
                     self.model,
@@ -2635,30 +2690,7 @@ def _generate_batch(
             continue
         if "attention_mask" not in net_inputs:
             net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
-        if (
-            "input_features" in net_inputs
-            and "feature_attention_mask" not in net_inputs
-            and "input_features_mask" not in net_inputs
-        ):
-            feat = net_inputs["input_features"]
-            if feat.dim() >= 2:
-                mask = torch.ones(
-                    (feat.shape[0], feat.shape[1]),
-                    dtype=torch.long,
-                    device=feat.device,
-                )
-            else:
-                mask = torch.ones(
-                    (1, feat.shape[0]),
-                    dtype=torch.long,
-                    device=feat.device,
-                )
-            net_inputs["feature_attention_mask"] = mask
-            net_inputs["input_features_mask"] = mask
-        elif "feature_attention_mask" in net_inputs and "input_features_mask" not in net_inputs:
-            net_inputs["input_features_mask"] = net_inputs["feature_attention_mask"]
-        elif "input_features_mask" in net_inputs and "feature_attention_mask" not in net_inputs:
-            net_inputs["feature_attention_mask"] = net_inputs["input_features_mask"]
+        net_inputs = _align_feature_shapes(net_inputs)
 
         output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
             model,
