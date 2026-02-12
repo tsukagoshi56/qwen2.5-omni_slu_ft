@@ -467,9 +467,7 @@ def main():
         logger.info("Train items: %d | <ras>: %d | <slu>: %d", len(train_items), n_ras, n_slu)
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    tokenizer = base.ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
     _ = base.get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
     model = base.load_audio_model_from_pretrained(
@@ -529,7 +527,7 @@ def main():
         train_dataset=base.MixedDataset(train_items),
         eval_dataset=base.MixedDataset(eval_items) if len(eval_items) > 0 else None,
         data_collator=base.SmartCollator(processor, debug=args.smoke),
-        tokenizer=processor.tokenizer,
+        tokenizer=tokenizer,
     )
     trainer.train()
 

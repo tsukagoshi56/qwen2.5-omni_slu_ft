@@ -29,6 +29,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
+    AutoTokenizer,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -125,6 +126,53 @@ def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) ->
         ) from exc
 
 
+def ensure_processor_tokenizer_or_raise(processor: Any, model_name_or_path: str) -> Any:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name_or_path,
+                trust_remote_code=True,
+                use_fast=False,
+            )
+            setattr(processor, "tokenizer", tokenizer)
+            logger.warning(
+                "Processor %s has no tokenizer; attached AutoTokenizer(%s).",
+                type(processor).__name__,
+                model_name_or_path,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Processor '{type(processor).__name__}' has no tokenizer and AutoTokenizer loading failed "
+                f"for '{model_name_or_path}': {exc}"
+            ) from exc
+
+    if getattr(tokenizer, "pad_token", None) is None:
+        eos_token = getattr(tokenizer, "eos_token", None)
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token is not None:
+            tokenizer.pad_token = eos_token
+        if eos_token_id is not None:
+            tokenizer.pad_token_id = eos_token_id
+        if getattr(tokenizer, "pad_token", None) is None:
+            raise ValueError(
+                f"Tokenizer for '{model_name_or_path}' has neither pad_token nor eos_token. "
+                "Set tokenizer special tokens before training."
+            )
+    return tokenizer
+
+
+def _chat_template_owner_or_raise(processor: Any) -> Any:
+    if hasattr(processor, "apply_chat_template"):
+        return processor
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer
+    raise RuntimeError(
+        f"Neither processor ({type(processor).__name__}) nor tokenizer has apply_chat_template."
+    )
+
+
 def configure_audio_trainability(
     model: Any,
     *,
@@ -169,6 +217,7 @@ def _dedupe_preserve_order(values: List[Any]) -> List[Any]:
 
 
 def _apply_chat_template_text_or_raise(processor: Any, messages: List[Dict[str, Any]]) -> str:
+    owner = _chat_template_owner_or_raise(processor)
     attempts = [
         {"tokenize": False, "add_generation_prompt": True},
         {"tokenize": False},
@@ -178,7 +227,7 @@ def _apply_chat_template_text_or_raise(processor: Any, messages: List[Dict[str, 
     errors: List[str] = []
     for kwargs in attempts:
         try:
-            out = processor.apply_chat_template(messages, **kwargs)
+            out = owner.apply_chat_template(messages, **kwargs)
             if isinstance(out, str):
                 return out
         except Exception as exc:
@@ -232,6 +281,7 @@ def _apply_chat_template_tokenized_or_raise(
     *,
     add_generation_prompt: bool,
 ) -> Dict[str, torch.Tensor]:
+    owner = _chat_template_owner_or_raise(processor)
     attempts = [
         {
             "tokenize": True,
@@ -252,7 +302,7 @@ def _apply_chat_template_tokenized_or_raise(
     errors: List[str] = []
     for kwargs in attempts:
         try:
-            out = processor.apply_chat_template(messages, **kwargs)
+            out = owner.apply_chat_template(messages, **kwargs)
             normalized = _normalize_tokenized_chat_output(out)
             if normalized is not None:
                 return normalized
@@ -2140,9 +2190,7 @@ def main():
         raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
 
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
     _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
     model = load_audio_model_from_pretrained(
@@ -2196,7 +2244,7 @@ def main():
         train_dataset=MixedDataset(train_items),
         eval_dataset=MixedDataset(eval_items) if len(eval_items) > 0 else None,
         data_collator=SmartCollator(processor, debug=args.smoke),
-        tokenizer=processor.tokenizer,
+        tokenizer=tokenizer,
     )
 
     trainer.train()
