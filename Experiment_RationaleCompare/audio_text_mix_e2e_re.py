@@ -710,12 +710,17 @@ def _pad_tensor_list(tensors: List[torch.Tensor], padding_value: float = 0.0) ->
     except Exception:
         pass
 
-    max_len = max(t.shape[0] for t in tensors)
-    tail_shape = tensors[0].shape[1:]
-    out_shape = (len(tensors), max_len) + tail_shape
+    if len(dims) != 1:
+        shapes = [tuple(t.shape) for t in tensors]
+        raise RuntimeError(f"Cannot pad tensors with mixed ranks: {shapes}")
+
+    ndims = next(iter(dims))
+    max_shape = [max(t.shape[d] for t in tensors) for d in range(ndims)]
+    out_shape = (len(tensors),) + tuple(max_shape)
     out = tensors[0].new_full(out_shape, padding_value)
     for idx, tensor in enumerate(tensors):
-        out[idx, : tensor.shape[0]] = tensor
+        slices = (idx,) + tuple(slice(0, size) for size in tensor.shape)
+        out[slices] = tensor
     return out
 
 
