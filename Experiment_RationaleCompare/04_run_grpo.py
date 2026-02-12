@@ -18,7 +18,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
-from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
+try:
+    from transformers import Qwen2AudioForConditionalGeneration
+except Exception:  # pragma: no cover
+    Qwen2AudioForConditionalGeneration = None
 try:
     from peft import LoraConfig, TaskType, get_peft_model
     HAS_PEFT = True
@@ -44,6 +48,16 @@ from common import (
 )
 DEFAULT_ONLY_GRPO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
 PARAM_DEBUG_EVAL_SAMPLES = 200
+AUDIO_MODULE_NAME_HINTS = (
+    "audio_tower",
+    "audio_encoder",
+    "speech_encoder",
+    "audio_backbone",
+    "multi_modal_projector",
+    "multimodal_projector",
+    "audio_projector",
+    "mm_projector",
+)
 
 
 @dataclass
@@ -69,6 +83,52 @@ class GrpoDataset(Dataset):
 def collate_grpo_items(batch: List[GrpoItem]) -> List[GrpoItem]:
     # Keep dataclass items as-is; default_collate cannot stack custom classes.
     return batch
+
+
+def load_audio_model_from_pretrained(
+    model_name_or_path: str,
+    *,
+    torch_dtype: torch.dtype,
+    trust_remote_code: bool = True,
+):
+    attempts: List[Tuple[str, Any]] = [
+        ("AutoModelForCausalLM", AutoModelForCausalLM),
+        ("AutoModel", AutoModel),
+    ]
+    if Qwen2AudioForConditionalGeneration is not None:
+        attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
+
+    errors: List[str] = []
+    for loader_name, loader_cls in attempts:
+        try:
+            return loader_cls.from_pretrained(
+                model_name_or_path,
+                torch_dtype=torch_dtype,
+                trust_remote_code=trust_remote_code,
+            )
+        except Exception as exc:
+            errors.append(f"{loader_name}: {exc}")
+
+    detail = " | ".join(errors) if errors else "no loader available"
+    raise RuntimeError(
+        f"Failed to load model '{model_name_or_path}' with audio-capable loaders. Details: {detail}"
+    )
+
+
+def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) -> int:
+    feature_extractor = getattr(processor, "feature_extractor", None)
+    sampling_rate = getattr(feature_extractor, "sampling_rate", None) if feature_extractor is not None else None
+    if sampling_rate is None:
+        raise ValueError(
+            f"Model '{model_name_or_path}' is not audio-ready in this script. "
+            "Audio input is mandatory, so use an audio-capable checkpoint."
+        )
+    try:
+        return int(sampling_rate)
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid audio sampling rate '{sampling_rate}' for model '{model_name_or_path}'."
+        ) from exc
 
 
 def build_items(input_file: str, audio_dir: str, include_text: bool) -> List[GrpoItem]:
@@ -522,7 +582,7 @@ def prepare_inputs(
     return inputs
 
 
-def model_forward(model: Qwen2AudioForConditionalGeneration, inputs: Dict[str, torch.Tensor]):
+def model_forward(model: Any, inputs: Dict[str, torch.Tensor]):
     kwargs = {
         "input_ids": inputs["input_ids"],
         "attention_mask": inputs.get("attention_mask"),
@@ -537,7 +597,7 @@ def model_forward(model: Qwen2AudioForConditionalGeneration, inputs: Dict[str, t
 
 
 def compute_token_logprobs(
-    model: Qwen2AudioForConditionalGeneration,
+    model: Any,
     inputs: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
     """Return per-token log-probabilities for the response tokens (excluding prompt)."""
@@ -557,7 +617,7 @@ def compute_token_logprobs(
 
 
 def generate_samples(
-    model: Qwen2AudioForConditionalGeneration,
+    model: Any,
     processor: AutoProcessor,
     prompt_text: str,
     audio: Optional[torch.Tensor],
@@ -1051,7 +1111,7 @@ def _parse_lora_targets(targets: str) -> List[str]:
 
 
 def _resolve_lora_targets(
-    model: Qwen2AudioForConditionalGeneration,
+    model: Any,
     base_targets: List[str],
     include_audio_tower: bool,
 ) -> Any:
@@ -1062,7 +1122,8 @@ def _resolve_lora_targets(
     for name, module in model.named_modules():
         if not isinstance(module, torch.nn.Linear):
             continue
-        if ("audio_tower" in name) or ("multi_modal_projector" in name):
+        lname = str(name).lower()
+        if any(hint in lname for hint in AUDIO_MODULE_NAME_HINTS):
             audio_linear_names.append(name)
 
     if not audio_linear_names:
@@ -1419,9 +1480,8 @@ def main() -> None:
         dest="only_grpo",
         action="store_true",
         help=(
-            "Run GRPO directly from the original base model "
-            f"({DEFAULT_ONLY_GRPO_MODEL}) for both policy and ref "
-            "(no SFT prerequisite in this script)."
+            "Run GRPO directly from base model(s) without SFT prerequisite. "
+            f"If --model_name_or_path is empty, it defaults to {DEFAULT_ONLY_GRPO_MODEL}."
         ),
     )
     parser.add_argument("--output_dir", type=str, default="outputs/grpo")
@@ -1599,14 +1659,14 @@ def main() -> None:
         "--lora-audio-tower",
         dest="lora_audio_tower",
         action="store_true",
-        help="Include audio_tower / multi_modal_projector linear layers in LoRA targets.",
+        help="Include audio-related linear layers in LoRA targets.",
     )
     parser.add_argument(
         "--no_lora_audio_tower",
         "--no-lora-audio-tower",
         dest="lora_audio_tower",
         action="store_false",
-        help="Do not include audio_tower / multi_modal_projector linear layers in LoRA targets.",
+        help="Do not include audio-related linear layers in LoRA targets.",
     )
     parser.add_argument(
         "--lora_target_modules",
@@ -1838,17 +1898,15 @@ def main() -> None:
             "Install peft in this environment and retry."
         )
 
-    forced_only_grpo_base = False
     if args.only_grpo:
         requested_policy = str(args.model_name_or_path).strip()
         requested_ref = str(args.ref_model_name_or_path).strip()
-        forced_only_grpo_base = (
-            (requested_policy not in ("", DEFAULT_ONLY_GRPO_MODEL))
-            or (requested_ref not in ("", DEFAULT_ONLY_GRPO_MODEL))
-        )
-        # In only-GRPO mode, always start both policy/ref from the original base model.
-        args.model_name_or_path = DEFAULT_ONLY_GRPO_MODEL
-        args.ref_model_name_or_path = DEFAULT_ONLY_GRPO_MODEL
+        if not requested_policy:
+            requested_policy = DEFAULT_ONLY_GRPO_MODEL
+        if not requested_ref:
+            requested_ref = requested_policy
+        args.model_name_or_path = requested_policy
+        args.ref_model_name_or_path = requested_ref
     if not str(args.model_name_or_path).strip():
         raise ValueError(
             "--model_name_or_path is required unless --only-grpo is set "
@@ -2122,14 +2180,9 @@ def main() -> None:
         )
         if args.only_grpo:
             print(
-                f"[GRPO] only_grpo=True -> force base model for both policy/ref: "
-                f"{DEFAULT_ONLY_GRPO_MODEL}"
+                "[GRPO] only_grpo=True -> train from base model(s) without SFT prerequisite: "
+                f"policy={args.model_name_or_path} ref={args.ref_model_name_or_path or args.model_name_or_path}"
             )
-            if forced_only_grpo_base:
-                print(
-                    "[GRPO] note: user-specified --model_name_or_path / "
-                    "--ref_model_name_or_path were ignored in only_grpo mode."
-                )
         if args.eval_file:
             print(
                 f"[GRPO] eval enabled: eval_file={eval_path} "
@@ -2157,8 +2210,9 @@ def main() -> None:
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+    model = load_audio_model_from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -2207,7 +2261,7 @@ def main() -> None:
         print(
             f"[GRPO] only_grpo=True: policy_init={args.model_name_or_path} ref_model={ref_path}"
         )
-    ref_model = Qwen2AudioForConditionalGeneration.from_pretrained(
+    ref_model = load_audio_model_from_pretrained(
         ref_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,

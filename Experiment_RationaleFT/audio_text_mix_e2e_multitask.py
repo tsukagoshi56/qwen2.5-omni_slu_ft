@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
-from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration, TrainingArguments
+from transformers import AutoProcessor, TrainingArguments
 
 try:
     from Experiment_RationaleFT import audio_text_mix_e2e_re as base
@@ -470,14 +470,31 @@ def main():
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    _ = base.get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+    model = base.load_audio_model_from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
-    model.audio_tower.requires_grad_(args.train_audio_encoder)
-    model.multi_modal_projector.requires_grad_(False)
+    audio_matches, projector_matches = base.configure_audio_trainability(
+        model,
+        train_audio_encoder=args.train_audio_encoder,
+        freeze_projector=True,
+    )
+    if rank == 0:
+        logger.info(
+            "Trainability | audio_params=%d (enabled=%s), projector_params=%d (enabled=%s)",
+            audio_matches,
+            args.train_audio_encoder,
+            projector_matches,
+            False,
+        )
+    if rank == 0 and args.train_audio_encoder and audio_matches == 0:
+        logger.warning(
+            "No audio-related parameters were detected by name hints. "
+            "Model loading succeeded, but verify fine-tuning targets for this architecture."
+        )
 
     has_eval = len(eval_items) > 0
 

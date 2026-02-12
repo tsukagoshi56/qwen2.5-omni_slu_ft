@@ -23,12 +23,17 @@ import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
+    AutoModel,
+    AutoModelForCausalLM,
     AutoProcessor,
-    Qwen2AudioForConditionalGeneration,
     Trainer,
     TrainerCallback,
     TrainingArguments,
 )
+try:
+    from transformers import Qwen2AudioForConditionalGeneration
+except Exception:  # pragma: no cover
+    Qwen2AudioForConditionalGeneration = None
 from common import build_db_definitions, load_metadata
 
 try:
@@ -45,6 +50,20 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+AUDIO_ENCODER_MODULE_NAME_HINTS = (
+    "audio_tower",
+    "audio_encoder",
+    "speech_encoder",
+    "audio_backbone",
+    "audio_model",
+    "audio",
+)
+PROJECTOR_MODULE_NAME_HINTS = (
+    "multi_modal_projector",
+    "multimodal_projector",
+    "audio_projector",
+    "mm_projector",
+)
 
 
 def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
@@ -54,6 +73,71 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
             "Install librosa for train/eval/test with audio, or run --recover_only."
         )
     return librosa.load(audio_path, sr=sr)
+
+
+def load_audio_model_from_pretrained(
+    model_name_or_path: str,
+    *,
+    torch_dtype: torch.dtype,
+    trust_remote_code: bool = True,
+):
+    attempts: List[Tuple[str, Any]] = [
+        ("AutoModelForCausalLM", AutoModelForCausalLM),
+        ("AutoModel", AutoModel),
+    ]
+    if Qwen2AudioForConditionalGeneration is not None:
+        attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
+
+    errors: List[str] = []
+    for loader_name, loader_cls in attempts:
+        try:
+            return loader_cls.from_pretrained(
+                model_name_or_path,
+                torch_dtype=torch_dtype,
+                trust_remote_code=trust_remote_code,
+            )
+        except Exception as exc:
+            errors.append(f"{loader_name}: {exc}")
+
+    detail = " | ".join(errors) if errors else "no loader available"
+    raise RuntimeError(
+        f"Failed to load model '{model_name_or_path}' with audio-capable loaders. Details: {detail}"
+    )
+
+
+def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) -> int:
+    feature_extractor = getattr(processor, "feature_extractor", None)
+    sampling_rate = getattr(feature_extractor, "sampling_rate", None) if feature_extractor is not None else None
+    if sampling_rate is None:
+        raise ValueError(
+            f"Model '{model_name_or_path}' is not audio-ready in this script. "
+            "Audio input is mandatory, so use an audio-capable checkpoint."
+        )
+    try:
+        return int(sampling_rate)
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid audio sampling rate '{sampling_rate}' for model '{model_name_or_path}'."
+        ) from exc
+
+
+def configure_audio_trainability(
+    model: Any,
+    *,
+    train_audio_encoder: bool,
+    freeze_projector: bool,
+) -> Tuple[int, int]:
+    audio_matches = 0
+    projector_matches = 0
+    for name, param in model.named_parameters():
+        lname = str(name).lower()
+        if any(hint in lname for hint in AUDIO_ENCODER_MODULE_NAME_HINTS):
+            param.requires_grad_(bool(train_audio_encoder))
+            audio_matches += 1
+        if freeze_projector and any(hint in lname for hint in PROJECTOR_MODULE_NAME_HINTS):
+            param.requires_grad_(False)
+            projector_matches += 1
+    return audio_matches, projector_matches
 
 
 SYSTEM_PROMPT_TEXT = (
@@ -2179,7 +2263,7 @@ def main():
     parser.add_argument(
         "--train_audio_encoder",
         action="store_true",
-        help="Enable training of audio_tower (audio encoder).",
+        help="Enable training of audio-related encoder parameters.",
     )
     parser.add_argument(
         "--export_label_eval",
@@ -2491,22 +2575,33 @@ def main():
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    _ = get_audio_sampling_rate_or_raise(processor, model_path)
 
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+    model = load_audio_model_from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
 
-    # Match the original FT behavior during training; disable gradients in inference-only mode.
-    model.audio_tower.requires_grad_(not args.inference_only)
-    model.multi_modal_projector.requires_grad_(not args.inference_only)
+    # Match prior behavior: train audio encoder/projector for training runs; freeze both in inference-only mode.
+    audio_matches, projector_matches = configure_audio_trainability(
+        model,
+        train_audio_encoder=not args.inference_only,
+        freeze_projector=args.inference_only,
+    )
     if rank == 0:
         logger.info(
-            "Trainability | audio_tower=%s, multi_modal_projector=%s",
+            "Trainability | audio_params=%d (enabled=%s), projector_params=%d (enabled=%s)",
+            audio_matches,
             not args.inference_only,
+            projector_matches,
             not args.inference_only,
         )
+        if audio_matches == 0:
+            logger.warning(
+                "No audio-related parameters were detected by name hints. "
+                "Model loading succeeded, but verify fine-tuning targets for this architecture."
+            )
 
     if not args.inference_only:
         training_args = TrainingArguments(

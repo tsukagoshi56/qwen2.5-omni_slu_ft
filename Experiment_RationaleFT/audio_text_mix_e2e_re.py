@@ -26,12 +26,17 @@ import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import (
+    AutoModel,
+    AutoModelForCausalLM,
     AutoProcessor,
-    Qwen2AudioForConditionalGeneration,
     Trainer,
     TrainerCallback,
     TrainingArguments,
 )
+try:
+    from transformers import Qwen2AudioForConditionalGeneration
+except Exception:  # pragma: no cover
+    Qwen2AudioForConditionalGeneration = None
 
 try:
     import jiwer
@@ -42,11 +47,446 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+AUDIO_ENCODER_MODULE_NAME_HINTS = (
+    "audio_tower",
+    "audio_encoder",
+    "speech_encoder",
+    "audio_backbone",
+    "audio_model",
+    "audio",
+)
+PROJECTOR_MODULE_NAME_HINTS = (
+    "multi_modal_projector",
+    "multimodal_projector",
+    "audio_projector",
+    "mm_projector",
+)
 
 PROMPT_HEADER = (
     "Predict the final SLU label from ASR n-best and rationale.\n"
     "Output JSON only with keys: scenario, action, entities."
 )
+
+
+def load_audio_model_from_pretrained(
+    model_name_or_path: str,
+    *,
+    torch_dtype: torch.dtype,
+    trust_remote_code: bool = True,
+):
+    attempts: List[Tuple[str, Any]] = [
+        ("AutoModelForCausalLM", AutoModelForCausalLM),
+        ("AutoModel", AutoModel),
+    ]
+    if Qwen2AudioForConditionalGeneration is not None:
+        attempts.append(("Qwen2AudioForConditionalGeneration", Qwen2AudioForConditionalGeneration))
+
+    errors: List[str] = []
+    for loader_name, loader_cls in attempts:
+        try:
+            return loader_cls.from_pretrained(
+                model_name_or_path,
+                torch_dtype=torch_dtype,
+                trust_remote_code=trust_remote_code,
+            )
+        except Exception as exc:
+            errors.append(f"{loader_name}: {exc}")
+
+    detail = " | ".join(errors) if errors else "no loader available"
+    raise RuntimeError(
+        f"Failed to load model '{model_name_or_path}' with audio-capable loaders. Details: {detail}"
+    )
+
+
+def get_audio_sampling_rate_or_raise(processor: Any, model_name_or_path: str) -> int:
+    sampling_rate = None
+    candidates = [
+        getattr(processor, "feature_extractor", None),
+        getattr(processor, "audio_processor", None),
+        processor,
+    ]
+    for obj in candidates:
+        if obj is None:
+            continue
+        sr = getattr(obj, "sampling_rate", None)
+        if sr is not None:
+            sampling_rate = sr
+            break
+    if sampling_rate is None:
+        raise ValueError(
+            f"Model '{model_name_or_path}' is not audio-ready in this script. "
+            "Audio input is mandatory, so use an audio-capable checkpoint."
+        )
+    try:
+        return int(sampling_rate)
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid audio sampling rate '{sampling_rate}' for model '{model_name_or_path}'."
+        ) from exc
+
+
+def configure_audio_trainability(
+    model: Any,
+    *,
+    train_audio_encoder: bool,
+    freeze_projector: bool,
+) -> Tuple[int, int]:
+    audio_matches = 0
+    projector_matches = 0
+    for name, param in model.named_parameters():
+        lname = str(name).lower()
+        if any(hint in lname for hint in AUDIO_ENCODER_MODULE_NAME_HINTS):
+            param.requires_grad_(bool(train_audio_encoder))
+            audio_matches += 1
+        if freeze_projector and any(hint in lname for hint in PROJECTOR_MODULE_NAME_HINTS):
+            param.requires_grad_(False)
+            projector_matches += 1
+    return audio_matches, projector_matches
+
+
+def _audio_chat_content_variants(prompt_text: str, audio_ref: str) -> List[List[Dict[str, str]]]:
+    ref = str(audio_ref or "placeholder")
+    return [
+        [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}],
+        [{"type": "audio", "audio_url": ref}, {"type": "text", "text": prompt_text}],
+        [{"type": "audio", "url": ref}, {"type": "text", "text": prompt_text}],
+        [{"type": "audio", "path": ref}, {"type": "text", "text": prompt_text}],
+        [{"type": "text", "text": prompt_text}, {"type": "audio", "url": ref}],
+        [{"type": "text", "text": prompt_text}, {"type": "audio", "path": ref}],
+    ]
+
+
+def _dedupe_preserve_order(values: List[Any]) -> List[Any]:
+    seen = set()
+    out = []
+    for value in values:
+        key = repr(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _apply_chat_template_text_or_raise(processor: Any, messages: List[Dict[str, Any]]) -> str:
+    attempts = [
+        {"tokenize": False, "add_generation_prompt": True},
+        {"tokenize": False},
+        {"tokenize": False, "add_generation_prompt": False},
+        {"add_generation_prompt": True},
+    ]
+    errors: List[str] = []
+    for kwargs in attempts:
+        try:
+            out = processor.apply_chat_template(messages, **kwargs)
+            if isinstance(out, str):
+                return out
+        except Exception as exc:
+            errors.append(f"{kwargs}: {exc}")
+    detail = " | ".join(errors) if errors else "no chat-template variant accepted"
+    raise RuntimeError(f"Failed to render chat template as text. Details: {detail}")
+
+
+def _normalize_tokenized_chat_output(out: Any) -> Optional[Dict[str, torch.Tensor]]:
+    if out is None:
+        return None
+    if torch.is_tensor(out):
+        ids = out
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids, dtype=torch.long)}
+    if isinstance(out, list):
+        try:
+            ids = torch.tensor(out, dtype=torch.long)
+        except Exception:
+            return None
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids, dtype=torch.long)}
+    if not isinstance(out, dict):
+        return None
+
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in out.items():
+        if torch.is_tensor(value):
+            tensor = value
+        else:
+            try:
+                tensor = torch.tensor(value)
+            except Exception:
+                continue
+        if key in {"input_ids", "attention_mask"} and tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0)
+        normalized[key] = tensor
+
+    if "input_ids" not in normalized:
+        return None
+    if "attention_mask" not in normalized:
+        normalized["attention_mask"] = torch.ones_like(normalized["input_ids"], dtype=torch.long)
+    return normalized
+
+
+def _apply_chat_template_tokenized_or_raise(
+    processor: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    add_generation_prompt: bool,
+) -> Dict[str, torch.Tensor]:
+    attempts = [
+        {
+            "tokenize": True,
+            "add_generation_prompt": add_generation_prompt,
+            "return_dict": True,
+            "return_tensors": "pt",
+        },
+        {
+            "tokenize": True,
+            "add_generation_prompt": add_generation_prompt,
+            "return_tensors": "pt",
+        },
+        {
+            "tokenize": True,
+            "add_generation_prompt": add_generation_prompt,
+        },
+    ]
+    errors: List[str] = []
+    for kwargs in attempts:
+        try:
+            out = processor.apply_chat_template(messages, **kwargs)
+            normalized = _normalize_tokenized_chat_output(out)
+            if normalized is not None:
+                return normalized
+        except Exception as exc:
+            errors.append(f"{kwargs}: {exc}")
+    detail = " | ".join(errors) if errors else "no tokenized chat-template variant accepted"
+    raise RuntimeError(f"Failed to tokenize chat template. Details: {detail}")
+
+
+def build_audio_chat_text_or_raise(processor: Any, prompt_text: str, audio_path: Optional[str]) -> str:
+    cached = getattr(processor, "_audio_chat_variant_idx", None)
+    contents = _audio_chat_content_variants(prompt_text, audio_path or "placeholder")
+    order: List[int] = []
+    if isinstance(cached, int) and 0 <= cached < len(contents):
+        order.append(cached)
+    order.extend([idx for idx in range(len(contents)) if idx not in order])
+
+    last_exc: Optional[Exception] = None
+    for idx in order:
+        messages = [{"role": "user", "content": contents[idx]}]
+        try:
+            text = _apply_chat_template_text_or_raise(processor, messages)
+            setattr(processor, "_audio_chat_variant_idx", idx)
+            return text
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(f"Failed to build audio chat text: {last_exc}")
+
+
+def build_text_chat_text_or_raise(processor: Any, prompt_text: str) -> str:
+    variants: List[List[Dict[str, Any]]] = [
+        [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
+        [{"role": "user", "content": prompt_text}],
+    ]
+    last_exc: Optional[Exception] = None
+    for messages in variants:
+        try:
+            return _apply_chat_template_text_or_raise(processor, messages)
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(f"Failed to build text chat prompt: {last_exc}")
+
+
+def _call_processor_with_audio_or_raise(
+    processor: Any,
+    *,
+    text: str,
+    audio: Any,
+    sampling_rate: int,
+    padding: bool = False,
+) -> Dict[str, torch.Tensor]:
+    cached = getattr(processor, "_audio_processor_mode", None)
+    modes = _dedupe_preserve_order(
+        [
+            cached,
+            ("audio", True, True),
+            ("audios", True, True),
+            ("audio", False, True),
+            ("audios", False, True),
+            ("audio", True, False),
+            ("audios", True, False),
+            ("input_audio", True, True),
+            ("input_audios", True, True),
+        ]
+    )
+
+    errors: List[str] = []
+    for mode in modes:
+        if not mode:
+            continue
+        key, wrap_list, use_sr = mode
+        for include_padding in (True, False):
+            kwargs: Dict[str, Any] = {"text": text, "return_tensors": "pt"}
+            if include_padding:
+                kwargs["padding"] = padding
+            kwargs[key] = [audio] if wrap_list else audio
+            if use_sr:
+                kwargs["sampling_rate"] = sampling_rate
+            try:
+                out = processor(**kwargs)
+                setattr(processor, "_audio_processor_mode", mode)
+                return out
+            except Exception as exc:
+                errors.append(f"{mode}/{include_padding}: {exc}")
+                continue
+    detail = " | ".join(errors) if errors else "no audio processor signature accepted"
+    raise RuntimeError(f"Failed to encode audio/text inputs. Details: {detail}")
+
+
+def build_audio_train_inputs_or_raise(
+    processor: Any,
+    *,
+    prompt_text: str,
+    target_text: str,
+    eos_token: str,
+    audio: Any,
+    audio_path: Optional[str],
+    sampling_rate: int,
+) -> Tuple[Dict[str, torch.Tensor], int]:
+    # Primary route for Qwen2-Audio style processors.
+    prompt_chat_text = None
+    try:
+        prompt_chat_text = build_audio_chat_text_or_raise(processor, prompt_text, audio_path)
+        full_text = prompt_chat_text + target_text + eos_token
+        inputs = _call_processor_with_audio_or_raise(
+            processor,
+            text=full_text,
+            audio=audio,
+            sampling_rate=sampling_rate,
+            padding=False,
+        )
+        prompt_inputs = _call_processor_with_audio_or_raise(
+            processor,
+            text=prompt_chat_text,
+            audio=audio,
+            sampling_rate=sampling_rate,
+            padding=False,
+        )
+        prompt_len = int(prompt_inputs["input_ids"].shape[1])
+        return inputs, prompt_len
+    except Exception:
+        pass
+
+    if not audio_path:
+        raise RuntimeError("Tokenized chat-template fallback requires a valid audio_path.")
+
+    last_exc: Optional[Exception] = None
+    for content in _audio_chat_content_variants(prompt_text, audio_path):
+        user_messages = [{"role": "user", "content": content}]
+        try:
+            prompt_inputs = _apply_chat_template_tokenized_or_raise(
+                processor,
+                user_messages,
+                add_generation_prompt=True,
+            )
+            assistant_variants = [
+                {"role": "assistant", "content": [{"type": "text", "text": target_text + eos_token}]},
+                {"role": "assistant", "content": target_text + eos_token},
+            ]
+            for assistant_message in assistant_variants:
+                full_messages = user_messages + [assistant_message]
+                try:
+                    inputs = _apply_chat_template_tokenized_or_raise(
+                        processor,
+                        full_messages,
+                        add_generation_prompt=False,
+                    )
+                    prompt_len = int(prompt_inputs["input_ids"].shape[1])
+                    if int(inputs["input_ids"].shape[1]) <= prompt_len:
+                        continue
+                    return inputs, prompt_len
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(f"Failed to build audio train inputs for processor/model: {last_exc}")
+
+
+def build_audio_generation_inputs_or_raise(
+    processor: Any,
+    *,
+    prompt_text: str,
+    audio: Any,
+    audio_path: Optional[str],
+    sampling_rate: int,
+) -> Dict[str, torch.Tensor]:
+    try:
+        prompt_chat_text = build_audio_chat_text_or_raise(processor, prompt_text, audio_path)
+        return _call_processor_with_audio_or_raise(
+            processor,
+            text=prompt_chat_text,
+            audio=audio,
+            sampling_rate=sampling_rate,
+            padding=False,
+        )
+    except Exception:
+        pass
+
+    if not audio_path:
+        raise RuntimeError("Tokenized chat-template fallback requires a valid audio_path.")
+
+    last_exc: Optional[Exception] = None
+    for content in _audio_chat_content_variants(prompt_text, audio_path):
+        messages = [{"role": "user", "content": content}]
+        try:
+            return _apply_chat_template_tokenized_or_raise(
+                processor,
+                messages,
+                add_generation_prompt=True,
+            )
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(f"Failed to build audio generation inputs for processor/model: {last_exc}")
+
+
+def _pad_tensor_list(tensors: List[torch.Tensor], padding_value: float = 0.0) -> torch.Tensor:
+    if not tensors:
+        raise ValueError("Cannot pad empty tensor list.")
+    if len(tensors) == 1:
+        return tensors[0].unsqueeze(0)
+
+    dims = {t.dim() for t in tensors}
+    if dims == {1}:
+        return pad_sequence(tensors, batch_first=True, padding_value=padding_value)
+    if dims == {2} and len({t.shape[1] for t in tensors}) == 1:
+        return pad_sequence(tensors, batch_first=True, padding_value=padding_value)
+    try:
+        return torch.stack(tensors, dim=0)
+    except Exception:
+        pass
+
+    max_len = max(t.shape[0] for t in tensors)
+    tail_shape = tensors[0].shape[1:]
+    out_shape = (len(tensors), max_len) + tail_shape
+    out = tensors[0].new_full(out_shape, padding_value)
+    for idx, tensor in enumerate(tensors):
+        out[idx, : tensor.shape[0]] = tensor
+    return out
+
+
+def decode_token_ids(processor: Any, token_ids: torch.Tensor) -> str:
+    if hasattr(processor, "decode"):
+        try:
+            return processor.decode(token_ids, skip_special_tokens=True)
+        except Exception:
+            pass
+    if hasattr(processor, "tokenizer") and hasattr(processor.tokenizer, "decode"):
+        return processor.tokenizer.decode(token_ids, skip_special_tokens=True)
+    raise RuntimeError("Neither processor.decode nor tokenizer.decode is available.")
 
 
 def format_nbest(candidates: List[str], max_items: int = 5) -> str:
@@ -927,30 +1367,22 @@ class SmartCollator:
 
     def _build_audio_chat(self, item: Dict[str, Any]) -> str:
         prompt_text = build_prompt_text(item)
-        user_content = [
-            {"type": "audio", "audio_url": "placeholder"},
-            {"type": "text", "text": prompt_text},
-        ]
-        return self.processor.apply_chat_template(
-            [{"role": "user", "content": user_content}],
-            tokenize=False,
-            add_generation_prompt=True,
+        return build_audio_chat_text_or_raise(
+            self.processor,
+            prompt_text=prompt_text,
+            audio_path=item.get("audio_path"),
         )
 
     def _build_text_chat(self, item: Dict[str, Any]) -> str:
         prompt_text = build_prompt_text(item, include_transcript=True)
-        user_content = [{"type": "text", "text": prompt_text}]
-        return self.processor.apply_chat_template(
-            [{"role": "user", "content": user_content}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        return build_text_chat_text_or_raise(self.processor, prompt_text=prompt_text)
 
     def _collate_audio(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids_list, labels_list = [], []
-        input_features_list, feature_mask_list = [], []
+        input_ids_list: List[torch.Tensor] = []
+        labels_list: List[torch.Tensor] = []
+        aux_tensors: Dict[str, List[torch.Tensor]] = {}
 
-        sr = self.processor.feature_extractor.sampling_rate
+        sr = get_audio_sampling_rate_or_raise(self.processor, "runtime_processor")
         eos_token = self.processor.tokenizer.eos_token or "<|endoftext|>"
 
         for item in batch:
@@ -961,48 +1393,47 @@ class SmartCollator:
             except Exception:
                 continue
 
-            text_input = self._build_audio_chat(item)
-            full_text = text_input + item["target"] + eos_token
+            prompt_text = build_prompt_text(item)
 
             if self.debug and self._print_count < 5:
                 print(f"\n[DEBUG Visualizer] Audio Sample ID: {item.get('id')}")
-                print(f"[DEBUG Visualizer] Input Prompt:\n{text_input}")
+                print(f"[DEBUG Visualizer] Prompt:\n{prompt_text}")
                 print(f"[DEBUG Visualizer] Target:\n{item['target']}")
                 self._print_count += 1
 
-            inputs = self.processor(
-                text=full_text,
-                audio=[audio],
-                sampling_rate=sr,
-                return_tensors="pt",
-            )
-            prompt_inputs = self.processor(
-                text=text_input,
-                audio=[audio],
-                sampling_rate=sr,
-                return_tensors="pt",
-            )
-            prompt_len = prompt_inputs["input_ids"].shape[1]
+            try:
+                inputs, prompt_len = build_audio_train_inputs_or_raise(
+                    self.processor,
+                    prompt_text=prompt_text,
+                    target_text=item["target"],
+                    eos_token=eos_token,
+                    audio=audio,
+                    audio_path=item.get("audio_path"),
+                    sampling_rate=sr,
+                )
+            except Exception as exc:
+                logger.warning("Skip audio sample %s due to processor mismatch: %s", item.get("id"), exc)
+                continue
 
-            ids = inputs["input_ids"][0]
+            ids = inputs["input_ids"][0] if inputs["input_ids"].dim() > 1 else inputs["input_ids"]
             lbs = ids.clone()
             lbs[:prompt_len] = self.ignore_index
 
             input_ids_list.append(ids)
             labels_list.append(lbs)
 
-            feat = inputs["input_features"]
-            while feat.dim() > 2:
-                feat = feat.squeeze(0)
-            input_features_list.append(feat)
+            for key, value in inputs.items():
+                if key == "input_ids" or not torch.is_tensor(value):
+                    continue
+                tensor = value
+                if tensor.dim() > 0 and tensor.shape[0] == 1:
+                    tensor = tensor.squeeze(0)
+                aux_tensors.setdefault(key, []).append(tensor)
 
-            if "feature_attention_mask" in inputs:
-                f_mask = inputs["feature_attention_mask"]
-                while f_mask.dim() > 1:
-                    f_mask = f_mask.squeeze(0)
-                feature_mask_list.append(f_mask)
+        if not input_ids_list:
+            return {}
 
-        return {
+        batch_dict: Dict[str, torch.Tensor] = {
             "input_ids": pad_sequence(
                 input_ids_list,
                 batch_first=True,
@@ -1013,22 +1444,22 @@ class SmartCollator:
                 batch_first=True,
                 padding_value=self.ignore_index,
             ),
-            "attention_mask": pad_sequence(
-                [torch.ones_like(ids) for ids in input_ids_list],
-                batch_first=True,
-                padding_value=0,
-            ),
-            "input_features": pad_sequence(
-                input_features_list,
-                batch_first=True,
-                padding_value=0.0,
-            ),
-            "feature_attention_mask": (
-                pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
-                if feature_mask_list
-                else None
-            ),
         }
+
+        for key, tensors in aux_tensors.items():
+            if not tensors:
+                continue
+            pad_value = 0.0
+            if "mask" in key:
+                pad_value = 0
+            batch_dict[key] = _pad_tensor_list(tensors, padding_value=pad_value)
+
+        if "attention_mask" not in batch_dict:
+            batch_dict["attention_mask"] = (
+                batch_dict["input_ids"] != self.processor.tokenizer.pad_token_id
+            ).long()
+
+        return batch_dict
 
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         input_ids_list, labels_list = [], []
@@ -1129,27 +1560,18 @@ class SampleGenerationCallback(TrainerCallback):
         samples = random.sample(audio_items, min(self.num_samples, len(audio_items)))
         device = self.model.device
         self.model.eval()
-        sr = self.processor.feature_extractor.sampling_rate
+        sr = get_audio_sampling_rate_or_raise(self.processor, "runtime_processor")
 
         for item in samples:
             try:
                 audio, _ = librosa.load(item["audio_path"], sr=sr)
                 prompt_text = build_prompt_text(item)
-                user_content = [
-                    {"type": "audio", "audio_url": "placeholder"},
-                    {"type": "text", "text": prompt_text},
-                ]
-                text_input = self.processor.apply_chat_template(
-                    [{"role": "user", "content": user_content}],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-
-                inputs = self.processor(
-                    text=text_input,
-                    audio=[audio],
+                inputs = build_audio_generation_inputs_or_raise(
+                    self.processor,
+                    prompt_text=prompt_text,
+                    audio=audio,
+                    audio_path=item.get("audio_path"),
                     sampling_rate=sr,
-                    return_tensors="pt",
                 )
                 inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -1157,7 +1579,7 @@ class SampleGenerationCallback(TrainerCallback):
                     output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
 
                 input_len = inputs["input_ids"].shape[1]
-                generated_text = self.processor.decode(output_ids[0][input_len:], skip_special_tokens=True)
+                generated_text = decode_token_ids(self.processor, output_ids[0][input_len:])
                 clean_pred = clean_json_text(generated_text)
 
                 logger.info("-" * 60)
@@ -1255,48 +1677,42 @@ class InferenceCollator:
 
     def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
         self.processor.tokenizer.padding_side = "left"
-        sr = self.processor.feature_extractor.sampling_rate
+        sr = get_audio_sampling_rate_or_raise(self.processor, "runtime_processor")
 
-        texts = []
-        audios = []
-        valid_items = []
+        net_inputs_list: List[Dict[str, torch.Tensor]] = []
+        valid_items: List[Dict[str, Any]] = []
 
         for item in batch:
             if item.get("audio_path"):
                 try:
                     audio, _ = librosa.load(item["audio_path"], sr=sr)
-                    audios.append(audio)
                     prompt_text = build_prompt_text(item)
-                    user_content = [
-                        {"type": "audio", "audio_url": "placeholder"},
-                        {"type": "text", "text": prompt_text},
-                    ]
+                    net_inputs = build_audio_generation_inputs_or_raise(
+                        self.processor,
+                        prompt_text=prompt_text,
+                        audio=audio,
+                        audio_path=item.get("audio_path"),
+                        sampling_rate=sr,
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to load audio for {item.get('id')}: {e}")
                     continue
             else:
                 prompt_text = build_prompt_text(item, include_transcript=True)
-                user_content = [{"type": "text", "text": prompt_text}]
+                text_input = build_text_chat_text_or_raise(self.processor, prompt_text)
+                net_inputs = self.processor(
+                    text=text_input,
+                    padding=False,
+                    return_tensors="pt",
+                )
 
-            text_input = self.processor.apply_chat_template(
-                [{"role": "user", "content": user_content}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            texts.append(text_input)
+            net_inputs_list.append(net_inputs)
             valid_items.append(item)
 
-        if not texts:
+        if not net_inputs_list:
             return {}
 
-        inputs = self.processor(
-            text=texts,
-            audio=audios if audios else None,
-            sampling_rate=sr,
-            padding=True,
-            return_tensors="pt",
-        )
-        return {"net_inputs": inputs, "items": valid_items}
+        return {"net_inputs_list": net_inputs_list, "items": valid_items}
 
 
 def _generate_batch(
@@ -1309,25 +1725,25 @@ def _generate_batch(
     if not batch_data:
         return []
 
-    net_inputs = batch_data["net_inputs"]
+    net_inputs_list = batch_data.get("net_inputs_list")
+    if net_inputs_list is None:
+        net_inputs = batch_data.get("net_inputs")
+        net_inputs_list = [net_inputs] if net_inputs is not None else []
     items = batch_data["items"]
 
-    net_inputs = {k: v.to(device) for k, v in net_inputs.items()}
-
-    with torch.no_grad():
-        output_ids = model.generate(
-            **net_inputs,
-            max_new_tokens=max_new_tokens,
-            use_cache=True,
-            pad_token_id=processor.tokenizer.pad_token_id,
-        )
-
-    input_len = net_inputs["input_ids"].shape[1]
-    generated_ids = output_ids[:, input_len:]
-    raw_outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
-
     results: List[Dict[str, Any]] = []
-    for item, raw_output in zip(items, raw_outputs):
+    for item, net_inputs in zip(items, net_inputs_list):
+        net_inputs = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
+        with torch.no_grad():
+            output_ids = model.generate(
+                **net_inputs,
+                max_new_tokens=max_new_tokens,
+                use_cache=True,
+                pad_token_id=processor.tokenizer.pad_token_id,
+            )
+
+        input_len = int(net_inputs["input_ids"].shape[1])
+        raw_output = decode_token_ids(processor, output_ids[0][input_len:])
         pred_label = parse_prediction_label(raw_output)
         wer_score = calculate_wer(item.get("transcript", ""), raw_output)
 
@@ -1623,7 +2039,7 @@ def main():
     parser.add_argument(
         "--train_audio_encoder",
         action="store_true",
-        help="Enable training of audio_tower (audio encoder).",
+        help="Enable training of audio-related encoder parameters.",
     )
     parser.add_argument(
         "--export_label_eval",
@@ -1727,22 +2143,33 @@ def main():
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+    _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
 
-    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+    model = load_audio_model_from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device)
 
     # Keep the original lightweight FT setup by default.
-    model.audio_tower.requires_grad_(args.train_audio_encoder)
-    model.multi_modal_projector.requires_grad_(False)
+    audio_matches, projector_matches = configure_audio_trainability(
+        model,
+        train_audio_encoder=args.train_audio_encoder,
+        freeze_projector=True,
+    )
     if rank == 0:
         logger.info(
-            "Trainability | audio_tower=%s, multi_modal_projector=%s",
+            "Trainability | audio_params=%d (enabled=%s), projector_params=%d (enabled=%s)",
+            audio_matches,
             args.train_audio_encoder,
+            projector_matches,
             False,
         )
+        if args.train_audio_encoder and audio_matches == 0:
+            logger.warning(
+                "No audio-related parameters were detected by name hints. "
+                "Model loading succeeded, but verify fine-tuning targets for this architecture."
+            )
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
