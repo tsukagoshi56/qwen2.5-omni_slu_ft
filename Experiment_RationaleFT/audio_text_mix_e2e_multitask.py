@@ -146,6 +146,22 @@ def _build_audio_slu_prompt(input_format: str = "asr") -> str:
     return body
 
 
+def _build_audio_candidates_prompt(candidates: List[str], input_format: str = "asr") -> str:
+    context_desc = _context_desc(input_format)
+    nbest = base.format_nbest(candidates, max_items=5)
+    body = (
+        "<slu>\n"
+        f"Analyze the provided audio and {context_desc}.\n"
+        "Compare likely intent/slot alternatives before the final decision.\n"
+        "Output C+J only.\n"
+        "C: Intent candidates: intent1 | intent2 | intent3; "
+        "Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+        "J: Output JSON only with keys: scenario, action, entities.\n"
+        f"N-best hypotheses:\n{nbest}\n"
+    )
+    return body
+
+
 def _build_text_slu_prompt(transcript: str, input_format: str = "asr") -> str:
     transcript = str(transcript or "").strip()
     context_desc = _context_desc(input_format)
@@ -158,6 +174,39 @@ def _build_text_slu_prompt(transcript: str, input_format: str = "asr") -> str:
     if transcript:
         body += f"Transcript: {transcript}\n"
     return body
+
+
+def _build_text_candidates_prompt(
+    transcript: str,
+    candidates: List[str],
+    input_format: str = "asr",
+) -> str:
+    transcript = str(transcript or "").strip()
+    context_desc = _context_desc(input_format)
+    nbest = base.format_nbest(candidates, max_items=5)
+    body = (
+        "<slu>\n"
+        f"Analyze the provided text in {context_desc}.\n"
+        "Compare likely intent/slot alternatives before the final decision.\n"
+        "Output C+J only.\n"
+        "C: Intent candidates: intent1 | intent2 | intent3; "
+        "Slot candidates: slot_type1(value1|value2) | slot_type2\n"
+        "J: Output JSON only with keys: scenario, action, entities.\n"
+    )
+    if transcript:
+        body += f"Transcript: {transcript}\n"
+    body += f"N-best hypotheses:\n{nbest}\n"
+    return body
+
+
+def _build_candidates_only_target(item: Dict[str, Any]) -> str:
+    target_obj = item.get("target_obj", {}) if isinstance(item, dict) else {}
+    final_json = _make_slu_target(
+        str(target_obj.get("scenario", "")).strip(),
+        str(target_obj.get("action", "")).strip(),
+        target_obj.get("entities", []),
+    )
+    return f"C: (none)\nJ: {final_json}"
 
 
 def build_multitask_items_from_rationale(
@@ -366,6 +415,26 @@ def force_slu_test_mode(items: List[Dict[str, Any]], input_format: str = "asr") 
     return forced
 
 
+def force_candidates_test_mode(items: List[Dict[str, Any]], input_format: str = "asr") -> List[Dict[str, Any]]:
+    forced: List[Dict[str, Any]] = []
+    for item in items:
+        new_item = dict(item)
+        candidates = [base.candidate_to_text(x) for x in new_item.get("candidates", [])]
+        candidates = [c for c in candidates if c]
+        if new_item.get("audio_path"):
+            new_item["prompt_text"] = _build_audio_candidates_prompt(candidates, input_format=input_format)
+        else:
+            new_item["prompt_text"] = _build_text_candidates_prompt(
+                new_item.get("transcript", ""),
+                candidates,
+                input_format=input_format,
+            )
+        new_item["task_mode"] = "candidates"
+        new_item["target"] = _build_candidates_only_target(new_item)
+        forced.append(new_item)
+    return forced
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_file", type=str, required=True, help="Rationale train JSONL.")
@@ -395,6 +464,21 @@ def main():
     parser.add_argument("--train_audio_encoder", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--export_label_eval", action="store_true")
+    parser.add_argument(
+        "--test_task_mode",
+        type=str,
+        choices=["slu", "candidates", "both"],
+        default="slu",
+        help="Prompt/output mode used only for test inference (default: slu).",
+    )
+    parser.add_argument(
+        "--candidates_only",
+        "--candidates-only",
+        dest="test_task_mode",
+        action="store_const",
+        const="candidates",
+        help="Alias for --test_task_mode candidates (C+J generation at test time).",
+    )
     parser.add_argument(
         "--input_format",
         type=str,
@@ -545,33 +629,50 @@ def main():
         max_samples=test_max_samples,
         input_format=args.input_format,
     )
-    test_items = force_slu_test_mode(test_items, input_format=args.input_format)
+    requested_test_mode = str(args.test_task_mode or "slu").strip().lower()
+    test_modes = ["slu", "candidates"] if requested_test_mode == "both" else [requested_test_mode]
+
     if rank == 0:
-        logger.info("Test inference mode is forced to <slu> (%d samples).", len(test_items))
-    output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
-    base.run_distributed_inference(
-        model=model,
-        processor=processor,
-        items=test_items,
-        output_path=output_jsonl,
-        device=device,
-        rank=rank,
-        world_size=world_size,
-        batch_size=args.batch_size,
-        max_new_tokens=args.max_new_tokens,
-    )
+        logger.info("Test task modes: %s", ", ".join(test_modes))
 
-    if world_size > 1:
-        dist.barrier()
+    for mode in test_modes:
+        if mode == "candidates":
+            mode_items = force_candidates_test_mode(test_items, input_format=args.input_format)
+        else:
+            mode_items = force_slu_test_mode(test_items, input_format=args.input_format)
 
-    if rank == 0 and args.export_label_eval:
-        label_only_path = os.path.join(args.output_dir, "prediction_labels_only.jsonl")
-        base.save_label_only_predictions(output_jsonl, label_only_path)
-        metrics = base.evaluate_prediction_file(output_jsonl)
-        metrics_path = os.path.join(args.output_dir, "metrics_label_only.json")
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, ensure_ascii=False, indent=2)
-        logger.info("Saved metrics: %s", metrics_path)
+        if len(test_modes) > 1:
+            output_jsonl = os.path.join(args.output_dir, f"prediction_{mode}.jsonl")
+        else:
+            output_jsonl = os.path.join(args.output_dir, "prediction.jsonl")
+
+        if rank == 0:
+            logger.info("Running test inference mode: %s (%d samples).", mode, len(mode_items))
+
+        base.run_distributed_inference(
+            model=model,
+            processor=processor,
+            items=mode_items,
+            output_path=output_jsonl,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            batch_size=args.batch_size,
+            max_new_tokens=args.max_new_tokens,
+        )
+
+        if world_size > 1:
+            dist.barrier()
+
+        if rank == 0 and args.export_label_eval:
+            suffix = f"_{mode}" if len(test_modes) > 1 else ""
+            label_only_path = os.path.join(args.output_dir, f"prediction_labels_only{suffix}.jsonl")
+            base.save_label_only_predictions(output_jsonl, label_only_path)
+            metrics = base.evaluate_prediction_file(output_jsonl)
+            metrics_path = os.path.join(args.output_dir, f"metrics_label_only{suffix}.json")
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, ensure_ascii=False, indent=2)
+            logger.info("Saved metrics (%s): %s", mode, metrics_path)
 
     if world_size > 1:
         dist.barrier()
