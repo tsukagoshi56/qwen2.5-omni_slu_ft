@@ -2390,11 +2390,6 @@ class SampleGenerationCallback(TrainerCallback):
                     max_new_tokens=self.max_new_tokens,
                     pad_token_id=getattr(get_tokenizer_or_raise(self.processor), "pad_token_id", None),
                 )
-                if dropped:
-                    logger.warning(
-                        "Sample generation dropped unsupported model kwargs: %s",
-                        sorted(set(dropped)),
-                    )
 
                 input_len = inputs["input_ids"].shape[1]
                 generated_text = decode_token_ids(self.processor, output_ids[0][input_len:])
@@ -2786,12 +2781,6 @@ def _generate_batch(
             max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.pad_token_id,
         )
-        if dropped:
-            logger.warning(
-                "Dropped unsupported model kwargs during inference id=%s: %s",
-                item.get("id"),
-                sorted(set(dropped)),
-            )
 
         input_len = int(net_inputs["input_ids"].shape[1])
         raw_output = decode_token_ids(processor, output_ids[0][input_len:])
