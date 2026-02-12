@@ -1549,8 +1549,12 @@ class SmartCollator:
                 feat = feat.squeeze(0)
             input_features_list.append(feat)
 
-            if "feature_attention_mask" in inputs:
+            f_mask = None
+            if "input_features_mask" in inputs:
+                f_mask = inputs["input_features_mask"]
+            elif "feature_attention_mask" in inputs:
                 f_mask = inputs["feature_attention_mask"]
+            if f_mask is not None:
                 while f_mask.dim() > 1:
                     f_mask = f_mask.squeeze(0)
                 feature_mask_list.append(f_mask)
@@ -1599,6 +1603,7 @@ class SmartCollator:
                 padding_value=0.0,
             ),
             "feature_attention_mask": feature_attention_mask,
+            "input_features_mask": feature_attention_mask,
         }
 
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -1669,7 +1674,11 @@ class CustomTrainer(Trainer):
             if torch.is_tensor(input_ids):
                 sanitized["attention_mask"] = torch.ones_like(input_ids, dtype=torch.long)
 
-        if "input_features" in sanitized and "feature_attention_mask" not in sanitized:
+        if (
+            "input_features" in sanitized
+            and "feature_attention_mask" not in sanitized
+            and "input_features_mask" not in sanitized
+        ):
             feat = sanitized["input_features"]
             if torch.is_tensor(feat):
                 if feat.dim() >= 2:
@@ -1683,6 +1692,11 @@ class CustomTrainer(Trainer):
                     dtype=torch.long,
                     device=feat.device,
                 )
+                sanitized["input_features_mask"] = sanitized["feature_attention_mask"]
+        elif "feature_attention_mask" in sanitized and "input_features_mask" not in sanitized:
+            sanitized["input_features_mask"] = sanitized["feature_attention_mask"]
+        elif "input_features_mask" in sanitized and "feature_attention_mask" not in sanitized:
+            sanitized["feature_attention_mask"] = sanitized["input_features_mask"]
         return sanitized
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -1762,20 +1776,30 @@ class SampleGenerationCallback(TrainerCallback):
                 inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
                 if "attention_mask" not in inputs and "input_ids" in inputs:
                     inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], dtype=torch.long)
-                if "input_features" in inputs and "feature_attention_mask" not in inputs:
+                if (
+                    "input_features" in inputs
+                    and "feature_attention_mask" not in inputs
+                    and "input_features_mask" not in inputs
+                ):
                     feat = inputs["input_features"]
                     if feat.dim() >= 2:
-                        inputs["feature_attention_mask"] = torch.ones(
+                        mask = torch.ones(
                             (feat.shape[0], feat.shape[1]),
                             dtype=torch.long,
                             device=feat.device,
                         )
                     else:
-                        inputs["feature_attention_mask"] = torch.ones(
+                        mask = torch.ones(
                             (1, feat.shape[0]),
                             dtype=torch.long,
                             device=feat.device,
                         )
+                    inputs["feature_attention_mask"] = mask
+                    inputs["input_features_mask"] = mask
+                elif "feature_attention_mask" in inputs and "input_features_mask" not in inputs:
+                    inputs["input_features_mask"] = inputs["feature_attention_mask"]
+                elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
+                    inputs["feature_attention_mask"] = inputs["input_features_mask"]
 
                 with torch.no_grad():
                     output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
@@ -2077,6 +2101,10 @@ class InferenceCollator:
         inputs = self.processor(**processor_kwargs)
         # Avoid passing non-tensor/None entries (can break downstream generate in some model impls).
         inputs = {k: v for k, v in inputs.items() if torch.is_tensor(v)}
+        if "feature_attention_mask" in inputs and "input_features_mask" not in inputs:
+            inputs["input_features_mask"] = inputs["feature_attention_mask"]
+        elif "input_features_mask" in inputs and "feature_attention_mask" not in inputs:
+            inputs["feature_attention_mask"] = inputs["input_features_mask"]
         return {"net_inputs": inputs, "items": valid_items}
 
 
@@ -2100,20 +2128,30 @@ def _generate_batch(
         return []
     if "attention_mask" not in net_inputs:
         net_inputs["attention_mask"] = torch.ones_like(net_inputs["input_ids"], dtype=torch.long)
-    if "input_features" in net_inputs and "feature_attention_mask" not in net_inputs:
+    if (
+        "input_features" in net_inputs
+        and "feature_attention_mask" not in net_inputs
+        and "input_features_mask" not in net_inputs
+    ):
         feat = net_inputs["input_features"]
         if feat.dim() >= 2:
-            net_inputs["feature_attention_mask"] = torch.ones(
+            mask = torch.ones(
                 (feat.shape[0], feat.shape[1]),
                 dtype=torch.long,
                 device=feat.device,
             )
         else:
-            net_inputs["feature_attention_mask"] = torch.ones(
+            mask = torch.ones(
                 (1, feat.shape[0]),
                 dtype=torch.long,
                 device=feat.device,
             )
+        net_inputs["feature_attention_mask"] = mask
+        net_inputs["input_features_mask"] = mask
+    elif "feature_attention_mask" in net_inputs and "input_features_mask" not in net_inputs:
+        net_inputs["input_features_mask"] = net_inputs["feature_attention_mask"]
+    elif "input_features_mask" in net_inputs and "feature_attention_mask" not in net_inputs:
+        net_inputs["feature_attention_mask"] = net_inputs["input_features_mask"]
 
     with torch.no_grad():
         output_ids = model.generate(
