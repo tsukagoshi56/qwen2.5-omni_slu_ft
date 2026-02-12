@@ -3024,24 +3024,26 @@ def main():
     ).to(device)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
 
-    # Keep audio modules trainable by default and keep projector trainable, as in prior behavior.
+    # Enable audio-encoder FT only when explicitly requested; some backbones
+    # (e.g. Qwen2-Audio variants) may expose no trainable params under audio_tower.
+    train_audio_encoder_enabled = bool(args.train_audio_encoder)
     audio_matches, projector_matches = configure_audio_trainability(
         model,
-        train_audio_encoder=True,
+        train_audio_encoder=train_audio_encoder_enabled,
         freeze_projector=False,
     )
     if rank == 0:
         logger.info(
             "Trainability | audio_params=%d (enabled=%s), projector_params=%d (enabled=%s)",
             audio_matches,
-            True,
+            train_audio_encoder_enabled,
             projector_matches,
             True,
         )
-        if audio_matches == 0:
+        if train_audio_encoder_enabled and audio_matches == 0:
             logger.warning(
                 "No audio-related parameters were detected by name hints. "
-                "Model loading succeeded, but verify fine-tuning targets for this architecture."
+                "Proceeding without audio-encoder FT for this run."
             )
 
     training_args = TrainingArguments(
