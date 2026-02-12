@@ -2916,6 +2916,7 @@ def main():
         dist.init_process_group(backend="nccl")
         rank = dist.get_rank()
         world_size = dist.get_world_size()
+        torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
     else:
         rank = 0
