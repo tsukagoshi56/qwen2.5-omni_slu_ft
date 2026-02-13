@@ -21,6 +21,12 @@ Examples:
       --task-mode cot \
       --embeddings pca,tsne,umap
 
+    # SFT json_only prompt (shortcut flag)
+    python 08_visualize_model_features.py \
+      --model_name_or_path outputs/qwen_rationale_label_ft \
+      --pipeline sft \
+      --only-json
+
     # Multitask label-only prompt feature extraction
     python 08_visualize_model_features.py \
       --model_name_or_path outputs/qwen_rationale_label_ft_multitask \
@@ -1032,7 +1038,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_name_or_path", type=str, default=None, help="Model path/checkpoint.")
     parser.add_argument("--reuse-dir", type=str, default=None, help="Reuse saved features from this analysis dir.")
     parser.add_argument("--pipeline", type=str, default="sft", choices=["sft", "multitask"])
-    parser.add_argument("--task-mode", type=str, default="cot", help="sft: cot|candidates|json_only, multitask: cot|label|candidates")
+    parser.add_argument(
+        "--task-mode",
+        "--task_model",
+        "--task-model",
+        dest="task_mode",
+        type=str,
+        default="cot",
+        help="sft: cot|candidates|json_only, multitask: cot|label|candidates",
+    )
+    parser.add_argument("--only-json", "--json-only", action="store_true",
+                        help="SFT時に task-mode を json_only にするショートカット")
     parser.add_argument("--test_file", type=str, default="slurp/dataset/slurp/test.jsonl")
     parser.add_argument("--audio_dir", type=str, default="slurp/slurp_real")
     parser.add_argument("--text_only", action="store_true", help="Force text-only input path.")
@@ -1067,6 +1083,13 @@ def main() -> None:
     args = parse_args()
     if not args.reuse_dir and not args.model_name_or_path:
         raise SystemExit("ERROR: --model_name_or_path is required unless --reuse-dir is set.")
+
+    if args.only_json:
+        if args.pipeline != "sft":
+            raise SystemExit("ERROR: --only-json is available only when --pipeline sft.")
+        args.task_mode = "json_only"
+    if args.pipeline == "multitask":
+        print(f"Multitask task_mode: {args.task_mode}")
 
     args.device = choose_device(args.device)
     out_dir = build_output_dir(args)
