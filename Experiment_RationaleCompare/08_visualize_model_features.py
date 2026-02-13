@@ -80,6 +80,8 @@ except Exception:  # pragma: no cover
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SFT_PATH = os.path.join(SCRIPT_DIR, "audio_text_mix_e2e_re.py")
 MULTITASK_PATH = os.path.join(SCRIPT_DIR, "audio_text_mix_e2e_re_multitask.py")
+DEFAULT_HEATMAP_VMIN = 0.0
+DEFAULT_HEATMAP_VMAX = 62.859520
 
 
 def _load_module_from_path(name: str, path: str) -> Any:
@@ -1388,8 +1390,9 @@ def main() -> None:
     auto_heatmap_vmin, auto_heatmap_vmax = compute_heatmap_color_limits(stats["distance_matrix"])
     heatmap_vmin, heatmap_vmax = auto_heatmap_vmin, auto_heatmap_vmax
     heatmap_scale_source = "auto"
+    used_scale_file = bool(args.heatmap_scale_file and os.path.exists(args.heatmap_scale_file))
 
-    if args.heatmap_scale_file and os.path.exists(args.heatmap_scale_file):
+    if used_scale_file:
         file_vmin, file_vmax = _load_heatmap_scale(args.heatmap_scale_file)
         if file_vmin is not None and file_vmax is not None:
             heatmap_vmin, heatmap_vmax = file_vmin, file_vmax
@@ -1398,12 +1401,22 @@ def main() -> None:
                 f"Using heatmap scale from file: vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f}"
             )
 
+    cli_override = False
     if args.heatmap_vmin is not None:
         heatmap_vmin = float(args.heatmap_vmin)
         heatmap_scale_source = "cli"
+        cli_override = True
     if args.heatmap_vmax is not None:
         heatmap_vmax = float(args.heatmap_vmax)
         heatmap_scale_source = "cli"
+        cli_override = True
+
+    # Hard-coded default scale for cross-model comparability when not explicitly overridden.
+    if not used_scale_file and not cli_override:
+        heatmap_vmin = float(DEFAULT_HEATMAP_VMIN)
+        heatmap_vmax = float(DEFAULT_HEATMAP_VMAX)
+        heatmap_scale_source = "fixed_default"
+
     if heatmap_vmin is not None and heatmap_vmax is not None and heatmap_vmax <= heatmap_vmin:
         raise SystemExit("ERROR: heatmap scale requires vmax > vmin.")
 
