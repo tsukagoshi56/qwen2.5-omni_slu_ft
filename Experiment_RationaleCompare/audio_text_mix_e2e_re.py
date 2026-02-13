@@ -11,6 +11,7 @@ Audio/text mixed SLU training and distributed inference.
 """
 
 import argparse
+import contextlib
 import glob
 import importlib
 import inspect
@@ -416,6 +417,30 @@ def _audio_flamingo2_pick_lm_path(
     return str(fallback_lm_path or AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL["nvidia/audio-flamingo-2"]).strip()
 
 
+@contextlib.contextmanager
+def _audio_flamingo2_disable_weights_only_torch_load() -> Iterator[None]:
+    # PyTorch 2.6+ defaults torch.load(..., weights_only=True). AF2/CLAP legacy checkpoints
+    # may require full unpickling, so force weights_only=False during AF2 factory construction.
+    original_torch_load = torch.load
+    try:
+        supports_weights_only = "weights_only" in inspect.signature(torch.load).parameters
+    except (TypeError, ValueError):
+        supports_weights_only = False
+    if not supports_weights_only:
+        yield
+        return
+
+    def _torch_load_no_weights_only(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original_torch_load(*args, **kwargs)
+
+    torch.load = _torch_load_no_weights_only
+    try:
+        yield
+    finally:
+        torch.load = original_torch_load
+
+
 def _audio_flamingo2_load_state_dict_or_raise(safe_ckpt_dir: str) -> Dict[str, torch.Tensor]:
     try:
         from safetensors.torch import load_file
@@ -527,11 +552,12 @@ def load_audio_flamingo2_bundle_or_raise(
         create_model_and_transforms = getattr(factory_mod, "create_model_and_transforms", None)
         if create_model_and_transforms is None:
             raise AttributeError("src.factory.create_model_and_transforms is missing.")
-        created = create_model_and_transforms(
-            clap_config=clap_config,
-            use_local_files=bool(local_files_only),
-            **model_config,
-        )
+        with _audio_flamingo2_disable_weights_only_torch_load():
+            created = create_model_and_transforms(
+                clap_config=clap_config,
+                use_local_files=bool(local_files_only),
+                **model_config,
+            )
     finally:
         for inserted in inserted_paths:
             try:

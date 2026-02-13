@@ -120,6 +120,16 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - `--audio_flamingo2_lang_encoder_path` (LLMパス上書き)
 - `--audio_flamingo2_tokenizer_path` (Tokenizerパス上書き)
 
+よくある依存エラー対策:
+- `No module named h5py`:
+  - `pip install h5py`
+- `bpe_simple_vocab_16e6.txt.gz not found` (`clip` 不整合):
+  - `pip uninstall -y clip`
+  - `pip install --no-cache-dir git+https://github.com/openai/CLIP.git`
+- `UnpicklingError: Weights only load failed` (PyTorch 2.6+):
+  - このスクリプトでは AF2 ロード時に `torch.load(..., weights_only=False)` を自動適用済みです。
+  - 外部スクリプトで同エラーが出る場合は `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` を設定してください。
+
 ---
 
 ## 1) Oracle CoT generation (Method 2)
