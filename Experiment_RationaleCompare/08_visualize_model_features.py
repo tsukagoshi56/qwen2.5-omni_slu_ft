@@ -36,6 +36,11 @@ Examples:
     # Reuse already extracted features only
     python 08_visualize_model_features.py \
       --reuse-dir Experiment_RationaleCompare/analysis/model_feats_run_x
+
+    # All intents + centroid similarity ranking (no re-inference)
+    python 08_visualize_model_features.py \
+      --reuse-dir Experiment_RationaleCompare/analysis/model_feats_run_x \
+      --all-intents
 """
 
 import argparse
@@ -539,15 +544,24 @@ def _pairwise_euclidean(x: np.ndarray) -> np.ndarray:
     return np.linalg.norm(diff, axis=2).astype(np.float32)
 
 
+def _pairwise_cosine_similarity(x: np.ndarray) -> np.ndarray:
+    if x.shape[0] == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    x_norm = _l2_normalize_rows(x.astype(np.float32))
+    sim = x_norm @ x_norm.T
+    return np.clip(sim, -1.0, 1.0).astype(np.float32)
+
+
 def compute_intent_distance_stats(
     features: np.ndarray,
     intents: Sequence[str],
     min_intent_samples: int,
+    include_unknown: bool = False,
 ) -> Dict[str, Any]:
     counts = Counter(intents)
     valid_intents = [
         intent for intent, c in counts.items()
-        if intent != "__unknown__" and c >= min_intent_samples
+        if (include_unknown or intent != "__unknown__") and c >= min_intent_samples
     ]
     valid_intents.sort(key=lambda x: (-counts[x], x))
 
@@ -556,6 +570,7 @@ def compute_intent_distance_stats(
             "valid_intents": [],
             "centroids": np.zeros((0, features.shape[1]), dtype=np.float32),
             "distance_matrix": np.zeros((0, 0), dtype=np.float32),
+            "similarity_matrix": np.zeros((0, 0), dtype=np.float32),
             "intent_rows": [],
             "summary": {
                 "num_samples": int(features.shape[0]),
@@ -582,6 +597,7 @@ def compute_intent_distance_stats(
 
     centroid_arr = np.vstack(centroids).astype(np.float32)
     dist = _pairwise_euclidean(centroid_arr)
+    sim = _pairwise_cosine_similarity(centroid_arr)
 
     rows: List[Dict[str, Any]] = []
     for i, intent in enumerate(valid_intents):
@@ -624,6 +640,7 @@ def compute_intent_distance_stats(
         "valid_intents": valid_intents,
         "centroids": centroid_arr,
         "distance_matrix": dist,
+        "similarity_matrix": sim,
         "intent_rows": rows,
         "summary": summary,
         "counts": counts,
@@ -631,7 +648,9 @@ def compute_intent_distance_stats(
 
 
 def _pick_top_intents(counts: Counter, top_k: int) -> List[str]:
-    return [name for name, _ in counts.most_common(max(top_k, 1))]
+    if int(top_k) <= 0:
+        return sorted(counts.keys(), key=lambda x: (-counts.get(x, 0), x))
+    return [name for name, _ in counts.most_common(max(int(top_k), 1))]
 
 
 def plot_embedding_scatter(
@@ -646,8 +665,11 @@ def plot_embedding_scatter(
     top_k: int,
 ) -> None:
     _ensure_dir(os.path.dirname(out_path) or ".")
-    top_intents = set(_pick_top_intents(counts, top_k))
-    plot_labels = [x if x in top_intents else "other" for x in intents]
+    if int(top_k) <= 0:
+        plot_labels = list(intents)
+    else:
+        top_intents = set(_pick_top_intents(counts, top_k))
+        plot_labels = [x if x in top_intents else "other" for x in intents]
     unique = sorted(set(plot_labels), key=lambda x: (x == "other", -counts.get(x, 0), x))
     cmap = plt.get_cmap("tab20")
     colors = [cmap(i % 20) for i in range(len(unique))]
@@ -716,7 +738,9 @@ def plot_centroid_heatmap(
     if len(valid_intents) == 0 or distance_matrix.size == 0:
         return
 
-    top_order = sorted(valid_intents, key=lambda x: (-counts.get(x, 0), x))[: max(top_k, 1)]
+    top_order = sorted(valid_intents, key=lambda x: (-counts.get(x, 0), x))
+    if int(top_k) > 0:
+        top_order = top_order[: int(top_k)]
     idxs = [valid_intents.index(name) for name in top_order]
     sub = distance_matrix[np.ix_(idxs, idxs)]
 
@@ -764,6 +788,93 @@ def save_centroid_distance_csv(
             for j in range(i + 1, len(valid_intents)):
                 b = valid_intents[j]
                 writer.writerow([a, b, float(dist[i, j])])
+
+
+def build_centroid_similarity_rows(
+    valid_intents: Sequence[str],
+    counts: Counter,
+    dist: np.ndarray,
+    sim: np.ndarray,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for i, a in enumerate(valid_intents):
+        for j in range(i + 1, len(valid_intents)):
+            b = valid_intents[j]
+            rows.append({
+                "intent_a": a,
+                "intent_b": b,
+                "count_a": int(counts.get(a, 0)),
+                "count_b": int(counts.get(b, 0)),
+                "cosine_similarity": float(sim[i, j]),
+                "euclidean_distance": float(dist[i, j]),
+            })
+    rows.sort(
+        key=lambda r: (
+            -float(r["cosine_similarity"]),
+            float(r["euclidean_distance"]),
+            -(int(r["count_a"]) + int(r["count_b"])),
+            str(r["intent_a"]),
+            str(r["intent_b"]),
+        )
+    )
+    return rows
+
+
+def build_intent_neighbor_rows(
+    valid_intents: Sequence[str],
+    dist: np.ndarray,
+    sim: np.ndarray,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for i, base in enumerate(valid_intents):
+        cand: List[Tuple[int, float, float]] = []
+        for j, neigh in enumerate(valid_intents):
+            if i == j:
+                continue
+            cand.append((j, float(sim[i, j]), float(dist[i, j])))
+        cand.sort(key=lambda x: (-x[1], x[2], valid_intents[x[0]]))
+        for rank, (j, s, d) in enumerate(cand, start=1):
+            rows.append({
+                "intent": base,
+                "rank": rank,
+                "neighbor_intent": valid_intents[j],
+                "cosine_similarity": s,
+                "euclidean_distance": d,
+            })
+    return rows
+
+
+def save_centroid_similarity_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    fieldnames = [
+        "intent_a",
+        "intent_b",
+        "count_a",
+        "count_b",
+        "cosine_similarity",
+        "euclidean_distance",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def save_intent_neighbor_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    fieldnames = [
+        "intent",
+        "rank",
+        "neighbor_intent",
+        "cosine_similarity",
+        "euclidean_distance",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def _unpack_batch(batch: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Dict[str, torch.Tensor]]]:
@@ -1072,7 +1183,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-dir", type=str, default=os.path.join(SCRIPT_DIR, "analysis"))
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--min-intent-samples", type=int, default=5)
-    parser.add_argument("--top-intents", type=int, default=20)
+    parser.add_argument("--top-intents", type=int, default=20,
+                        help="Scatter/heatmapで表示するIntent数。0以下で全Intentを表示")
+    parser.add_argument("--all-intents", action="store_true",
+                        help="Intent解析を全Intent対象にする (min-intent-samples=1, top-intents=0)")
+    parser.add_argument("--include-unknown-intent", action="store_true",
+                        help="__unknown__ Intentも解析対象に含める")
     parser.add_argument("--print-audio-search-paths", action="store_true")
     parser.add_argument("--audio-search-print-limit", type=int, default=20)
     parser.add_argument("--strict-audio-missing", action="store_true")
@@ -1090,6 +1206,10 @@ def main() -> None:
         args.task_mode = "json_only"
     if args.pipeline == "multitask":
         print(f"Multitask task_mode: {args.task_mode}")
+    if args.all_intents:
+        args.min_intent_samples = 1
+        args.top_intents = 0
+        print("All-intents mode: min_intent_samples=1, top_intents=0")
 
     args.device = choose_device(args.device)
     out_dir = build_output_dir(args)
@@ -1190,6 +1310,18 @@ def main() -> None:
         features=features,
         intents=intents,
         min_intent_samples=max(1, int(args.min_intent_samples)),
+        include_unknown=bool(args.include_unknown_intent),
+    )
+    sim_rows = build_centroid_similarity_rows(
+        valid_intents=stats["valid_intents"],
+        counts=stats["counts"],
+        dist=stats["distance_matrix"],
+        sim=stats["similarity_matrix"],
+    )
+    neigh_rows = build_intent_neighbor_rows(
+        valid_intents=stats["valid_intents"],
+        dist=stats["distance_matrix"],
+        sim=stats["similarity_matrix"],
     )
 
     save_feature_artifacts(
@@ -1212,6 +1344,8 @@ def main() -> None:
         "l2_normalize": bool(args.l2_normalize),
         "min_intent_samples": int(args.min_intent_samples),
         "top_intents": int(args.top_intents),
+        "all_intents": bool(args.all_intents),
+        "include_unknown_intent": bool(args.include_unknown_intent),
         "device": args.device,
         "num_samples": int(features.shape[0]),
         "feature_dim": int(features.shape[1]),
@@ -1237,6 +1371,14 @@ def main() -> None:
         stats["valid_intents"],
         stats["distance_matrix"],
     )
+    save_centroid_similarity_csv(
+        os.path.join(out_dir, "centroid_similarity_pairs.csv"),
+        sim_rows,
+    )
+    save_intent_neighbor_csv(
+        os.path.join(out_dir, "intent_neighbor_ranking.csv"),
+        neigh_rows,
+    )
 
     title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
     if "pca" in projections:
@@ -1247,7 +1389,7 @@ def main() -> None:
             out_path=os.path.join(out_dir, "pca_scatter_by_intent.png"),
             title=title,
             explained_ratio=explained_ratio,
-            top_k=max(1, int(args.top_intents)),
+            top_k=int(args.top_intents),
         )
     if "tsne" in projections:
         plot_embedding_scatter(
@@ -1259,7 +1401,7 @@ def main() -> None:
             x_label="t-SNE-1",
             y_label="t-SNE-2",
             subtitle="t-SNE-2D",
-            top_k=max(1, int(args.top_intents)),
+            top_k=int(args.top_intents),
         )
     if "umap" in projections:
         plot_embedding_scatter(
@@ -1271,14 +1413,14 @@ def main() -> None:
             x_label="UMAP-1",
             y_label="UMAP-2",
             subtitle="UMAP-2D",
-            top_k=max(1, int(args.top_intents)),
+            top_k=int(args.top_intents),
         )
     plot_centroid_heatmap(
         valid_intents=stats["valid_intents"],
         distance_matrix=stats["distance_matrix"],
         counts=stats["counts"],
         out_path=os.path.join(out_dir, "centroid_distance_heatmap.png"),
-        top_k=max(1, int(args.top_intents)),
+        top_k=int(args.top_intents),
     )
 
     print(f"Saved analysis dir: {out_dir}")
@@ -1286,6 +1428,8 @@ def main() -> None:
     print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
     print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
     print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
+    print(f"- {os.path.join(out_dir, 'centroid_similarity_pairs.csv')}")
+    print(f"- {os.path.join(out_dir, 'intent_neighbor_ranking.csv')}")
     if "pca" in projections:
         print(f"- {os.path.join(out_dir, 'pca_scatter_by_intent.png')}")
     if "tsne" in projections:
