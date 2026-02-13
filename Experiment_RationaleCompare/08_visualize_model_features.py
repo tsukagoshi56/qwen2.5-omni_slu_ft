@@ -59,6 +59,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -754,6 +755,7 @@ def plot_centroid_heatmap(
     top_k: int,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    heatmap_gamma: float = 1.0,
 ) -> None:
     if len(valid_intents) == 0 or distance_matrix.size == 0:
         return
@@ -765,7 +767,14 @@ def plot_centroid_heatmap(
     sub = distance_matrix[np.ix_(idxs, idxs)]
 
     fig, ax = plt.subplots(figsize=(max(6, len(top_order) * 0.4), max(5, len(top_order) * 0.35)))
-    im = ax.imshow(sub, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
+    norm = None
+    gamma = float(heatmap_gamma)
+    if vmin is not None and vmax is not None and gamma > 0 and abs(gamma - 1.0) > 1e-6:
+        norm = mcolors.PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
+    if norm is not None:
+        im = ax.imshow(sub, cmap="viridis", interpolation="nearest", norm=norm)
+    else:
+        im = ax.imshow(sub, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
     ax.set_xticks(np.arange(len(top_order)))
     ax.set_yticks(np.arange(len(top_order)))
     ax.set_xticklabels(top_order, rotation=60, ha="right", fontsize=7)
@@ -958,6 +967,7 @@ def plot_distance_gradient_heatmap(
     title: str,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    heatmap_gamma: float = 1.0,
 ) -> None:
     if len(ordered_intents) == 0 or distance_matrix.size == 0:
         return
@@ -965,7 +975,14 @@ def plot_distance_gradient_heatmap(
     _ensure_dir(os.path.dirname(out_path) or ".")
     sub = np.asarray(distance_matrix, dtype=np.float32)
     fig, ax = plt.subplots(figsize=(max(6, len(ordered_intents) * 0.45), max(5, len(ordered_intents) * 0.38)))
-    im = ax.imshow(sub, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
+    norm = None
+    gamma = float(heatmap_gamma)
+    if vmin is not None and vmax is not None and gamma > 0 and abs(gamma - 1.0) > 1e-6:
+        norm = mcolors.PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
+    if norm is not None:
+        im = ax.imshow(sub, cmap="viridis", interpolation="nearest", norm=norm)
+    else:
+        im = ax.imshow(sub, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
     ax.set_xticks(np.arange(len(ordered_intents)))
     ax.set_yticks(np.arange(len(ordered_intents)))
     ax.set_xticklabels(ordered_intents, rotation=60, ha="right", fontsize=7)
@@ -1303,6 +1320,8 @@ def parse_args() -> argparse.Namespace:
                         help="ヒートマップ色スケール上限を固定（モデル間比較用）")
     parser.add_argument("--heatmap-scale-file", type=str, default=None,
                         help="共通スケールJSON（存在すれば読込、無ければ今回値を書き出し）")
+    parser.add_argument("--heatmap-gamma", type=float, default=0.6,
+                        help="ヒートマップのグラデーション強度（PowerNorm）。1.0=線形、1未満で低中距離を強調")
     parser.add_argument("--print-audio-search-paths", action="store_true")
     parser.add_argument("--audio-search-print-limit", type=int, default=20)
     parser.add_argument("--strict-audio-missing", action="store_true")
@@ -1318,6 +1337,8 @@ def main() -> None:
         if args.pipeline != "sft":
             raise SystemExit("ERROR: --only-json is available only when --pipeline sft.")
         args.task_mode = "json_only"
+    if float(args.heatmap_gamma) <= 0:
+        raise SystemExit("ERROR: --heatmap-gamma must be > 0.")
     if args.pipeline == "multitask":
         print(f"Multitask task_mode: {args.task_mode}")
     if args.all_intents:
@@ -1540,6 +1561,7 @@ def main() -> None:
         "visualization_top_intents": int(viz_top_k),
         "heatmap_vmin": float(heatmap_vmin) if heatmap_vmin is not None else None,
         "heatmap_vmax": float(heatmap_vmax) if heatmap_vmax is not None else None,
+        "heatmap_gamma": float(args.heatmap_gamma),
         "heatmap_scale_source": heatmap_scale_source,
         "heatmap_scale_file": args.heatmap_scale_file,
         "embeddings_requested": requested_embeddings,
@@ -1583,6 +1605,7 @@ def main() -> None:
         title=f"Centroid Distance Heatmap (rank-step={int(args.distance_rank_step)})",
         vmin=heatmap_vmin,
         vmax=heatmap_vmax,
+        heatmap_gamma=float(args.heatmap_gamma),
     )
 
     title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
@@ -1631,6 +1654,7 @@ def main() -> None:
         top_k=int(args.top_intents),
         vmin=heatmap_vmin,
         vmax=heatmap_vmax,
+        heatmap_gamma=float(args.heatmap_gamma),
     )
 
     print(f"Saved analysis dir: {out_dir}")
