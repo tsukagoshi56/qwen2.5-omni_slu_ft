@@ -370,6 +370,7 @@ def infer_intent_from_item(
     item: Dict[str, Any],
     gold_intent_by_slurp_id: Optional[Dict[str, Tuple[str, str, str]]] = None,
     gold_intent_by_file: Optional[Dict[str, Tuple[str, str, str]]] = None,
+    use_pred_label_fallback: bool = True,
 ) -> Tuple[str, str, str]:
     target_obj = item.get("target_obj")
     scenario = ""
@@ -378,7 +379,7 @@ def infer_intent_from_item(
         scenario, action = _extract_label_from_json_obj(target_obj)
     if not scenario and not action:
         scenario, action = _parse_label_from_target_text(item.get("target", ""))
-    if (not scenario or not action) and isinstance(item.get("pred_label"), dict):
+    if use_pred_label_fallback and (not scenario or not action) and isinstance(item.get("pred_label"), dict):
         s2, a2 = _extract_label_from_json_obj(item.get("pred_label"))
         scenario = scenario or s2
         action = action or a2
@@ -484,28 +485,66 @@ def _find_j_line_span(text: str) -> Optional[Tuple[int, int]]:
     return int(match.start(1)), int(match.end(1))
 
 
+def _find_json_key_value_span(text: str, key: str, value: str) -> Optional[Tuple[int, int]]:
+    t = str(text or "")
+    k = str(key or "").strip()
+    v = str(value or "").strip()
+    if not t or not k or not v:
+        return None
+    pattern = re.compile(
+        rf'(?is)["\']{re.escape(k)}["\']\s*[:：]\s*["\']({re.escape(v)})["\']'
+    )
+    match = None
+    for m in pattern.finditer(t):
+        match = m
+    if match is None:
+        return None
+    return int(match.start(1)), int(match.end(1))
+
+
 def _select_generated_intent_token_indices(
     tokenizer: Any,
     generated_ids: Sequence[int],
     intent_label: str,
+    scenario: str = "",
+    action: str = "",
 ) -> Tuple[List[int], str]:
     output_text, offsets = _decode_text_and_offsets(tokenizer, generated_ids)
     candidate_idxs = [i for i, (s, e) in enumerate(offsets) if e > s]
 
-    span = _find_span_case_insensitive(output_text, intent_label)
-    span_source = "intent_label"
-    if span is None:
-        span = _find_j_line_span(output_text)
-        span_source = "j_line"
-    if span is None:
+    spans: List[Tuple[int, int]] = []
+    span_source = ""
+
+    s_span = _find_json_key_value_span(output_text, "scenario", scenario)
+    a_span = _find_json_key_value_span(output_text, "action", action)
+    if s_span is not None:
+        spans.append(s_span)
+    if a_span is not None:
+        spans.append(a_span)
+    if spans:
+        span_source = "scenario_action_keys"
+    else:
+        span = _find_span_case_insensitive(output_text, intent_label)
+        if span is not None:
+            spans = [span]
+            span_source = "intent_label"
+        else:
+            span = _find_j_line_span(output_text)
+            if span is not None:
+                spans = [span]
+                span_source = "j_line"
+
+    if not spans:
         if candidate_idxs:
             return candidate_idxs, "full_generated"
         if offsets:
             return [max(0, len(offsets) - 1)], "fallback_last"
         return [], "empty_generated"
 
-    a, b = span
-    selected = [i for i, (s, e) in enumerate(offsets) if e > a and s < b and e > s]
+    selected: List[int] = []
+    for a, b in spans:
+        selected.extend([i for i, (s, e) in enumerate(offsets) if e > a and s < b and e > s])
+    selected = sorted(set(selected))
     if selected:
         return selected, span_source
     if candidate_idxs:
@@ -1278,6 +1317,12 @@ def extract_features_from_model(
             one = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
             if "input_ids" not in one:
                 continue
+            scenario, action, intent = infer_intent_from_item(
+                item,
+                gold_intent_by_slurp_id=gold_intent_by_slurp_id,
+                gold_intent_by_file=gold_intent_by_file,
+                use_pred_label_fallback=False,
+            )
             if "attention_mask" not in one:
                 one["attention_mask"] = torch.ones_like(one["input_ids"], dtype=torch.long)
             if hasattr(pipeline_mod, "_ensure_feature_masks_for_generation"):
@@ -1288,6 +1333,9 @@ def extract_features_from_model(
 
             span_source = "prompt_pool"
             intent_token_count = 0
+            intent_lookup_label_source = "n/a"
+            intent_lookup_scenario = ""
+            intent_lookup_action = ""
             if args.feature_source == "intent_generation":
                 gen_kwargs: Dict[str, Any] = dict(one)
                 gen_kwargs["max_new_tokens"] = max(1, int(args.intent_max_new_tokens))
@@ -1310,32 +1358,41 @@ def extract_features_from_model(
                 if seq_len > prompt_len:
                     generated_ids = sequences[0, prompt_len:].detach().cpu().tolist()
                     generated_text = _decode_text_from_token_ids(tokenizer, generated_ids)
-                    pred_intent_label = ""
+                    lookup_scenario = ""
+                    lookup_action = ""
                     parse_fn = getattr(pipeline_mod, "parse_prediction_label", None)
                     if callable(parse_fn):
                         try:
                             pred = parse_fn(generated_text)
                             if isinstance(pred, dict):
-                                ps = str(pred.get("scenario", "") or "").strip().lower()
-                                pa = str(pred.get("action", "") or "").strip().lower()
+                                ps, pa = _extract_label_from_json_obj(pred)
                                 if ps and pa:
-                                    pred_intent_label = f"{ps}_{pa}"
+                                    lookup_scenario, lookup_action = ps, pa
+                                    intent_lookup_label_source = "predicted"
                         except Exception:
-                            pred_intent_label = ""
-
-                    if not pred_intent_label:
-                        _, _, pred_intent_label = infer_intent_from_item(
-                            item,
-                            gold_intent_by_slurp_id=gold_intent_by_slurp_id,
-                            gold_intent_by_file=gold_intent_by_file,
-                        )
-                        if pred_intent_label == "__unknown__":
-                            pred_intent_label = ""
+                            pass
+                    if not lookup_scenario or not lookup_action:
+                        ps, pa = _parse_label_from_target_text(generated_text)
+                        if ps and pa:
+                            lookup_scenario, lookup_action = ps, pa
+                            intent_lookup_label_source = "predicted"
+                    if (not lookup_scenario or not lookup_action) and scenario and action:
+                        lookup_scenario, lookup_action = scenario, action
+                        intent_lookup_label_source = "gold_fallback"
+                    if not lookup_scenario or not lookup_action:
+                        intent_lookup_label_source = "none"
+                    intent_lookup_scenario = lookup_scenario
+                    intent_lookup_action = lookup_action
+                    lookup_intent_label = (
+                        f"{lookup_scenario}_{lookup_action}" if lookup_scenario and lookup_action else ""
+                    )
 
                     selected_local, span_source = _select_generated_intent_token_indices(
                         tokenizer=tokenizer,
                         generated_ids=generated_ids,
-                        intent_label=pred_intent_label,
+                        intent_label=lookup_intent_label,
+                        scenario=lookup_scenario,
+                        action=lookup_action,
                     )
                     intent_token_count = int(len(selected_local))
                     selected_global = [prompt_len + int(i) for i in selected_local]
@@ -1376,11 +1433,6 @@ def extract_features_from_model(
             if args.l2_normalize:
                 vec = _l2_normalize_rows(vec.reshape(1, -1))[0]
 
-            scenario, action, intent = infer_intent_from_item(
-                item,
-                gold_intent_by_slurp_id=gold_intent_by_slurp_id,
-                gold_intent_by_file=gold_intent_by_file,
-            )
             rows.append({
                 "_global_index": int(item.get("_global_index")) if item.get("_global_index") is not None else None,
                 "id": str(item.get("id", "")),
@@ -1393,6 +1445,10 @@ def extract_features_from_model(
                 "input_type": "audio" if item.get("audio_path") else "text",
                 "audio_path": str(item.get("audio_path", "")) if item.get("audio_path") else "",
                 "feature_source": str(args.feature_source),
+                "label_source": "gold",
+                "intent_lookup_label_source": intent_lookup_label_source,
+                "intent_lookup_scenario": intent_lookup_scenario,
+                "intent_lookup_action": intent_lookup_action,
                 "intent_span_source": span_source,
                 "intent_token_count": int(intent_token_count),
             })
@@ -1970,6 +2026,7 @@ def main() -> None:
             "layer_index": int(args.layer_index),
             "feature_source": str(args.feature_source),
             "intent_max_new_tokens": int(args.intent_max_new_tokens),
+            "label_source": "gold",
             "l2_normalize": bool(effective_l2_normalize),
             "min_intent_samples": int(args.min_intent_samples),
             "top_intents": int(args.top_intents),
