@@ -12,6 +12,7 @@ Audio/text mixed SLU training and distributed inference.
 
 import argparse
 import contextlib
+import datetime
 import glob
 import importlib
 import inspect
@@ -3537,6 +3538,20 @@ def _generate_batch_audio_flamingo2(
     return results
 
 
+def _distributed_barrier_or_raise(*, rank: int, stage: str) -> None:
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    if rank == 0:
+        logger.info("Distributed barrier start: %s", stage)
+    t0 = time.perf_counter()
+    try:
+        dist.barrier()
+    except Exception as exc:
+        raise RuntimeError(f"Distributed barrier failed at stage='{stage}': {exc}") from exc
+    if rank == 0:
+        logger.info("Distributed barrier done: %s (elapsed=%.1fs)", stage, time.perf_counter() - t0)
+
+
 def run_distributed_inference(
     model,
     processor,
@@ -3668,7 +3683,7 @@ def run_distributed_inference(
         logger.error("Rank %d failed to save temp file: %s", rank, exc)
 
     if world_size > 1:
-        dist.barrier()
+        _distributed_barrier_or_raise(rank=rank, stage="inference_temp_file_flush")
 
     if rank == 0:
         logger.info("Merging results to %s", output_path)
@@ -3995,6 +4010,12 @@ def main():
         help="DataLoader workers for test inference (0 is safer to avoid deadlocks).",
     )
     parser.add_argument(
+        "--ddp_timeout_seconds",
+        type=int,
+        default=900,
+        help="Timeout for torch.distributed collective ops in seconds.",
+    )
+    parser.add_argument(
         "--audio_flamingo2_space_repo",
         type=str,
         default=AUDIO_FLAMINGO2_DEFAULT_SPACE_REPO,
@@ -4127,10 +4148,17 @@ def main():
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if local_rank != -1:
-        dist.init_process_group(backend="nccl")
+        timeout_seconds = max(60, int(args.ddp_timeout_seconds))
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if backend == "nccl":
+            torch.cuda.set_device(local_rank)
+        dist.init_process_group(
+            backend=backend,
+            timeout=datetime.timedelta(seconds=timeout_seconds),
+        )
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(f"cuda:{local_rank}" if backend == "nccl" else "cpu")
     else:
         rank = 0
         world_size = 1
@@ -4147,6 +4175,15 @@ def main():
             not bool(args.allow_nondeterministic),
             bool(args.deterministic_warn_only),
         )
+        if world_size > 1:
+            logger.info(
+                "Distributed init done | backend=%s world_size=%d rank=%d local_rank=%d timeout=%ds",
+                dist.get_backend(),
+                world_size,
+                rank,
+                local_rank,
+                max(60, int(args.ddp_timeout_seconds)),
+            )
 
     metadata = load_metadata(args.metadata_file)
     db_definitions = build_db_definitions(metadata)
@@ -4348,7 +4385,7 @@ def main():
         processor.save_pretrained(args.output_dir)
 
     if world_size > 1:
-        dist.barrier()
+        _distributed_barrier_or_raise(rank=rank, stage="post_train_pre_inference")
 
     test_max_samples = 10 if args.smoke else None
     if rank == 0 and args.smoke:
@@ -4392,7 +4429,7 @@ def main():
     )
 
     if world_size > 1:
-        dist.barrier()
+        _distributed_barrier_or_raise(rank=rank, stage="post_inference_pre_export")
 
     if rank == 0 and args.export_label_eval:
         eval_output_dir = os.path.dirname(output_jsonl) or "."
@@ -4412,9 +4449,18 @@ def main():
         logger.info("Saved predictions: %s", output_jsonl)
 
     if world_size > 1:
-        dist.barrier()
-        dist.destroy_process_group()
+        _distributed_barrier_or_raise(rank=rank, stage="finalize")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user (KeyboardInterrupt).")
+        raise
+    finally:
+        if dist.is_available() and dist.is_initialized():
+            try:
+                dist.destroy_process_group()
+            except Exception as exc:
+                logger.warning("Failed to destroy process group cleanly: %s", exc)

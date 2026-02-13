@@ -125,6 +125,12 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - `--audio_flamingo2_local_files_only` (ネットワークを使わずローカルのみ)
 - `--audio_flamingo2_lang_encoder_path` (LLMパス上書き)
 - `--audio_flamingo2_tokenizer_path` (Tokenizerパス上書き)
+- `--ddp_timeout_seconds` (default: `900`, 分散collectiveのtimeout秒数)
+
+停止しづらい時の推奨:
+- `--inference_num_workers 0`（既定値）を維持
+- timeout短縮: `--ddp_timeout_seconds 300`
+- ログに `Distributed barrier start/done` が出るので、どの同期地点で止まっているか確認可能
 
 よくある依存エラー対策:
 - `No module named h5py`:
