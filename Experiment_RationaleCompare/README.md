@@ -292,6 +292,7 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re_multitask.py \
 - `--cot_train_file`: CoT branch training file (`C/R/J` task).
 - `--eval_file` / `--cot_eval_file`: same split logic for validation.
 - If `--cot_train_file` is omitted, the script auto-creates both tasks from `--train_file`.
+- 再現性を固定したい場合は `--seed` を指定します（`--train_id_sample_seed` / `--random_cot_seed` 未指定時は `--seed` が使われます）。
 - Test inference remains standard prediction output (no multitask duplication at test time).
 - For test-time J-only generation, use `--no_cot` (equivalent to `--test_task_mode label`).
 - For test-time candidates+label generation (no rationale), use `--candidates_only` (equivalent to `--test_task_mode candidates`).

@@ -55,6 +55,11 @@ try:
 except ImportError:
     HAS_JIWER = False
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 AUDIO_ENCODER_MODULE_NAME_HINTS = (
@@ -180,6 +185,64 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
             "Install librosa for train/eval/test with audio, or run --recover_only."
         )
     return librosa.load(audio_path, sr=sr)
+
+
+def configure_reproducibility(
+    seed: int,
+    *,
+    strict_determinism: bool,
+    deterministic_warn_only: bool,
+) -> None:
+    seed = int(seed)
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+
+    hf_transformers.set_seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    try:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+    except Exception:
+        pass
+    try:
+        torch.backends.cudnn.allow_tf32 = False
+    except Exception:
+        pass
+
+    try:
+        torch.use_deterministic_algorithms(bool(strict_determinism), warn_only=bool(deterministic_warn_only))
+    except TypeError:
+        if strict_determinism:
+            torch.use_deterministic_algorithms(True)
+
+    pyhash_seed = os.environ.get("PYTHONHASHSEED", "")
+    if pyhash_seed != str(seed):
+        logger.warning(
+            "PYTHONHASHSEED=%s differs from --seed=%d. "
+            "For full reproducibility across Python hash-based ordering, launch with PYTHONHASHSEED=%d.",
+            pyhash_seed,
+            seed,
+            seed,
+        )
+
+
+def _seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    if np is not None:
+        np.random.seed(worker_seed)
 
 
 def _infer_model_family(model_name_or_path: str) -> str:
@@ -2221,21 +2284,27 @@ class CustomTrainer(Trainer):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
+        seed = int(getattr(self.args, "seed", 0))
         batch_sampler = DistributedHomogeneousBatchSampler(
             self.train_dataset,
             batch_size=self.args.train_batch_size,
             num_replicas=self.args.world_size,
             rank=self.args.process_index,
             drop_last=self.args.dataloader_drop_last,
+            seed=seed,
             shuffle=True,
             total_epochs=int(self.args.num_train_epochs),
         )
+        worker_gen = torch.Generator()
+        worker_gen.manual_seed(seed)
         return DataLoader(
             self.train_dataset,
             batch_sampler=batch_sampler,
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers,
             pin_memory=self.args.dataloader_pin_memory,
+            worker_init_fn=_seed_worker,
+            generator=worker_gen,
         )
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -2858,6 +2927,7 @@ def run_distributed_inference(
     batch_size=1,
     max_new_tokens: int = 2048,
     num_workers: int = 0,
+    seed: int = 0,
 ):
     model.eval()
 
@@ -2879,6 +2949,8 @@ def run_distributed_inference(
 
     # Audio Loader
     if my_audio_items:
+        audio_loader_gen = torch.Generator()
+        audio_loader_gen.manual_seed(int(seed) + int(rank) * 10007 + 1)
         audio_loader = DataLoader(
             MixedDataset(my_audio_items),
             batch_size=batch_size,
@@ -2886,6 +2958,8 @@ def run_distributed_inference(
             collate_fn=InferenceCollator(processor, per_sample=per_sample_inference),
             drop_last=False,
             shuffle=False,
+            worker_init_fn=_seed_worker,
+            generator=audio_loader_gen,
         )
         for i, batch_data in enumerate(audio_loader):
             if rank == 0 and i % 10 == 0:
@@ -2907,6 +2981,8 @@ def run_distributed_inference(
 
     # Text Loader
     if my_text_items:
+        text_loader_gen = torch.Generator()
+        text_loader_gen.manual_seed(int(seed) + int(rank) * 10007 + 2)
         text_loader = DataLoader(
             MixedDataset(my_text_items),
             batch_size=batch_size,
@@ -2914,6 +2990,8 @@ def run_distributed_inference(
             collate_fn=InferenceCollator(processor, per_sample=per_sample_inference),
             drop_last=False,
             shuffle=False,
+            worker_init_fn=_seed_worker,
+            generator=text_loader_gen,
         )
         for i, batch_data in enumerate(text_loader):
             if rank == 0 and i % 10 == 0:
@@ -3259,6 +3337,22 @@ def main():
 
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Global random seed for Python/NumPy/PyTorch/Trainer/Sampler.",
+    )
+    parser.add_argument(
+        "--allow_nondeterministic",
+        action="store_true",
+        help="Allow non-deterministic CUDA kernels (faster but weaker reproducibility).",
+    )
+    parser.add_argument(
+        "--deterministic_warn_only",
+        action="store_true",
+        help="Warn (instead of error) when non-deterministic ops are encountered.",
+    )
+    parser.add_argument(
         "--train_id_sample_ratio",
         type=float,
         default=1.0,
@@ -3267,8 +3361,8 @@ def main():
     parser.add_argument(
         "--train_id_sample_seed",
         type=int,
-        default=42,
-        help="Random seed for train SLURP ID subsampling.",
+        default=None,
+        help="Random seed for train SLURP ID subsampling (default: --seed).",
     )
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
@@ -3384,8 +3478,8 @@ def main():
         "--random_cot_seed",
         "--random-cot-seed",
         type=int,
-        default=42,
-        help="Random seed for --random_cot target shuffling.",
+        default=None,
+        help="Random seed for --random_cot target shuffling (default: --seed).",
     )
     parser.add_argument(
         "--export_label_eval",
@@ -3479,6 +3573,15 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
+    if args.train_id_sample_seed is None:
+        args.train_id_sample_seed = int(args.seed)
+    if args.random_cot_seed is None:
+        args.random_cot_seed = int(args.seed)
+    configure_reproducibility(
+        args.seed,
+        strict_determinism=not bool(args.allow_nondeterministic),
+        deterministic_warn_only=bool(args.deterministic_warn_only),
+    )
     cot_train_task_mode = "candidates" if args.train_candidates_only else "cot"
     if not (0.0 <= args.train_id_sample_ratio <= 1.0):
         raise ValueError("--train_id_sample_ratio must be between 0.0 and 1.0")
@@ -3524,6 +3627,14 @@ def main():
             logger.info("File logging enabled: %s", os.path.abspath(log_path))
         else:
             logger.info("File logging disabled.")
+        logger.info(
+            "Reproducibility config | seed=%d train_id_sample_seed=%d random_cot_seed=%d strict_determinism=%s warn_only=%s",
+            int(args.seed),
+            int(args.train_id_sample_seed),
+            int(args.random_cot_seed),
+            not bool(args.allow_nondeterministic),
+            bool(args.deterministic_warn_only),
+        )
 
     metadata = load_metadata(args.metadata_file)
     db_definitions = build_db_definitions(metadata)
@@ -3750,24 +3861,32 @@ def main():
             )
 
     if not args.inference_only:
-        training_args = TrainingArguments(
-            output_dir=args.output_dir,
-            num_train_epochs=args.num_train_epochs,
-            per_device_train_batch_size=args.batch_size,
-            per_device_eval_batch_size=args.batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            learning_rate=args.learning_rate,
-            bf16=True,
-            logging_steps=1 if args.smoke else 10,
-            eval_strategy="steps" if len(eval_items) > 0 else "no",
-            eval_steps=2 if args.smoke else 50,
-            save_strategy="no",
-            save_total_limit=None,
-            remove_unused_columns=False,
-            ddp_find_unused_parameters=True,
-            report_to="none",
-            disable_tqdm=True,
-        )
+        training_kwargs: Dict[str, Any] = {
+            "output_dir": args.output_dir,
+            "num_train_epochs": args.num_train_epochs,
+            "per_device_train_batch_size": args.batch_size,
+            "per_device_eval_batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "learning_rate": args.learning_rate,
+            "bf16": True,
+            "logging_steps": 1 if args.smoke else 10,
+            "eval_strategy": "steps" if len(eval_items) > 0 else "no",
+            "eval_steps": 2 if args.smoke else 50,
+            "save_strategy": "no",
+            "save_total_limit": None,
+            "remove_unused_columns": False,
+            "ddp_find_unused_parameters": True,
+            "report_to": "none",
+            "disable_tqdm": True,
+            "seed": int(args.seed),
+            "data_seed": int(args.seed),
+        }
+        training_sig = inspect.signature(TrainingArguments.__init__).parameters
+        if "full_determinism" in training_sig:
+            training_kwargs["full_determinism"] = not bool(args.allow_nondeterministic)
+        if "tf32" in training_sig:
+            training_kwargs["tf32"] = False
+        training_args = TrainingArguments(**training_kwargs)
 
         trainer_kwargs = {
             "model": model,
@@ -3854,6 +3973,7 @@ def main():
             batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
             num_workers=args.inference_num_workers,
+            seed=args.seed,
         )
 
         if rank == 0 and args.export_label_eval:
