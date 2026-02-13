@@ -187,8 +187,6 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
 
 def _infer_model_family(model_name_or_path: str) -> str:
     name_lc = str(model_name_or_path or "").lower()
-    if "falcon-3-audio" in name_lc or "falcon3-audio" in name_lc:
-        return "falcon-audio"
     if "music-flamingo" in name_lc:
         return "music-flamingo"
     if "audio-flamingo-3" in name_lc or "flamingo" in name_lc:
@@ -319,24 +317,6 @@ def load_audio_model_from_pretrained(
             attempts,
             getattr(voxtral_cls, "__name__", "Voxtral*"),
             voxtral_cls,
-            seen_loader_ids,
-        )
-        _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
-        _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
-
-    elif family == "falcon-audio":
-        falcon_audio_cls = _optional_transformers_class(
-            "Falcon3AudioForConditionalGeneration",
-            "Falcon3AudioForCausalLM",
-            "FalconAudioForConditionalGeneration",
-            "FalconAudioForCausalLM",
-            "Falcon3ForConditionalGeneration",
-            "Falcon3ForCausalLM",
-        )
-        _append_attempt(
-            attempts,
-            getattr(falcon_audio_cls, "__name__", "FalconAudio*"),
-            falcon_audio_cls,
             seen_loader_ids,
         )
         _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
@@ -621,7 +601,7 @@ def _infer_audio_input_mode(
     family = _infer_model_family(" ".join(probes))
     # For Qwen/Flamingo families, keep audio waveform path explicit via processor(..., audio=[...]).
     # Tokenized chat-template can succeed without real audio features on some model versions.
-    if family in {"qwen", "flamingo", "music-flamingo", "voxtral", "falcon-audio"}:
+    if family in {"qwen", "flamingo", "music-flamingo", "voxtral"}:
         return "processor_audio"
     return "tokenized_chat_template"
 

@@ -224,19 +224,6 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
   --add_text_only
 ```
 
-Falcon 3 Audio 1B can be used in the same script by only changing `--model_name_or_path`:
-
-```bash
-python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
-  --model_name_or_path tiiuae/falcon-3-audio-1b \
-  --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
-  --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
-  --test_file  slurp/dataset/slurp/test.jsonl \
-  --audio_dir  slurp/slurp_real \
-  --output_file outputs/falcon3_audio_1b_rationale_label_ft/prediction.jsonl \
-  --add_text_only
-```
-
 - `--add_text_only` lets the trainer include a text‑only copy of each audio sample.
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
 - Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
