@@ -11,13 +11,15 @@ Design goals:
   - audio_text_mix_e2e_re_multitask.py (multitask pipeline)
 - Save reusable feature artifacts under analysis/ for later reruns.
 - Provide centroid distance statistics to inspect intent boundary separation.
+- Visualize multiple 2D embeddings: PCA / t-SNE / UMAP.
 
 Examples:
     # SFT-style prompt (C/R/J), audio-only test behavior
     python 08_visualize_model_features.py \
       --model_name_or_path outputs/qwen_rationale_label_ft \
       --pipeline sft \
-      --task-mode cot
+      --task-mode cot \
+      --embeddings pca,tsne,umap
 
     # Multitask label-only prompt feature extraction
     python 08_visualize_model_features.py \
@@ -53,6 +55,14 @@ try:
 except Exception:  # pragma: no cover
     def tqdm(iterable=None, *args, **kwargs):  # type: ignore
         return iterable
+try:
+    from sklearn.manifold import TSNE
+except Exception:  # pragma: no cover
+    TSNE = None
+try:
+    import umap  # type: ignore
+except Exception:  # pragma: no cover
+    umap = None
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -429,6 +439,93 @@ def pca_project_2d(x: np.ndarray) -> Tuple[np.ndarray, Tuple[float, float]]:
     return proj.astype(np.float32), (r0, r1)
 
 
+def _parse_csv_set(text: str) -> List[str]:
+    values = [x.strip().lower() for x in str(text or "").split(",") if x.strip()]
+    seen = set()
+    out: List[str] = []
+    for v in values:
+        if v in seen:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out
+
+
+def tsne_project_2d(
+    x: np.ndarray,
+    perplexity: float,
+    learning_rate: float,
+    n_iter: int,
+    init: str,
+    random_state: int,
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    if TSNE is None:
+        return None, "scikit-learn is not installed."
+    if x.ndim != 2 or x.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32), None
+    if x.shape[0] == 1:
+        return np.zeros((1, 2), dtype=np.float32), None
+
+    n = int(x.shape[0])
+    max_perp = max(1.0, float(n - 1))
+    perp = min(float(perplexity), max_perp)
+    if perp >= n:
+        perp = max(1.0, float(n - 1))
+
+    kwargs: Dict[str, Any] = {
+        "n_components": 2,
+        "perplexity": perp,
+        "learning_rate": float(learning_rate),
+        "init": str(init),
+        "random_state": int(random_state),
+    }
+    try:
+        sig = inspect.signature(TSNE.__init__)
+        if "n_iter" in sig.parameters:
+            kwargs["n_iter"] = int(n_iter)
+        elif "max_iter" in sig.parameters:
+            kwargs["max_iter"] = int(n_iter)
+    except Exception:
+        kwargs["n_iter"] = int(n_iter)
+
+    try:
+        model = TSNE(**kwargs)
+        proj = model.fit_transform(x)
+        return np.asarray(proj, dtype=np.float32), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def umap_project_2d(
+    x: np.ndarray,
+    n_neighbors: int,
+    min_dist: float,
+    metric: str,
+    random_state: int,
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    if umap is None:
+        return None, "umap-learn is not installed."
+    if x.ndim != 2 or x.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32), None
+    if x.shape[0] == 1:
+        return np.zeros((1, 2), dtype=np.float32), None
+
+    n = int(x.shape[0])
+    nn = max(2, min(int(n_neighbors), n - 1))
+    try:
+        reducer = umap.UMAP(
+            n_components=2,
+            n_neighbors=nn,
+            min_dist=float(min_dist),
+            metric=str(metric),
+            random_state=int(random_state),
+        )
+        proj = reducer.fit_transform(x)
+        return np.asarray(proj, dtype=np.float32), None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def _pairwise_euclidean(x: np.ndarray) -> np.ndarray:
     if x.shape[0] == 0:
         return np.zeros((0, 0), dtype=np.float32)
@@ -531,13 +628,15 @@ def _pick_top_intents(counts: Counter, top_k: int) -> List[str]:
     return [name for name, _ in counts.most_common(max(top_k, 1))]
 
 
-def plot_pca_scatter(
+def plot_embedding_scatter(
     projection: np.ndarray,
     intents: Sequence[str],
     counts: Counter,
     out_path: str,
     title: str,
-    explained_ratio: Tuple[float, float],
+    x_label: str,
+    y_label: str,
+    subtitle: Optional[str],
     top_k: int,
 ) -> None:
     _ensure_dir(os.path.dirname(out_path) or ".")
@@ -564,18 +663,41 @@ def plot_pca_scatter(
             edgecolors="none",
         )
 
-    ax.set_title(
-        f"{title}\nPCA-2D (var: PC1={explained_ratio[0]*100:.1f}%, PC2={explained_ratio[1]*100:.1f}%)",
-        fontsize=11,
-    )
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
+    if subtitle:
+        ax.set_title(f"{title}\n{subtitle}", fontsize=11)
+    else:
+        ax.set_title(title, fontsize=11)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.25, linewidth=0.5)
     if len(unique) <= 25:
         ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=True)
     fig.tight_layout()
     fig.savefig(out_path, dpi=250)
     plt.close(fig)
+
+
+def plot_pca_scatter(
+    projection: np.ndarray,
+    intents: Sequence[str],
+    counts: Counter,
+    out_path: str,
+    title: str,
+    explained_ratio: Tuple[float, float],
+    top_k: int,
+) -> None:
+    subtitle = f"PCA-2D (var: PC1={explained_ratio[0]*100:.1f}%, PC2={explained_ratio[1]*100:.1f}%)"
+    plot_embedding_scatter(
+        projection=projection,
+        intents=intents,
+        counts=counts,
+        out_path=out_path,
+        title=title,
+        x_label="PC1",
+        y_label="PC2",
+        subtitle=subtitle,
+        top_k=top_k,
+    )
 
 
 def plot_centroid_heatmap(
@@ -813,23 +935,34 @@ def extract_features_from_model(
 def save_feature_artifacts(
     out_dir: str,
     features: np.ndarray,
-    projection: np.ndarray,
-    explained_ratio: Tuple[float, float],
     rows: List[Dict[str, Any]],
+    projections: Dict[str, np.ndarray],
+    pca_explained_ratio: Tuple[float, float],
 ) -> None:
     _ensure_dir(out_dir)
     intents = np.asarray([r.get("intent", "__unknown__") for r in rows], dtype=object)
     ids = np.asarray([r.get("id", "") for r in rows], dtype=object)
     files = np.asarray([r.get("file", "") for r in rows], dtype=object)
-    np.savez_compressed(
-        os.path.join(out_dir, "features.npz"),
-        features=features.astype(np.float32),
-        projection_2d=projection.astype(np.float32),
-        explained_var_ratio=np.asarray(explained_ratio, dtype=np.float32),
-        intents=intents,
-        ids=ids,
-        files=files,
-    )
+    payload: Dict[str, Any] = {
+        "features": features.astype(np.float32),
+        "explained_var_ratio": np.asarray(pca_explained_ratio, dtype=np.float32),
+        "intents": intents,
+        "ids": ids,
+        "files": files,
+    }
+    pca_proj = projections.get("pca")
+    if pca_proj is not None:
+        # backward compatible key
+        payload["projection_2d"] = np.asarray(pca_proj, dtype=np.float32)
+        payload["projection_pca_2d"] = np.asarray(pca_proj, dtype=np.float32)
+    tsne_proj = projections.get("tsne")
+    if tsne_proj is not None:
+        payload["projection_tsne_2d"] = np.asarray(tsne_proj, dtype=np.float32)
+    umap_proj = projections.get("umap")
+    if umap_proj is not None:
+        payload["projection_umap_2d"] = np.asarray(umap_proj, dtype=np.float32)
+
+    np.savez_compressed(os.path.join(out_dir, "features.npz"), **payload)
     _write_jsonl(os.path.join(out_dir, "metadata.jsonl"), rows)
 
 
@@ -910,6 +1043,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pooling", type=str, default="mean", choices=["mean", "last"])
     parser.add_argument("--layer-index", type=int, default=-1, help="Hidden layer index (-1 means last hidden layer).")
     parser.add_argument("--l2-normalize", action="store_true", help="L2 normalize each feature vector.")
+    parser.add_argument("--embeddings", type=str, default="pca,tsne,umap",
+                        help="2D embeddings to compute (comma): pca,tsne,umap")
+    parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--tsne-perplexity", type=float, default=30.0)
+    parser.add_argument("--tsne-learning-rate", type=float, default=200.0)
+    parser.add_argument("--tsne-n-iter", type=int, default=1000)
+    parser.add_argument("--tsne-init", type=str, default="pca", choices=["pca", "random"])
+    parser.add_argument("--umap-n-neighbors", type=int, default=15)
+    parser.add_argument("--umap-min-dist", type=float, default=0.1)
+    parser.add_argument("--umap-metric", type=str, default="euclidean")
     parser.add_argument("--analysis-dir", type=str, default=os.path.join(SCRIPT_DIR, "analysis"))
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--min-intent-samples", type=int, default=5)
@@ -964,9 +1107,61 @@ def main() -> None:
     if unknown_n == len(rows) and len(rows) > 0:
         print("WARNING: All intents are unknown. Check --test_file / metadata parsing.", file=sys.stderr)
 
-    projection, explained_ratio = pca_project_2d(features)
     intents = [r.get("intent", "__unknown__") for r in rows]
     counts = Counter(intents)
+    requested_embeddings = _parse_csv_set(args.embeddings)
+    if not requested_embeddings:
+        requested_embeddings = ["pca"]
+    valid_embedding_names = {"pca", "tsne", "umap"}
+    unknown_embeddings = [x for x in requested_embeddings if x not in valid_embedding_names]
+    if unknown_embeddings:
+        print(f"WARNING: Unknown embeddings ignored: {unknown_embeddings}", file=sys.stderr)
+    requested_embeddings = [x for x in requested_embeddings if x in valid_embedding_names]
+    if not requested_embeddings:
+        requested_embeddings = ["pca"]
+
+    projections: Dict[str, np.ndarray] = {}
+    embedding_notes: Dict[str, str] = {}
+    explained_ratio = (0.0, 0.0)
+
+    if "pca" in requested_embeddings:
+        print("Computing PCA-2D...")
+        pca_projection, explained_ratio = pca_project_2d(features)
+        projections["pca"] = pca_projection
+        embedding_notes["pca"] = "ok"
+
+    if "tsne" in requested_embeddings:
+        print("Computing t-SNE-2D...")
+        tsne_projection, tsne_err = tsne_project_2d(
+            x=features,
+            perplexity=args.tsne_perplexity,
+            learning_rate=args.tsne_learning_rate,
+            n_iter=args.tsne_n_iter,
+            init=args.tsne_init,
+            random_state=args.random_state,
+        )
+        if tsne_projection is not None:
+            projections["tsne"] = tsne_projection
+            embedding_notes["tsne"] = "ok"
+        else:
+            embedding_notes["tsne"] = f"skipped: {tsne_err}"
+            print(f"WARNING: t-SNE skipped: {tsne_err}", file=sys.stderr)
+
+    if "umap" in requested_embeddings:
+        print("Computing UMAP-2D...")
+        umap_projection, umap_err = umap_project_2d(
+            x=features,
+            n_neighbors=args.umap_n_neighbors,
+            min_dist=args.umap_min_dist,
+            metric=args.umap_metric,
+            random_state=args.random_state,
+        )
+        if umap_projection is not None:
+            projections["umap"] = umap_projection
+            embedding_notes["umap"] = "ok"
+        else:
+            embedding_notes["umap"] = f"skipped: {umap_err}"
+            print(f"WARNING: UMAP skipped: {umap_err}", file=sys.stderr)
 
     stats = compute_intent_distance_stats(
         features=features,
@@ -974,7 +1169,13 @@ def main() -> None:
         min_intent_samples=max(1, int(args.min_intent_samples)),
     )
 
-    save_feature_artifacts(out_dir, features, projection, explained_ratio, rows)
+    save_feature_artifacts(
+        out_dir=out_dir,
+        features=features,
+        rows=rows,
+        projections=projections,
+        pca_explained_ratio=explained_ratio,
+    )
 
     config = {
         "model_name_or_path": args.model_name_or_path,
@@ -992,6 +1193,17 @@ def main() -> None:
         "num_samples": int(features.shape[0]),
         "feature_dim": int(features.shape[1]),
         "num_unique_intents": len(counts),
+        "embeddings_requested": requested_embeddings,
+        "embeddings_computed": sorted(list(projections.keys())),
+        "embedding_notes": embedding_notes,
+        "random_state": int(args.random_state),
+        "tsne_perplexity": float(args.tsne_perplexity),
+        "tsne_learning_rate": float(args.tsne_learning_rate),
+        "tsne_n_iter": int(args.tsne_n_iter),
+        "tsne_init": str(args.tsne_init),
+        "umap_n_neighbors": int(args.umap_n_neighbors),
+        "umap_min_dist": float(args.umap_min_dist),
+        "umap_metric": str(args.umap_metric),
         "pca_explained_var_ratio": [float(explained_ratio[0]), float(explained_ratio[1])],
     }
     _write_json(os.path.join(out_dir, "config.json"), config)
@@ -1004,15 +1216,40 @@ def main() -> None:
     )
 
     title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
-    plot_pca_scatter(
-        projection=projection,
-        intents=intents,
-        counts=counts,
-        out_path=os.path.join(out_dir, "pca_scatter_by_intent.png"),
-        title=title,
-        explained_ratio=explained_ratio,
-        top_k=max(1, int(args.top_intents)),
-    )
+    if "pca" in projections:
+        plot_pca_scatter(
+            projection=projections["pca"],
+            intents=intents,
+            counts=counts,
+            out_path=os.path.join(out_dir, "pca_scatter_by_intent.png"),
+            title=title,
+            explained_ratio=explained_ratio,
+            top_k=max(1, int(args.top_intents)),
+        )
+    if "tsne" in projections:
+        plot_embedding_scatter(
+            projection=projections["tsne"],
+            intents=intents,
+            counts=counts,
+            out_path=os.path.join(out_dir, "tsne_scatter_by_intent.png"),
+            title=title,
+            x_label="t-SNE-1",
+            y_label="t-SNE-2",
+            subtitle="t-SNE-2D",
+            top_k=max(1, int(args.top_intents)),
+        )
+    if "umap" in projections:
+        plot_embedding_scatter(
+            projection=projections["umap"],
+            intents=intents,
+            counts=counts,
+            out_path=os.path.join(out_dir, "umap_scatter_by_intent.png"),
+            title=title,
+            x_label="UMAP-1",
+            y_label="UMAP-2",
+            subtitle="UMAP-2D",
+            top_k=max(1, int(args.top_intents)),
+        )
     plot_centroid_heatmap(
         valid_intents=stats["valid_intents"],
         distance_matrix=stats["distance_matrix"],
@@ -1026,7 +1263,12 @@ def main() -> None:
     print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
     print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
     print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
-    print(f"- {os.path.join(out_dir, 'pca_scatter_by_intent.png')}")
+    if "pca" in projections:
+        print(f"- {os.path.join(out_dir, 'pca_scatter_by_intent.png')}")
+    if "tsne" in projections:
+        print(f"- {os.path.join(out_dir, 'tsne_scatter_by_intent.png')}")
+    if "umap" in projections:
+        print(f"- {os.path.join(out_dir, 'umap_scatter_by_intent.png')}")
     print(f"- {os.path.join(out_dir, 'centroid_distance_heatmap.png')}")
     print("Summary:")
     print(json.dumps(stats["summary"], ensure_ascii=False, indent=2))
