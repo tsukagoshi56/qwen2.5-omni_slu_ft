@@ -12,6 +12,7 @@ Audio/text mixed SLU training and distributed inference.
 
 import argparse
 import glob
+import importlib.util
 import inspect
 import json
 import logging
@@ -19,6 +20,7 @@ import os
 import random
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -187,6 +189,8 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
 
 def _infer_model_family(model_name_or_path: str) -> str:
     name_lc = str(model_name_or_path or "").lower()
+    if "salmonn" in name_lc:
+        return "salmonn"
     if "music-flamingo" in name_lc:
         return "music-flamingo"
     if "audio-flamingo-3" in name_lc or "flamingo" in name_lc:
@@ -196,6 +200,93 @@ def _infer_model_family(model_name_or_path: str) -> str:
     if "qwen" in name_lc:
         return "qwen"
     return "other"
+
+
+SALMONN_DEFAULT_PROMPT_PATTERN = "USER: <Speech><SpeechHere></Speech> {}\nASSISTANT:"
+
+
+def _load_salmonn_model_class_or_raise(salmonn_code_dir: str):
+    code_dir = os.path.abspath(os.path.expanduser(str(salmonn_code_dir or "").strip()))
+    if not code_dir:
+        raise ValueError(
+            "SALMONN mode requires --salmonn_code_dir pointing to the official code directory "
+            "(the directory that contains model.py)."
+        )
+
+    model_py = os.path.join(code_dir, "model.py")
+    if not os.path.isfile(model_py):
+        raise FileNotFoundError(
+            f"SALMONN official model.py was not found at '{model_py}'. "
+            "Set --salmonn_code_dir to the official repository root."
+        )
+
+    inserted = False
+    if code_dir not in sys.path:
+        sys.path.insert(0, code_dir)
+        inserted = True
+
+    try:
+        module_name = "_salmonn_official_model"
+        spec = importlib.util.spec_from_file_location(module_name, model_py)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Unable to create import spec for '{model_py}'.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        model_cls = getattr(module, "SALMONN", None)
+        if model_cls is None:
+            raise AttributeError(f"'SALMONN' class was not found in '{model_py}'.")
+        return model_cls
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load SALMONN official implementation. "
+            "Check dependencies required by official model.py (e.g., peft, soundfile, transformers)."
+        ) from exc
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(code_dir)
+            except ValueError:
+                pass
+
+
+def load_salmonn_model_or_raise(
+    *,
+    model_name_or_path: str,
+    salmonn_code_dir: str,
+    salmonn_ckpt_path: str,
+    salmonn_whisper_path: str,
+    salmonn_beats_path: str,
+    salmonn_vicuna_path: str,
+    salmonn_lora_alpha: int,
+    salmonn_low_resource: bool,
+):
+    model_cls = _load_salmonn_model_class_or_raise(salmonn_code_dir)
+
+    ckpt_path = str(salmonn_ckpt_path or "").strip()
+    if not ckpt_path:
+        ckpt_path = str(model_name_or_path or "").strip()
+    beats_path = str(salmonn_beats_path or "").strip()
+
+    errors: List[str] = []
+    if not ckpt_path:
+        errors.append("--salmonn_ckpt_path is required (or set --model_name_or_path to local checkpoint path).")
+    elif not os.path.isfile(ckpt_path):
+        errors.append(f"SALMONN checkpoint file not found: {ckpt_path}")
+    if not beats_path:
+        errors.append("--salmonn_beats_path is required (local BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt).")
+    elif not os.path.isfile(beats_path):
+        errors.append(f"SALMONN BEATs checkpoint file not found: {beats_path}")
+    if errors:
+        raise ValueError(" | ".join(errors))
+
+    return model_cls(
+        ckpt=ckpt_path,
+        whisper_path=str(salmonn_whisper_path or "").strip(),
+        beats_path=beats_path,
+        vicuna_path=str(salmonn_vicuna_path or "").strip(),
+        lora_alpha=int(salmonn_lora_alpha),
+        low_resource=bool(salmonn_low_resource),
+    )
 
 
 def load_audio_model_from_pretrained(
@@ -2900,6 +2991,152 @@ def run_distributed_inference(
             )
 
 
+def run_distributed_inference_salmonn(
+    *,
+    model_name_or_path: str,
+    items: List[Dict[str, Any]],
+    output_path: str,
+    rank: int,
+    world_size: int,
+    device: str,
+    max_length: int,
+    prompt_pattern: str,
+    num_beams: int,
+    do_sample: bool,
+    min_length: int,
+    top_p: float,
+    repetition_penalty: float,
+    length_penalty: float,
+    temperature: float,
+    salmonn_code_dir: str,
+    salmonn_ckpt_path: str,
+    salmonn_whisper_path: str,
+    salmonn_beats_path: str,
+    salmonn_vicuna_path: str,
+    salmonn_lora_alpha: int,
+    salmonn_low_resource: bool,
+) -> None:
+    model = load_salmonn_model_or_raise(
+        model_name_or_path=model_name_or_path,
+        salmonn_code_dir=salmonn_code_dir,
+        salmonn_ckpt_path=salmonn_ckpt_path,
+        salmonn_whisper_path=salmonn_whisper_path,
+        salmonn_beats_path=salmonn_beats_path,
+        salmonn_vicuna_path=salmonn_vicuna_path,
+        salmonn_lora_alpha=salmonn_lora_alpha,
+        salmonn_low_resource=salmonn_low_resource,
+    )
+    model.eval()
+
+    my_items = items[rank::world_size]
+    my_audio_items = [x for x in my_items if x.get("audio_path")]
+    my_text_items = [x for x in my_items if not x.get("audio_path")]
+
+    if my_text_items:
+        logger.warning(
+            "Rank %d: skipping %d text-only items in SALMONN mode (audio is mandatory).",
+            rank,
+            len(my_text_items),
+        )
+
+    if rank == 0:
+        logger.info(
+            "Starting SALMONN inference. Items: %d (Audio: %d, Text skipped: %d)",
+            len(my_items),
+            len(my_audio_items),
+            len(my_text_items),
+        )
+
+    local_results: List[Dict[str, Any]] = []
+    for i, item in enumerate(my_audio_items):
+        if rank == 0 and i % 20 == 0:
+            logger.info("SALMONN item %d/%d", i + 1, len(my_audio_items))
+        try:
+            prompt_text = build_prompt_text(item)
+            generated = model.generate(
+                item["audio_path"],
+                prompt_text,
+                prompt_pattern=prompt_pattern,
+                device=device,
+                max_length=max_length,
+                num_beams=num_beams,
+                do_sample=do_sample,
+                min_length=min_length,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                length_penalty=length_penalty,
+                temperature=temperature,
+            )
+            if isinstance(generated, (list, tuple)):
+                raw_output = str(generated[0]) if generated else ""
+            else:
+                raw_output = str(generated)
+            raw_output = raw_output.strip()
+
+            pred_label = parse_prediction_label(raw_output)
+            wer_score = calculate_wer(item.get("transcript", ""), raw_output)
+
+            local_results.append(
+                {
+                    "scenario": pred_label["scenario"],
+                    "action": pred_label["action"],
+                    "entities": pred_label["entities"],
+                    "pred_label": pred_label,
+                    "file": item.get("file"),
+                    "slurp_id": item.get("slurp_id"),
+                    "id": item.get("id"),
+                    "wer": wer_score,
+                    "transcript": item.get("transcript", ""),
+                    "candidates": item.get("candidates", []),
+                    "rationale_text": item.get("rationale_text", ""),
+                    "raw_output": raw_output,
+                    "target": item.get("target", ""),
+                    "target_label": item.get("target_obj", {}),
+                    "type": "audio",
+                }
+            )
+        except Exception as exc:
+            logger.error("Rank %d failed on SALMONN item %s: %s", rank, item.get("id"), exc)
+
+    temp_output_path = f"{output_path}.rank{rank}"
+    try:
+        with open(temp_output_path, "w", encoding="utf-8") as f:
+            for res in local_results:
+                f.write(json.dumps(res, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as exc:
+        logger.error("Rank %d failed to save SALMONN temp file: %s", rank, exc)
+
+    if world_size > 1:
+        dist.barrier()
+
+    expected_total = sum(1 for x in items if x.get("audio_path"))
+    if rank == 0:
+        logger.info("Merging SALMONN results to %s", output_path)
+        pattern = f"{output_path}.rank*"
+        temp_files = sorted(glob.glob(pattern))
+        with open(output_path, "w", encoding="utf-8") as outfile:
+            for fname in temp_files:
+                try:
+                    with open(fname, "r", encoding="utf-8") as infile:
+                        shutil.copyfileobj(infile, outfile)
+                    os.remove(fname)
+                except Exception as exc:
+                    logger.error("SALMONN merge error %s: %s", fname, exc)
+        merged_count = 0
+        with open(output_path, "r", encoding="utf-8") as infile:
+            for line in infile:
+                if line.strip():
+                    merged_count += 1
+        logger.info("Merged SALMONN predictions: %d / %d audio items", merged_count, expected_total)
+        if expected_total > 0 and merged_count == 0:
+            raise RuntimeError(
+                "SALMONN inference produced 0 predictions although audio test items were loaded. "
+                "Check warnings/errors above."
+            )
+
+
 def save_label_only_predictions(full_prediction_path: str, label_only_path: str):
     rows = []
     with open(full_prediction_path, "r", encoding="utf-8") as f:
@@ -3184,6 +3421,62 @@ def main():
         help="DataLoader workers for test inference (0 is safer to avoid deadlocks).",
     )
     parser.add_argument(
+        "--salmonn_code_dir",
+        type=str,
+        default="",
+        help="Official SALMONN code directory that contains model.py.",
+    )
+    parser.add_argument(
+        "--salmonn_ckpt_path",
+        type=str,
+        default="",
+        help="Path to SALMONN checkpoint (.pth).",
+    )
+    parser.add_argument(
+        "--salmonn_whisper_path",
+        type=str,
+        default="openai/whisper-large-v2",
+        help="Whisper checkpoint path/name used by official SALMONN.",
+    )
+    parser.add_argument(
+        "--salmonn_beats_path",
+        type=str,
+        default="",
+        help="Path to BEATs checkpoint used by official SALMONN.",
+    )
+    parser.add_argument(
+        "--salmonn_vicuna_path",
+        type=str,
+        default="lmsys/vicuna-13b-v1.1",
+        help="Vicuna checkpoint path/name used by official SALMONN.",
+    )
+    parser.add_argument("--salmonn_lora_alpha", type=int, default=32)
+    parser.add_argument("--salmonn_low_resource", action="store_true")
+    parser.add_argument(
+        "--salmonn_device",
+        type=str,
+        default="",
+        help="Device string passed to official SALMONN.generate (default: current rank device).",
+    )
+    parser.add_argument(
+        "--salmonn_prompt_pattern",
+        type=str,
+        default=SALMONN_DEFAULT_PROMPT_PATTERN,
+        help="Prompt pattern string passed to official SALMONN.generate.",
+    )
+    parser.add_argument("--salmonn_max_length", type=int, default=200)
+    parser.add_argument("--salmonn_num_beams", type=int, default=4)
+    parser.add_argument(
+        "--salmonn_no_sample",
+        action="store_true",
+        help="Disable sampling in official SALMONN.generate.",
+    )
+    parser.add_argument("--salmonn_min_length", type=int, default=1)
+    parser.add_argument("--salmonn_top_p", type=float, default=0.9)
+    parser.add_argument("--salmonn_repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--salmonn_length_penalty", type=float, default=1.0)
+    parser.add_argument("--salmonn_temperature", type=float, default=1.0)
+    parser.add_argument(
         "--train_audio_encoder",
         action="store_true",
         help="Enable training of audio-related encoder parameters.",
@@ -3250,6 +3543,7 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
+    model_family = _infer_model_family(args.model_name_or_path)
 
     if not (0.0 <= args.train_id_sample_ratio <= 1.0):
         raise ValueError("--train_id_sample_ratio must be between 0.0 and 1.0")
@@ -3313,6 +3607,89 @@ def main():
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
+        logger.info("Detected model family: %s", model_family)
+
+    if model_family == "salmonn":
+        if rank == 0:
+            logger.info("SALMONN mode detected. Training/eval fine-tuning path is skipped (inference only).")
+            if args.text_only:
+                logger.warning("SALMONN mode ignores --text_only because audio is mandatory.")
+
+        test_max_samples = 10 if args.smoke else None
+        if rank == 0 and args.smoke:
+            logger.info("Loading only %d test items (smoke).", test_max_samples)
+
+        test_items = build_items_from_rationale_jsonl(
+            args.test_file,
+            args.audio_dir,
+            add_text_only=False,
+            text_only=False,
+            max_samples=test_max_samples,
+            allow_text_fallback_when_audio_missing=False,
+            print_audio_search_paths=args.print_audio_search_paths,
+            audio_search_print_limit=args.audio_search_print_limit,
+            strict_audio_missing=args.strict_audio_missing,
+            train_candidates_only=False,
+            train_json_only=False,
+        )
+
+        output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
+        output_parent = os.path.dirname(output_jsonl)
+        if output_parent:
+            os.makedirs(output_parent, exist_ok=True)
+        if rank == 0:
+            logger.info("SALMONN prediction output file: %s", output_jsonl)
+
+        infer_device = args.salmonn_device.strip() if args.salmonn_device.strip() else str(device)
+        run_distributed_inference_salmonn(
+            model_name_or_path=args.model_name_or_path,
+            items=test_items,
+            output_path=output_jsonl,
+            rank=rank,
+            world_size=world_size,
+            device=infer_device,
+            max_length=max(1, int(args.salmonn_max_length)),
+            prompt_pattern=str(args.salmonn_prompt_pattern),
+            num_beams=max(1, int(args.salmonn_num_beams)),
+            do_sample=not bool(args.salmonn_no_sample),
+            min_length=max(0, int(args.salmonn_min_length)),
+            top_p=float(args.salmonn_top_p),
+            repetition_penalty=float(args.salmonn_repetition_penalty),
+            length_penalty=float(args.salmonn_length_penalty),
+            temperature=float(args.salmonn_temperature),
+            salmonn_code_dir=args.salmonn_code_dir,
+            salmonn_ckpt_path=args.salmonn_ckpt_path,
+            salmonn_whisper_path=args.salmonn_whisper_path,
+            salmonn_beats_path=args.salmonn_beats_path,
+            salmonn_vicuna_path=args.salmonn_vicuna_path,
+            salmonn_lora_alpha=args.salmonn_lora_alpha,
+            salmonn_low_resource=args.salmonn_low_resource,
+        )
+
+        if world_size > 1:
+            dist.barrier()
+
+        if rank == 0 and args.export_label_eval:
+            eval_output_dir = os.path.dirname(output_jsonl) or "."
+            label_only_path = os.path.join(eval_output_dir, "prediction_labels_only.jsonl")
+            save_label_only_predictions(output_jsonl, label_only_path)
+
+            metrics = evaluate_prediction_file(output_jsonl)
+            metrics_path = os.path.join(eval_output_dir, "metrics_label_only.json")
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+            logger.info("Label-only evaluation metrics: %s", json.dumps(metrics, ensure_ascii=False))
+            logger.info("Saved full predictions: %s", output_jsonl)
+            logger.info("Saved label-only predictions: %s", label_only_path)
+            logger.info("Saved metrics: %s", metrics_path)
+        elif rank == 0:
+            logger.info("Saved predictions: %s", output_jsonl)
+
+        if world_size > 1:
+            dist.barrier()
+            dist.destroy_process_group()
+        return
 
     train_max_samples = args.max_samples
     eval_max_samples = args.eval_max_samples

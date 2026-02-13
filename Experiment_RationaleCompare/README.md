@@ -228,6 +228,40 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
 - Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
 
+### SALMONN-13B inference mode (official implementation bridge)
+
+`audio_text_mix_e2e_re.py` now supports **SALMONN** via model-family auto detection.
+
+- If `--model_name_or_path` contains `salmonn`, the script switches to **SALMONN mode**.
+- In SALMONN mode, the script runs **inference only** (training/eval fine-tuning path is skipped).
+- Existing Qwen/Flamingo/Voxtral behavior is unchanged.
+
+Required assets for SALMONN mode:
+- Official SALMONN code directory (`model.py` must exist): `--salmonn_code_dir`
+- SALMONN checkpoint (`.pth`): `--salmonn_ckpt_path` (or set this path in `--model_name_or_path`)
+- BEATs checkpoint: `--salmonn_beats_path`
+
+Example:
+
+```bash
+python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
+  --model_name_or_path SALMONN-13B \
+  --salmonn_code_dir /path/to/SALMONN-13B \
+  --salmonn_ckpt_path /path/to/salmonn13b.pth \
+  --salmonn_beats_path /path/to/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt \
+  --salmonn_whisper_path openai/whisper-large-v2 \
+  --salmonn_vicuna_path lmsys/vicuna-13b-v1.1 \
+  --test_file slurp/dataset/slurp/test.jsonl \
+  --audio_dir slurp/slurp_real \
+  --output_file outputs/salmonn_rationale_label_ft/prediction.jsonl
+```
+
+Optional decoding controls:
+- `--salmonn_prompt_pattern` (default: `USER: <Speech><SpeechHere></Speech> {}\nASSISTANT:`)
+- `--salmonn_max_length`, `--salmonn_num_beams`, `--salmonn_no_sample`
+- `--salmonn_min_length`, `--salmonn_top_p`, `--salmonn_repetition_penalty`
+- `--salmonn_length_penalty`, `--salmonn_temperature`, `--salmonn_device`
+
 ### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
 
 This variant trains two tasks together:
