@@ -241,6 +241,18 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
   --add_text_only
 ```
 
+Qwen2.5-Omni で `forward_unimplemented` / `rope_scaling` 系エラーが出る場合:
+
+```bash
+cd "/Users/tsukagoshi/Documents/大学/研究室/修論_研究/intern/qwen2 2.5-omni_slu_ft"
+uv sync
+uv pip install --upgrade --force-reinstall --no-cache-dir \
+  "git+https://github.com/huggingface/transformers" accelerate
+```
+
+- モデルIDは厳密に `Qwen/Qwen2.5-Omni-3B`（`^` は無効）。
+- 実行は必ず `uv run ...` を使う（別Pythonを使うと依存不一致になりやすい）。
+
 ### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
 
 This variant trains two tasks together:

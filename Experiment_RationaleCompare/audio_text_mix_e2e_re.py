@@ -204,6 +204,10 @@ def load_audio_model_from_pretrained(
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
+    def _is_unimplemented_forward_error(text: str) -> bool:
+        t = str(text or "").lower()
+        return ("forward() is unimplemented" in t) or ("_forward_unimplemented" in t)
+
     def _has_unimplemented_forward(model: Any) -> bool:
         try:
             cls_forward = getattr(type(model), "forward", None)
@@ -235,6 +239,11 @@ def load_audio_model_from_pretrained(
 
     family = _infer_model_family(model_name_or_path)
     model_name_lc = str(model_name_or_path or "").lower()
+    if "^" in str(model_name_or_path or ""):
+        raise ValueError(
+            "model_name_or_path contains '^', which is invalid for HF model ids. "
+            "Did you mean 'Qwen/Qwen2.5-Omni-3B'?"
+        )
 
     # Qwen path: prioritize dedicated loaders, then fallback to AutoModel loaders.
     if family == "qwen":
@@ -281,6 +290,13 @@ def load_audio_model_from_pretrained(
                 qwen_errors.append(f"{loader_name}: {exc}")
 
         detail = " | ".join(qwen_errors) if qwen_errors else "no qwen loader available"
+        if _is_unimplemented_forward_error(detail):
+            detail = (
+                f"{detail} | Hint: this Python env likely has an older/partial transformers build for "
+                "Qwen2.5-Omni. In the SAME uv environment, run: "
+                "uv pip install --upgrade --force-reinstall --no-cache-dir "
+                "\"git+https://github.com/huggingface/transformers\" accelerate"
+            )
         raise RuntimeError(
             f"Failed to load Qwen model '{model_name_or_path}'. Details: {detail}"
         )
