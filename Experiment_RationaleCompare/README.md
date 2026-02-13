@@ -85,68 +85,6 @@ model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
 
 ---
 
-### Audio Flamingo 2 (`cannot load feature extractor`) 対応
-
-`nvidia/audio-flamingo-2*` は通常の `AutoProcessor.from_pretrained(...)` では失敗しやすいため、  
-`audio_text_mix_e2e_re.py` に **専用ロード経路**を追加しています。
-
-対応モデル:
-- `nvidia/audio-flamingo-2`
-- `nvidia/audio-flamingo-2-0.5B`
-- `nvidia/audio-flamingo-2-1.5B`
-
-このモデル群を `--model_name_or_path` に指定すると、自動で以下を行います:
-- HF Space (`nvidia/audio-flamingo-2`) から推論コード/設定を取得
-- モデルrepo側の `safe_ckpt` / `clap_ckpt` を取得
-- 専用の前処理 (`lang_x`, `audio_x`, `audio_x_mask`) で学習・推論を実行
-
-初回と2回目以降の挙動:
-- 初回: キャッシュにないファイルをダウンロード
-- 2回目以降: 既存キャッシュを再利用（通常は再ダウンロード不要）
-- ただし毎回、モデル構築・重み読込・GPU転送は実行されます
-- 完全オフラインでキャッシュのみ使う場合は `--audio_flamingo2_local_files_only` を指定
-
-最小実行例:
-
-```bash
-python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
-  --model_name_or_path nvidia/audio-flamingo-2-0.5B \
-  --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
-  --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
-  --test_file  slurp/dataset/slurp/test.jsonl \
-  --audio_dir  slurp/slurp_real \
-  --output_dir outputs/audio_flamingo2_05b \
-  --output_file outputs/audio_flamingo2_05b/prediction.jsonl
-```
-
-主なAF2専用オプション:
-- `--audio_flamingo2_space_repo` (default: `nvidia/audio-flamingo-2`)
-- `--audio_flamingo2_cache_dir` (default: `~/.cache/huggingface/audio_flamingo2`)
-- `--audio_flamingo2_local_files_only` (ネットワークを使わずローカルのみ)
-- `--audio_flamingo2_lang_encoder_path` (LLMパス上書き)
-- `--audio_flamingo2_tokenizer_path` (Tokenizerパス上書き)
-- `--ddp_timeout_seconds` (default: `900`, 分散collectiveのtimeout秒数)
-
-停止しづらい時の推奨:
-- `--inference_num_workers 0`（既定値）を維持
-- timeout短縮: `--ddp_timeout_seconds 300`
-- ログに `Distributed barrier start/done` が出るので、どの同期地点で止まっているか確認可能
-- 互換性重視で、カスタム中断ガードは既定で無効
-  - 有効化する場合: `AF2_INTERRUPT_GUARD=1` を付けて実行
-  - 有効時のみ `Ctrl+C` 1回目は通常中断、2回目は強制終了（即時）
-
-よくある依存エラー対策:
-- `No module named h5py`:
-  - `pip install h5py`
-- `bpe_simple_vocab_16e6.txt.gz not found` (`clip` 不整合):
-  - `pip uninstall -y clip`
-  - `pip install --no-cache-dir git+https://github.com/openai/CLIP.git`
-- `UnpicklingError: Weights only load failed` (PyTorch 2.6+):
-  - このスクリプトでは AF2 ロード時に `torch.load(..., weights_only=False)` を自動適用済みです。
-  - 外部スクリプトで同エラーが出る場合は `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` を設定してください。
-
----
-
 ## 1) Oracle CoT generation (Method 2)
 
 ```bash
@@ -289,8 +227,6 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - `--add_text_only` lets the trainer include a text‑only copy of each audio sample.
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
 - Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
-- 再現性を固定したい場合は `--seed` を指定してください（Python / NumPy / PyTorch / Trainer / Sampler まで同一seedを適用）。
-  厳密決定論を緩める場合のみ `--allow_nondeterministic` を使います。
 
 ### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
 
@@ -317,7 +253,6 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re_multitask.py \
 - `--cot_train_file`: CoT branch training file (`C/R/J` task).
 - `--eval_file` / `--cot_eval_file`: same split logic for validation.
 - If `--cot_train_file` is omitted, the script auto-creates both tasks from `--train_file`.
-- 再現性を固定したい場合は `--seed` を指定します（`--train_id_sample_seed` / `--random_cot_seed` 未指定時は `--seed` が使われます）。
 - Test inference remains standard prediction output (no multitask duplication at test time).
 - For test-time J-only generation, use `--no_cot` (equivalent to `--test_task_mode label`).
 - For test-time candidates+label generation (no rationale), use `--candidates_only` (equivalent to `--test_task_mode candidates`).
