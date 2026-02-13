@@ -240,7 +240,8 @@ def load_audio_model_from_pretrained(
     if family == "qwen":
         qwen_attempts: List[Tuple[str, Any]] = []
         seen_loader_ids = set()
-        if "qwen2.5-omni" in model_name_lc:
+        is_qwen_omni = "omni" in model_name_lc
+        if is_qwen_omni:
             qwen_omni_cls = _optional_transformers_class(
                 "Qwen2_5OmniForConditionalGeneration",
                 "Qwen2_5OmniForCausalLM",
@@ -253,12 +254,13 @@ def load_audio_model_from_pretrained(
                 qwen_omni_cls,
                 seen_loader_ids,
             )
-        _append_attempt(
-            qwen_attempts,
-            "Qwen2AudioForConditionalGeneration",
-            Qwen2AudioForConditionalGeneration,
-            seen_loader_ids,
-        )
+        if not is_qwen_omni:
+            _append_attempt(
+                qwen_attempts,
+                "Qwen2AudioForConditionalGeneration",
+                Qwen2AudioForConditionalGeneration,
+                seen_loader_ids,
+            )
         _append_attempt(qwen_attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
         _append_attempt(qwen_attempts, "AutoModel", AutoModel, seen_loader_ids)
 
