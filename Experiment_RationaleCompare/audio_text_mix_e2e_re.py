@@ -60,6 +60,11 @@ try:
 except ImportError:
     HAS_JIWER = False
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 AUDIO_ENCODER_MODULE_NAME_HINTS = (
@@ -191,6 +196,64 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
             "Install librosa for train/eval/test with audio, or run --recover_only."
         )
     return librosa.load(audio_path, sr=sr)
+
+
+def configure_reproducibility(
+    seed: int,
+    *,
+    strict_determinism: bool,
+    deterministic_warn_only: bool,
+) -> None:
+    seed = int(seed)
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+
+    hf_transformers.set_seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    try:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+    except Exception:
+        pass
+    try:
+        torch.backends.cudnn.allow_tf32 = False
+    except Exception:
+        pass
+
+    try:
+        torch.use_deterministic_algorithms(bool(strict_determinism), warn_only=bool(deterministic_warn_only))
+    except TypeError:
+        if strict_determinism:
+            torch.use_deterministic_algorithms(True)
+
+    pyhash_seed = os.environ.get("PYTHONHASHSEED", "")
+    if pyhash_seed != str(seed):
+        logger.warning(
+            "PYTHONHASHSEED=%s differs from --seed=%d. "
+            "For full reproducibility across Python hash-based ordering, launch with PYTHONHASHSEED=%d.",
+            pyhash_seed,
+            seed,
+            seed,
+        )
+
+
+def _seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    if np is not None:
+        np.random.seed(worker_seed)
 
 
 def _infer_model_family(model_name_or_path: str) -> str:
@@ -411,7 +474,7 @@ def load_audio_flamingo2_bundle_or_raise(
         cache_root=cache_root,
         repo_type="space",
         local_files_only=local_files_only,
-        allow_patterns=["configs/*", "src/*"],
+        allow_patterns=["configs/**", "src/**", "*.py", "requirements*.txt"],
     )
     model_dir = _resolve_audio_flamingo2_snapshot_or_local(
         repo_or_dir=model_name_or_path,
@@ -445,12 +508,22 @@ def load_audio_flamingo2_bundle_or_raise(
     clap_checkpoint = _audio_flamingo2_pick_clap_ckpt_or_raise(model_dir, clap_checkpoint_hint)
     clap_config["checkpoint"] = clap_checkpoint
 
-    inserted_path = False
-    if space_dir not in sys.path:
-        sys.path.insert(0, space_dir)
-        inserted_path = True
+    inserted_paths: List[str] = []
+    for candidate in (space_dir, os.path.join(space_dir, "src")):
+        if os.path.isdir(candidate) and candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            inserted_paths.append(candidate)
     try:
-        factory_mod = importlib.import_module("src.factory")
+        try:
+            factory_mod = importlib.import_module("src.factory")
+        except ModuleNotFoundError as exc:
+            if exc.name in {"my_laion_clap", "src.my_laion_clap"}:
+                raise RuntimeError(
+                    "Audio-Flamingo-2 source import failed: my_laion_clap is missing. "
+                    "Delete partial cache and re-run so the full Space source is downloaded. "
+                    f"cache_dir={cache_root}"
+                ) from exc
+            raise
         create_model_and_transforms = getattr(factory_mod, "create_model_and_transforms", None)
         if create_model_and_transforms is None:
             raise AttributeError("src.factory.create_model_and_transforms is missing.")
@@ -460,9 +533,9 @@ def load_audio_flamingo2_bundle_or_raise(
             **model_config,
         )
     finally:
-        if inserted_path:
+        for inserted in inserted_paths:
             try:
-                sys.path.remove(space_dir)
+                sys.path.remove(inserted)
             except ValueError:
                 pass
 
@@ -2831,21 +2904,27 @@ class CustomTrainer(Trainer):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
+        seed = int(getattr(self.args, "seed", 0))
         batch_sampler = DistributedHomogeneousBatchSampler(
             self.train_dataset,
             batch_size=self.args.train_batch_size,
             num_replicas=self.args.world_size,
             rank=self.args.process_index,
             drop_last=self.args.dataloader_drop_last,
+            seed=seed,
             shuffle=True,
             total_epochs=int(self.args.num_train_epochs),
         )
+        worker_gen = torch.Generator()
+        worker_gen.manual_seed(seed)
         return DataLoader(
             self.train_dataset,
             batch_sampler=batch_sampler,
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers,
             pin_memory=self.args.dataloader_pin_memory,
+            worker_init_fn=_seed_worker,
+            generator=worker_gen,
         )
 
 
@@ -3408,6 +3487,7 @@ def run_distributed_inference(
     batch_size=1,
     max_new_tokens: int = 2048,
     num_workers: int = 0,
+    seed: int = 0,
 ):
     model.eval()
 
@@ -3441,6 +3521,8 @@ def run_distributed_inference(
 
     # Audio Loader
     if my_audio_items:
+        audio_loader_gen = torch.Generator()
+        audio_loader_gen.manual_seed(int(seed) + int(rank) * 10007 + 1)
         collator = (
             AudioFlamingo2InferenceCollator(processor, max_length=inference_max_len)
             if af2_mode
@@ -3453,6 +3535,8 @@ def run_distributed_inference(
             collate_fn=collator,
             drop_last=False,
             shuffle=False,
+            worker_init_fn=_seed_worker,
+            generator=audio_loader_gen,
         )
         for i, batch_data in enumerate(audio_loader):
             if rank == 0 and i % 10 == 0:
@@ -3475,6 +3559,8 @@ def run_distributed_inference(
 
     # Text Loader
     if my_text_items:
+        text_loader_gen = torch.Generator()
+        text_loader_gen.manual_seed(int(seed) + int(rank) * 10007 + 2)
         collator = (
             AudioFlamingo2InferenceCollator(processor, max_length=inference_max_len)
             if af2_mode
@@ -3487,6 +3573,8 @@ def run_distributed_inference(
             collate_fn=collator,
             drop_last=False,
             shuffle=False,
+            worker_init_fn=_seed_worker,
+            generator=text_loader_gen,
         )
         for i, batch_data in enumerate(text_loader):
             if rank == 0 and i % 10 == 0:
@@ -3750,6 +3838,22 @@ def main():
 
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Global random seed for Python/NumPy/PyTorch/Trainer/Sampler.",
+    )
+    parser.add_argument(
+        "--allow_nondeterministic",
+        action="store_true",
+        help="Allow non-deterministic CUDA kernels (faster but weaker reproducibility).",
+    )
+    parser.add_argument(
+        "--deterministic_warn_only",
+        action="store_true",
+        help="Warn (instead of error) when non-deterministic ops are encountered.",
+    )
+    parser.add_argument(
         "--train_id_sample_ratio",
         type=float,
         default=0.1,
@@ -3758,8 +3862,8 @@ def main():
     parser.add_argument(
         "--train_id_sample_seed",
         type=int,
-        default=42,
-        help="Random seed for train SLURP ID subsampling.",
+        default=None,
+        help="Random seed for train SLURP ID subsampling (default: --seed).",
     )
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2-Audio-7B-Instruct")
     parser.add_argument("--output_dir", type=str, default="outputs/qwen_rationale_label_ft")
@@ -3924,6 +4028,13 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
+    if args.train_id_sample_seed is None:
+        args.train_id_sample_seed = int(args.seed)
+    configure_reproducibility(
+        args.seed,
+        strict_determinism=not bool(args.allow_nondeterministic),
+        deterministic_warn_only=bool(args.deterministic_warn_only),
+    )
     model_family = _infer_model_family(args.model_name_or_path)
 
     if not (0.0 <= args.train_id_sample_ratio <= 1.0):
@@ -3967,6 +4078,13 @@ def main():
         log_path = args.log_file.strip() if args.log_file.strip() else os.path.join(args.output_dir, "train.log")
         setup_file_logging(log_path)
         logger.info("File logging enabled: %s", os.path.abspath(log_path))
+        logger.info(
+            "Reproducibility config | seed=%d train_id_sample_seed=%d strict_determinism=%s warn_only=%s",
+            int(args.seed),
+            int(args.train_id_sample_seed),
+            not bool(args.allow_nondeterministic),
+            bool(args.deterministic_warn_only),
+        )
 
     metadata = load_metadata(args.metadata_file)
     db_definitions = build_db_definitions(metadata)
@@ -4098,24 +4216,32 @@ def main():
                 "Model loading succeeded, but verify fine-tuning targets for this architecture."
             )
 
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        bf16=True,
-        logging_steps=1 if args.smoke else 10,
-        eval_strategy="steps" if len(eval_items) > 0 else "no",
-        eval_steps=2 if args.smoke else 50,
-        save_strategy="no",
-        save_total_limit=None,
-        remove_unused_columns=False,
-        ddp_find_unused_parameters=True,
-        report_to="none",
-        disable_tqdm=True,
-    )
+    training_kwargs: Dict[str, Any] = {
+        "output_dir": args.output_dir,
+        "num_train_epochs": args.num_train_epochs,
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "bf16": True,
+        "logging_steps": 1 if args.smoke else 10,
+        "eval_strategy": "steps" if len(eval_items) > 0 else "no",
+        "eval_steps": 2 if args.smoke else 50,
+        "save_strategy": "no",
+        "save_total_limit": None,
+        "remove_unused_columns": False,
+        "ddp_find_unused_parameters": True,
+        "report_to": "none",
+        "disable_tqdm": True,
+        "seed": int(args.seed),
+        "data_seed": int(args.seed),
+    }
+    training_sig = inspect.signature(TrainingArguments.__init__).parameters
+    if "full_determinism" in training_sig:
+        training_kwargs["full_determinism"] = not bool(args.allow_nondeterministic)
+    if "tf32" in training_sig:
+        training_kwargs["tf32"] = False
+    training_args = TrainingArguments(**training_kwargs)
 
     use_af2_route = model_family == "audio-flamingo-2" or _is_audio_flamingo2_processor(processor)
     train_collator = (
@@ -4195,6 +4321,7 @@ def main():
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         num_workers=args.inference_num_workers,
+        seed=args.seed,
     )
 
     if world_size > 1:

@@ -264,6 +264,8 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - `--add_text_only` lets the trainer include a text‑only copy of each audio sample.
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
 - Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
+- 再現性を固定したい場合は `--seed` を指定してください（Python / NumPy / PyTorch / Trainer / Sampler まで同一seedを適用）。
+  厳密決定論を緩める場合のみ `--allow_nondeterministic` を使います。
 
 ### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
 
