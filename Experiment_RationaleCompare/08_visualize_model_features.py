@@ -37,10 +37,11 @@ Examples:
     python 08_visualize_model_features.py \
       --reuse-dir Experiment_RationaleCompare/analysis/model_feats_run_x
 
-    # All intents + centroid similarity ranking (no re-inference)
+    # All intents + mean-distance rank-step table (no re-inference)
     python 08_visualize_model_features.py \
       --reuse-dir Experiment_RationaleCompare/analysis/model_feats_run_x \
-      --all-intents
+      --all-intents \
+      --distance-rank-step 3
 """
 
 import argparse
@@ -544,14 +545,6 @@ def _pairwise_euclidean(x: np.ndarray) -> np.ndarray:
     return np.linalg.norm(diff, axis=2).astype(np.float32)
 
 
-def _pairwise_cosine_similarity(x: np.ndarray) -> np.ndarray:
-    if x.shape[0] == 0:
-        return np.zeros((0, 0), dtype=np.float32)
-    x_norm = _l2_normalize_rows(x.astype(np.float32))
-    sim = x_norm @ x_norm.T
-    return np.clip(sim, -1.0, 1.0).astype(np.float32)
-
-
 def compute_intent_distance_stats(
     features: np.ndarray,
     intents: Sequence[str],
@@ -570,7 +563,6 @@ def compute_intent_distance_stats(
             "valid_intents": [],
             "centroids": np.zeros((0, features.shape[1]), dtype=np.float32),
             "distance_matrix": np.zeros((0, 0), dtype=np.float32),
-            "similarity_matrix": np.zeros((0, 0), dtype=np.float32),
             "intent_rows": [],
             "summary": {
                 "num_samples": int(features.shape[0]),
@@ -597,7 +589,6 @@ def compute_intent_distance_stats(
 
     centroid_arr = np.vstack(centroids).astype(np.float32)
     dist = _pairwise_euclidean(centroid_arr)
-    sim = _pairwise_cosine_similarity(centroid_arr)
 
     rows: List[Dict[str, Any]] = []
     for i, intent in enumerate(valid_intents):
@@ -640,7 +631,6 @@ def compute_intent_distance_stats(
         "valid_intents": valid_intents,
         "centroids": centroid_arr,
         "distance_matrix": dist,
-        "similarity_matrix": sim,
         "intent_rows": rows,
         "summary": summary,
         "counts": counts,
@@ -663,6 +653,7 @@ def plot_embedding_scatter(
     y_label: str,
     subtitle: Optional[str],
     top_k: int,
+    show_label_text: bool,
 ) -> None:
     _ensure_dir(os.path.dirname(out_path) or ".")
     if int(top_k) <= 0:
@@ -674,6 +665,8 @@ def plot_embedding_scatter(
     cmap = plt.get_cmap("tab20")
     colors = [cmap(i % 20) for i in range(len(unique))]
     color_map = dict(zip(unique, colors))
+    marker_cycle = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "h", "8", "p", "*", "d"]
+    marker_map = {label: marker_cycle[i % len(marker_cycle)] for i, label in enumerate(unique)}
 
     fig, ax = plt.subplots(figsize=(10, 7))
     for label in unique:
@@ -681,15 +674,30 @@ def plot_embedding_scatter(
         if not idx:
             continue
         label_text = f"{label} (n={len(idx)})"
+        marker = marker_map[label]
         ax.scatter(
             projection[idx, 0],
             projection[idx, 1],
-            s=14,
+            s=24,
             alpha=0.8,
             c=[color_map[label]],
             label=label_text,
+            marker=marker,
             edgecolors="none",
         )
+        if show_label_text and label != "other":
+            cx = float(np.mean(projection[idx, 0]))
+            cy = float(np.mean(projection[idx, 1]))
+            ax.text(
+                cx,
+                cy,
+                label,
+                fontsize=7,
+                color="black",
+                ha="center",
+                va="center",
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.6),
+            )
 
     if subtitle:
         ax.set_title(f"{title}\n{subtitle}", fontsize=11)
@@ -698,8 +706,15 @@ def plot_embedding_scatter(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.25, linewidth=0.5)
-    if len(unique) <= 25:
-        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=True)
+    ncol = 1 if len(unique) <= 20 else 2 if len(unique) <= 40 else 3
+    ax.legend(
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        fontsize=7,
+        frameon=True,
+        ncol=ncol,
+        title="intent",
+    )
     fig.tight_layout()
     fig.savefig(out_path, dpi=250)
     plt.close(fig)
@@ -713,6 +728,7 @@ def plot_pca_scatter(
     title: str,
     explained_ratio: Tuple[float, float],
     top_k: int,
+    show_label_text: bool,
 ) -> None:
     subtitle = f"PCA-2D (var: PC1={explained_ratio[0]*100:.1f}%, PC2={explained_ratio[1]*100:.1f}%)"
     plot_embedding_scatter(
@@ -725,6 +741,7 @@ def plot_pca_scatter(
         y_label="PC2",
         subtitle=subtitle,
         top_k=top_k,
+        show_label_text=show_label_text,
     )
 
 
@@ -790,91 +807,126 @@ def save_centroid_distance_csv(
                 writer.writerow([a, b, float(dist[i, j])])
 
 
-def build_centroid_similarity_rows(
+def build_intent_mean_distance_rows(
     valid_intents: Sequence[str],
     counts: Counter,
     dist: np.ndarray,
-    sim: np.ndarray,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for i, a in enumerate(valid_intents):
-        for j in range(i + 1, len(valid_intents)):
-            b = valid_intents[j]
-            rows.append({
-                "intent_a": a,
-                "intent_b": b,
-                "count_a": int(counts.get(a, 0)),
-                "count_b": int(counts.get(b, 0)),
-                "cosine_similarity": float(sim[i, j]),
-                "euclidean_distance": float(dist[i, j]),
-            })
+    n = len(valid_intents)
+    for i, intent in enumerate(valid_intents):
+        if n > 1:
+            other = np.delete(dist[i], i)
+            mean_d = float(other.mean()) if other.size > 0 else None
+            near_d = float(other.min()) if other.size > 0 else None
+        else:
+            mean_d = None
+            near_d = None
+        rows.append({
+            "intent": intent,
+            "count": int(counts.get(intent, 0)),
+            "mean_centroid_distance": mean_d,
+            "nearest_centroid_distance": near_d,
+        })
     rows.sort(
         key=lambda r: (
-            -float(r["cosine_similarity"]),
-            float(r["euclidean_distance"]),
-            -(int(r["count_a"]) + int(r["count_b"])),
-            str(r["intent_a"]),
-            str(r["intent_b"]),
+            float("inf") if r["mean_centroid_distance"] is None else float(r["mean_centroid_distance"]),
+            float("inf") if r["nearest_centroid_distance"] is None else float(r["nearest_centroid_distance"]),
+            -int(r["count"]),
+            str(r["intent"]),
         )
     )
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
     return rows
 
 
-def build_intent_neighbor_rows(
+def sample_intent_rows_by_rank_step(
+    rows: Sequence[Dict[str, Any]],
+    rank_step: int,
+) -> List[Dict[str, Any]]:
+    if not rows:
+        return []
+    step = max(1, int(rank_step))
+    if step <= 1:
+        return list(rows)
+
+    last_rank = int(rows[-1].get("rank", len(rows)))
+    sampled: List[Dict[str, Any]] = []
+    for row in rows:
+        rank = int(row.get("rank", 0))
+        if rank == 1 or rank == last_rank or (rank % step == 0):
+            sampled.append(dict(row))
+    return sampled
+
+
+def save_intent_mean_distance_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    fieldnames = [
+        "rank",
+        "intent",
+        "count",
+        "mean_centroid_distance",
+        "nearest_centroid_distance",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def build_distance_submatrix(
     valid_intents: Sequence[str],
     dist: np.ndarray,
-    sim: np.ndarray,
-) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for i, base in enumerate(valid_intents):
-        cand: List[Tuple[int, float, float]] = []
-        for j, neigh in enumerate(valid_intents):
-            if i == j:
-                continue
-            cand.append((j, float(sim[i, j]), float(dist[i, j])))
-        cand.sort(key=lambda x: (-x[1], x[2], valid_intents[x[0]]))
-        for rank, (j, s, d) in enumerate(cand, start=1):
-            rows.append({
-                "intent": base,
-                "rank": rank,
-                "neighbor_intent": valid_intents[j],
-                "cosine_similarity": s,
-                "euclidean_distance": d,
-            })
-    return rows
+    ordered_intents: Sequence[str],
+) -> Tuple[List[str], np.ndarray]:
+    idx_map = {name: i for i, name in enumerate(valid_intents)}
+    order = [name for name in ordered_intents if name in idx_map]
+    if not order:
+        return [], np.zeros((0, 0), dtype=np.float32)
+    idxs = [idx_map[name] for name in order]
+    sub = dist[np.ix_(idxs, idxs)].astype(np.float32)
+    return order, sub
 
 
-def save_centroid_similarity_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+def save_distance_table_csv(
+    path: str,
+    ordered_intents: Sequence[str],
+    distance_matrix: np.ndarray,
+) -> None:
     _ensure_dir(os.path.dirname(path) or ".")
-    fieldnames = [
-        "intent_a",
-        "intent_b",
-        "count_a",
-        "count_b",
-        "cosine_similarity",
-        "euclidean_distance",
-    ]
     with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
+        writer = csv.writer(f)
+        writer.writerow(["intent"] + list(ordered_intents))
+        for i, intent in enumerate(ordered_intents):
+            row = [intent] + [float(distance_matrix[i, j]) for j in range(len(ordered_intents))]
             writer.writerow(row)
 
 
-def save_intent_neighbor_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
-    _ensure_dir(os.path.dirname(path) or ".")
-    fieldnames = [
-        "intent",
-        "rank",
-        "neighbor_intent",
-        "cosine_similarity",
-        "euclidean_distance",
-    ]
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+def plot_distance_gradient_heatmap(
+    ordered_intents: Sequence[str],
+    distance_matrix: np.ndarray,
+    out_path: str,
+    title: str,
+) -> None:
+    if len(ordered_intents) == 0 or distance_matrix.size == 0:
+        return
+
+    _ensure_dir(os.path.dirname(out_path) or ".")
+    sub = np.asarray(distance_matrix, dtype=np.float32)
+    fig, ax = plt.subplots(figsize=(max(6, len(ordered_intents) * 0.45), max(5, len(ordered_intents) * 0.38)))
+    im = ax.imshow(sub, cmap="YlOrRd", interpolation="nearest")
+    ax.set_xticks(np.arange(len(ordered_intents)))
+    ax.set_yticks(np.arange(len(ordered_intents)))
+    ax.set_xticklabels(ordered_intents, rotation=60, ha="right", fontsize=7)
+    ax.set_yticklabels(ordered_intents, fontsize=7)
+    ax.set_title(title)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar.ax.set_ylabel("Distance", rotation=90)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
 
 
 def _unpack_batch(batch: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Dict[str, torch.Tensor]]]:
@@ -1189,6 +1241,10 @@ def parse_args() -> argparse.Namespace:
                         help="Intent解析を全Intent対象にする (min-intent-samples=1, top-intents=0)")
     parser.add_argument("--include-unknown-intent", action="store_true",
                         help="__unknown__ Intentも解析対象に含める")
+    parser.add_argument("--distance-rank-step", type=int, default=3,
+                        help="平均distance順位を何件おきに抽出するか (3なら rank=1,3,6,9,...,last)")
+    parser.add_argument("--annotate-labels", action="store_true",
+                        help="散布図上にIntentラベル文字を重ねて表示する（凡例は常時表示）")
     parser.add_argument("--print-audio-search-paths", action="store_true")
     parser.add_argument("--audio-search-print-limit", type=int, default=20)
     parser.add_argument("--strict-audio-missing", action="store_true")
@@ -1312,16 +1368,20 @@ def main() -> None:
         min_intent_samples=max(1, int(args.min_intent_samples)),
         include_unknown=bool(args.include_unknown_intent),
     )
-    sim_rows = build_centroid_similarity_rows(
+    mean_rows = build_intent_mean_distance_rows(
         valid_intents=stats["valid_intents"],
         counts=stats["counts"],
         dist=stats["distance_matrix"],
-        sim=stats["similarity_matrix"],
     )
-    neigh_rows = build_intent_neighbor_rows(
+    sampled_rows = sample_intent_rows_by_rank_step(
+        rows=mean_rows,
+        rank_step=max(1, int(args.distance_rank_step)),
+    )
+    sampled_intents = [str(r.get("intent", "")) for r in sampled_rows if str(r.get("intent", ""))]
+    sampled_order, sampled_dist = build_distance_submatrix(
         valid_intents=stats["valid_intents"],
         dist=stats["distance_matrix"],
-        sim=stats["similarity_matrix"],
+        ordered_intents=sampled_intents,
     )
 
     save_feature_artifacts(
@@ -1346,10 +1406,13 @@ def main() -> None:
         "top_intents": int(args.top_intents),
         "all_intents": bool(args.all_intents),
         "include_unknown_intent": bool(args.include_unknown_intent),
+        "distance_rank_step": int(args.distance_rank_step),
+        "annotate_labels": bool(args.annotate_labels),
         "device": args.device,
         "num_samples": int(features.shape[0]),
         "feature_dim": int(features.shape[1]),
         "num_unique_intents": len(counts),
+        "num_intents_sampled_by_rank_step": len(sampled_order),
         "embeddings_requested": requested_embeddings,
         "embeddings_computed": sorted(list(projections.keys())),
         "embedding_notes": embedding_notes,
@@ -1371,13 +1434,24 @@ def main() -> None:
         stats["valid_intents"],
         stats["distance_matrix"],
     )
-    save_centroid_similarity_csv(
-        os.path.join(out_dir, "centroid_similarity_pairs.csv"),
-        sim_rows,
+    save_intent_mean_distance_csv(
+        os.path.join(out_dir, "intent_mean_distance_ranking.csv"),
+        mean_rows,
     )
-    save_intent_neighbor_csv(
-        os.path.join(out_dir, "intent_neighbor_ranking.csv"),
-        neigh_rows,
+    save_intent_mean_distance_csv(
+        os.path.join(out_dir, "intent_mean_distance_rankstep.csv"),
+        sampled_rows,
+    )
+    save_distance_table_csv(
+        os.path.join(out_dir, "centroid_distance_rankstep_table.csv"),
+        sampled_order,
+        sampled_dist,
+    )
+    plot_distance_gradient_heatmap(
+        ordered_intents=sampled_order,
+        distance_matrix=sampled_dist,
+        out_path=os.path.join(out_dir, "centroid_distance_rankstep_heatmap.png"),
+        title=f"Centroid Distance Heatmap (rank-step={int(args.distance_rank_step)})",
     )
 
     title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
@@ -1390,6 +1464,7 @@ def main() -> None:
             title=title,
             explained_ratio=explained_ratio,
             top_k=int(args.top_intents),
+            show_label_text=bool(args.annotate_labels),
         )
     if "tsne" in projections:
         plot_embedding_scatter(
@@ -1402,6 +1477,7 @@ def main() -> None:
             y_label="t-SNE-2",
             subtitle="t-SNE-2D",
             top_k=int(args.top_intents),
+            show_label_text=bool(args.annotate_labels),
         )
     if "umap" in projections:
         plot_embedding_scatter(
@@ -1414,6 +1490,7 @@ def main() -> None:
             y_label="UMAP-2",
             subtitle="UMAP-2D",
             top_k=int(args.top_intents),
+            show_label_text=bool(args.annotate_labels),
         )
     plot_centroid_heatmap(
         valid_intents=stats["valid_intents"],
@@ -1428,8 +1505,10 @@ def main() -> None:
     print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
     print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
     print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
-    print(f"- {os.path.join(out_dir, 'centroid_similarity_pairs.csv')}")
-    print(f"- {os.path.join(out_dir, 'intent_neighbor_ranking.csv')}")
+    print(f"- {os.path.join(out_dir, 'intent_mean_distance_ranking.csv')}")
+    print(f"- {os.path.join(out_dir, 'intent_mean_distance_rankstep.csv')}")
+    print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_table.csv')}")
+    print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_heatmap.png')}")
     if "pca" in projections:
         print(f"- {os.path.join(out_dir, 'pca_scatter_by_intent.png')}")
     if "tsne" in projections:
