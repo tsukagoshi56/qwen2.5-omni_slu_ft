@@ -131,7 +131,9 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - `--inference_num_workers 0`（既定値）を維持
 - timeout短縮: `--ddp_timeout_seconds 300`
 - ログに `Distributed barrier start/done` が出るので、どの同期地点で止まっているか確認可能
-- `Ctrl+C` 1回目は通常中断、2回目は強制終了（即時）に対応
+- 互換性重視で、カスタム中断ガードは既定で無効
+  - 有効化する場合: `AF2_INTERRUPT_GUARD=1` を付けて実行
+  - 有効時のみ `Ctrl+C` 1回目は通常中断、2回目は強制終了（即時）
 
 よくある依存エラー対策:
 - `No module named h5py`:

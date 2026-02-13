@@ -3575,7 +3575,8 @@ def _install_termination_signal_handlers() -> Dict[int, Any]:
             os._exit(128 + int(signum))
         raise KeyboardInterrupt
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    # Keep SIGTERM behavior untouched so torchrun/process supervisors can manage workers normally.
+    for sig in (signal.SIGINT,):
         try:
             previous_handlers[int(sig)] = signal.getsignal(sig)
             signal.signal(sig, _handle_signal)
@@ -3590,6 +3591,11 @@ def _restore_termination_signal_handlers(previous_handlers: Dict[int, Any]) -> N
             signal.signal(signum, handler)
         except Exception:
             continue
+
+
+def _interrupt_guard_enabled() -> bool:
+    value = str(os.environ.get("AF2_INTERRUPT_GUARD", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def run_distributed_inference(
@@ -4518,14 +4524,17 @@ def main():
 
 
 if __name__ == "__main__":
-    _previous_handlers = _install_termination_signal_handlers()
+    _previous_handlers: Dict[int, Any] = {}
+    if _interrupt_guard_enabled():
+        _previous_handlers = _install_termination_signal_handlers()
     try:
         main()
     except KeyboardInterrupt:
         logger.warning("Interrupted by user (KeyboardInterrupt).")
         raise
     finally:
-        _restore_termination_signal_handlers(_previous_handlers)
+        if _previous_handlers:
+            _restore_termination_signal_handlers(_previous_handlers)
         if dist.is_available() and dist.is_initialized():
             try:
                 dist.destroy_process_group()
