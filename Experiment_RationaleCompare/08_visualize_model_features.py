@@ -48,6 +48,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    def tqdm(iterable=None, *args, **kwargs):  # type: ignore
+        return iterable
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -102,6 +107,55 @@ def _write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def load_gold_intent_maps_from_test_jsonl(
+    path: str,
+) -> Tuple[Dict[str, Tuple[str, str, str]], Dict[str, Tuple[str, str, str]]]:
+    """Load gold intent labels from SLURP-style test.jsonl keyed by slurp_id and file."""
+    by_slurp_id: Dict[str, Tuple[str, str, str]] = {}
+    by_file: Dict[str, Tuple[str, str, str]] = {}
+    if not path or not os.path.exists(path):
+        return by_slurp_id, by_file
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+
+            scenario = str(obj.get("scenario", "") or "").strip().lower()
+            action = str(obj.get("action", "") or "").strip().lower()
+            if not scenario and not action:
+                intent_raw = str(obj.get("intent", "") or "").strip().lower()
+                if "_" in intent_raw:
+                    scenario, action = intent_raw.split("_", 1)
+            if not scenario or not action:
+                continue
+            intent = f"{scenario}_{action}"
+            label = (scenario, action, intent)
+
+            sid = str(obj.get("slurp_id", "") or "").strip()
+            if sid:
+                by_slurp_id.setdefault(sid, label)
+
+            recs = obj.get("recordings")
+            if isinstance(recs, list):
+                for rec in recs:
+                    if not isinstance(rec, dict):
+                        continue
+                    fname = str(rec.get("file", "") or "").strip()
+                    if not fname:
+                        continue
+                    by_file.setdefault(fname, label)
+                    by_file.setdefault(os.path.basename(fname), label)
+    return by_slurp_id, by_file
 
 
 def _extract_unused_model_kwargs_from_exception(exc: Exception) -> List[str]:
@@ -243,7 +297,11 @@ def _parse_label_from_target_text(target_text: str) -> Tuple[str, str]:
     return "", ""
 
 
-def infer_intent_from_item(item: Dict[str, Any]) -> Tuple[str, str, str]:
+def infer_intent_from_item(
+    item: Dict[str, Any],
+    gold_intent_by_slurp_id: Optional[Dict[str, Tuple[str, str, str]]] = None,
+    gold_intent_by_file: Optional[Dict[str, Tuple[str, str, str]]] = None,
+) -> Tuple[str, str, str]:
     target_obj = item.get("target_obj")
     scenario = ""
     action = ""
@@ -259,6 +317,30 @@ def infer_intent_from_item(item: Dict[str, Any]) -> Tuple[str, str, str]:
         scenario = str(item.get("scenario", "") or "").strip().lower()
     if not action and "action" in item:
         action = str(item.get("action", "") or "").strip().lower()
+
+    # Fallback to external gold map when item lacks resolved label.
+    if (not scenario or not action) and gold_intent_by_slurp_id:
+        sid_candidates = [
+            item.get("slurp_id"),
+            item.get("id"),
+        ]
+        for sid in sid_candidates:
+            key = str(sid or "").strip()
+            if not key:
+                continue
+            if key in gold_intent_by_slurp_id:
+                scenario, action, _ = gold_intent_by_slurp_id[key]
+                break
+
+    if (not scenario or not action) and gold_intent_by_file:
+        file_value = str(item.get("file", "") or "").strip()
+        file_candidates = [file_value, os.path.basename(file_value) if file_value else ""]
+        for fkey in file_candidates:
+            if not fkey:
+                continue
+            if fkey in gold_intent_by_file:
+                scenario, action, _ = gold_intent_by_file[fkey]
+                break
 
     intent = f"{scenario}_{action}" if scenario and action else "__unknown__"
     return scenario, action, intent
@@ -627,6 +709,8 @@ def extract_features_from_model(
     args: argparse.Namespace,
     pipeline_mod: Any,
     items: List[Dict[str, Any]],
+    gold_intent_by_slurp_id: Optional[Dict[str, Tuple[str, str, str]]] = None,
+    gold_intent_by_file: Optional[Dict[str, Tuple[str, str, str]]] = None,
 ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
     device = torch.device(args.device)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
@@ -665,7 +749,14 @@ def extract_features_from_model(
     features: List[np.ndarray] = []
     rows: List[Dict[str, Any]] = []
 
-    for batch in loader:
+    batch_iter = tqdm(
+        loader,
+        total=len(loader),
+        desc=f"Extract [{args.pipeline}/{args.task_mode}]",
+        unit="batch",
+        dynamic_ncols=True,
+    )
+    for batch in batch_iter:
         unpacked = _unpack_batch(batch)
         if not unpacked:
             continue
@@ -693,7 +784,11 @@ def extract_features_from_model(
             if args.l2_normalize:
                 vec = _l2_normalize_rows(vec.reshape(1, -1))[0]
 
-            scenario, action, intent = infer_intent_from_item(item)
+            scenario, action, intent = infer_intent_from_item(
+                item,
+                gold_intent_by_slurp_id=gold_intent_by_slurp_id,
+                gold_intent_by_file=gold_intent_by_file,
+            )
             rows.append({
                 "id": str(item.get("id", "")),
                 "slurp_id": str(item.get("slurp_id", "")),
@@ -706,6 +801,8 @@ def extract_features_from_model(
                 "audio_path": str(item.get("audio_path", "")) if item.get("audio_path") else "",
             })
             features.append(vec.astype(np.float32))
+        if hasattr(batch_iter, "set_postfix"):
+            batch_iter.set_postfix(extracted=len(features), refresh=False)
 
     if not features:
         raise RuntimeError("No features were extracted. Check test_file/audio_dir/model compatibility.")
@@ -841,14 +938,31 @@ def main() -> None:
         if not items:
             raise SystemExit("ERROR: No items built from test data.")
         print(f"Items prepared: {len(items)}")
+        gold_by_sid, gold_by_file = load_gold_intent_maps_from_test_jsonl(args.test_file)
+        if gold_by_sid or gold_by_file:
+            print(f"Gold map loaded: slurp_id={len(gold_by_sid)} file={len(gold_by_file)}")
+        else:
+            print("Gold map not available; falling back to item-derived intent only.")
         print(f"Loading model on device: {args.device}")
-        features, rows = extract_features_from_model(args, pipeline_mod, items)
+        features, rows = extract_features_from_model(
+            args,
+            pipeline_mod,
+            items,
+            gold_intent_by_slurp_id=gold_by_sid,
+            gold_intent_by_file=gold_by_file,
+        )
         print(f"Extracted features: {features.shape}")
 
     if len(rows) != int(features.shape[0]):
         n = min(len(rows), int(features.shape[0]))
         rows = rows[:n]
         features = features[:n]
+
+    unknown_n = sum(1 for r in rows if r.get("intent", "__unknown__") == "__unknown__")
+    resolved_n = len(rows) - unknown_n
+    print(f"Intent labels resolved: {resolved_n}/{len(rows)} (unknown={unknown_n})")
+    if unknown_n == len(rows) and len(rows) > 0:
+        print("WARNING: All intents are unknown. Check --test_file / metadata parsing.", file=sys.stderr)
 
     projection, explained_ratio = pca_project_2d(features)
     intents = [r.get("intent", "__unknown__") for r in rows]
@@ -920,4 +1034,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
