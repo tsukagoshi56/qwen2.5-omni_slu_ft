@@ -844,7 +844,9 @@ def _compute_bin_metrics(
     wer_list: List[Optional[float]],
     lo: float, hi: float,
 ) -> Dict[str, Any]:
-    """指定 WER 範囲のサンプルだけで Intent Acc / Entity F1 を算出。"""
+    """指定 WER 範囲のサンプルだけで Scenario Acc / Action Acc / Intent Acc / SLU-F1 を算出。"""
+    scenario_m = FMeasureAccumulator()
+    action_m = FMeasureAccumulator()
     intent_m = FMeasureAccumulator()
     entity_m = SpanFMeasureAccumulator()
     n = 0
@@ -854,6 +856,10 @@ def _compute_bin_metrics(
         if not _in_wer_bin(w, lo, hi):
             continue
         gi, pi = intent_pairs[i]
+        gs, ga = gi.split("_", 1)
+        ps, pa = pi.split("_", 1)
+        scenario_m.add(gs, ps)
+        action_m.add(ga, pa)
         intent_m.add(gi, pi)
         pred, gold = matched[i]
         entity_m.add(gold["entities"], pred["entities"])
@@ -861,13 +867,15 @@ def _compute_bin_metrics(
     _, _, ef = entity_m.overall()
     return {
         "n": n,
+        "scenario_acc": scenario_m.accuracy if n > 0 else 0.0,
+        "action_acc": action_m.accuracy if n > 0 else 0.0,
         "intent_acc": intent_m.accuracy if n > 0 else 0.0,
-        "entity_f1": ef,
+        "slu_f1": ef,
     }
 
 
 def print_wer_analysis_comparison(models: List[ModelResult]):
-    print_section("K. WER 別 Intent Accuracy / Entity F1 比較")
+    print_section("K. WER 別 Scenario / Action / Intent Acc & SLU-F1 比較")
 
     # Check if any model has wer data
     has_wer = any(
@@ -879,15 +887,14 @@ def print_wer_analysis_comparison(models: List[ModelResult]):
         return
 
     names = [m.name for m in models]
-    # Build header
+    # Build header: 4 metrics per model
     sub_cols = []
     for n in names:
-        sub_cols.extend([f"{n} IntAcc", f"{n} EntF1"])
+        sub_cols.extend([f"{n} ScenAcc", f"{n} ActAcc", f"{n} IntAcc", f"{n} SLU-F1"])
     headers = ["WER range", "N"] + sub_cols
 
     rows = []
     for lo, hi, label in WER_BINS:
-        # N is based on first model (same gold)
         bins_data = [_compute_bin_metrics(m.intent_pairs, m.matched, m.wer_list, lo, hi)
                      for m in models]
         n_samples = max(d["n"] for d in bins_data) if bins_data else 0
@@ -895,13 +902,17 @@ def print_wer_analysis_comparison(models: List[ModelResult]):
             continue
         row: List[Any] = [label, n_samples]
         for d in bins_data:
+            row.append(_f4(d["scenario_acc"]))
+            row.append(_f4(d["action_acc"]))
             row.append(_f4(d["intent_acc"]))
-            row.append(_f4(d["entity_f1"]))
+            row.append(_f4(d["slu_f1"]))
         rows.append(row)
 
     # ALL row
     row_all: List[Any] = ["ALL", max(m.n_matched for m in models)]
     for m in models:
+        row_all.append(_f4(m.scenario_acc))
+        row_all.append(_f4(m.action_acc))
         row_all.append(_f4(m.intent_acc))
         row_all.append(_f4(m.entity_f1))
     rows.append(row_all)
