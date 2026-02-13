@@ -22,6 +22,7 @@ import random
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -332,6 +333,15 @@ def _resolve_audio_flamingo2_snapshot_or_local(
         ) from exc
 
     local_dir = os.path.join(cache_root, _repo_slug(repo_id))
+    cache_preexisting = os.path.isdir(local_dir) and any(True for _ in os.scandir(local_dir))
+    logger.info(
+        "AF2 snapshot resolve start: repo_id=%s repo_type=%s local_files_only=%s cache_dir=%s cache_preexisting=%s",
+        repo_id,
+        repo_type or "model",
+        bool(local_files_only),
+        local_dir,
+        cache_preexisting,
+    )
     download_kwargs: Dict[str, Any] = {
         "repo_id": repo_id,
         "local_dir": local_dir,
@@ -341,6 +351,7 @@ def _resolve_audio_flamingo2_snapshot_or_local(
         download_kwargs["repo_type"] = repo_type
     if allow_patterns:
         download_kwargs["allow_patterns"] = allow_patterns
+    t0 = time.perf_counter()
     try:
         snapshot_path = snapshot_download(**download_kwargs)
     except TypeError:
@@ -349,6 +360,13 @@ def _resolve_audio_flamingo2_snapshot_or_local(
         if repo_type:
             fallback_kwargs["repo_type"] = repo_type
         snapshot_path = snapshot_download(**fallback_kwargs)
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "AF2 snapshot resolve done: repo_id=%s path=%s elapsed=%.1fs",
+        repo_id,
+        os.path.abspath(snapshot_path),
+        elapsed,
+    )
     return os.path.abspath(snapshot_path)
 
 
@@ -493,6 +511,13 @@ def load_audio_flamingo2_bundle_or_raise(
 ) -> Tuple[Any, Any, Any]:
     cache_root = os.path.abspath(os.path.expanduser(str(cache_dir or "~/.cache/huggingface/audio_flamingo2")))
     os.makedirs(cache_root, exist_ok=True)
+    logger.info(
+        "AF2 bundle load start: model=%s space_repo=%s cache_root=%s local_files_only=%s",
+        model_name_or_path,
+        space_repo_or_dir,
+        cache_root,
+        bool(local_files_only),
+    )
 
     space_dir = _resolve_audio_flamingo2_snapshot_or_local(
         repo_or_dir=space_repo_or_dir,
@@ -507,10 +532,12 @@ def load_audio_flamingo2_bundle_or_raise(
         repo_type=None,
         local_files_only=local_files_only,
     )
+    logger.info("AF2 resolved dirs: space_dir=%s model_dir=%s", space_dir, model_dir)
 
     infer_yaml = os.path.join(space_dir, "configs", "inference.yaml")
     if not os.path.isfile(infer_yaml):
         raise FileNotFoundError(f"Audio-Flamingo-2 inference config not found: {infer_yaml}")
+    logger.info("AF2 loading inference config: %s", infer_yaml)
     cfg = _load_yaml_file_or_raise(infer_yaml)
     model_config = dict(cfg.get("model_config") or {})
     clap_config = dict(cfg.get("clap_config") or {})
@@ -532,6 +559,7 @@ def load_audio_flamingo2_bundle_or_raise(
     clap_checkpoint_hint = str(clap_config.get("checkpoint") or "").strip()
     clap_checkpoint = _audio_flamingo2_pick_clap_ckpt_or_raise(model_dir, clap_checkpoint_hint)
     clap_config["checkpoint"] = clap_checkpoint
+    logger.info("AF2 CLAP checkpoint: %s", clap_checkpoint)
 
     inserted_paths: List[str] = []
     for candidate in (space_dir, os.path.join(space_dir, "src")):
@@ -552,12 +580,15 @@ def load_audio_flamingo2_bundle_or_raise(
         create_model_and_transforms = getattr(factory_mod, "create_model_and_transforms", None)
         if create_model_and_transforms is None:
             raise AttributeError("src.factory.create_model_and_transforms is missing.")
+        logger.info("AF2 factory build start: create_model_and_transforms(...)")
+        t0 = time.perf_counter()
         with _audio_flamingo2_disable_weights_only_torch_load():
             created = create_model_and_transforms(
                 clap_config=clap_config,
                 use_local_files=bool(local_files_only),
                 **model_config,
             )
+        logger.info("AF2 factory build done: elapsed=%.1fs", time.perf_counter() - t0)
     finally:
         for inserted in inserted_paths:
             try:
@@ -573,8 +604,13 @@ def load_audio_flamingo2_bundle_or_raise(
         raise RuntimeError("Audio-Flamingo-2 tokenizer was not returned by factory.")
 
     safe_ckpt_dir = _audio_flamingo2_pick_safe_ckpt_dir_or_raise(model_dir)
+    logger.info("AF2 loading safetensors from: %s", safe_ckpt_dir)
+    t0 = time.perf_counter()
     state_dict = _audio_flamingo2_load_state_dict_or_raise(safe_ckpt_dir)
+    logger.info("AF2 safetensors loaded: tensors=%d elapsed=%.1fs", len(state_dict), time.perf_counter() - t0)
+    t0 = time.perf_counter()
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    logger.info("AF2 model.load_state_dict done: elapsed=%.1fs", time.perf_counter() - t0)
     if missing:
         logger.warning("Audio-Flamingo-2 load_state_dict missing keys: %d", len(missing))
     if unexpected:
@@ -4219,7 +4255,12 @@ def main():
         )
 
     _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
+    if rank == 0:
+        logger.info("Moving model to device: %s", device)
+    t0 = time.perf_counter()
     model = model.to(device)
+    if rank == 0:
+        logger.info("Model move to device done: elapsed=%.1fs", time.perf_counter() - t0)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
 
     # Keep audio modules trainable by default and keep projector trainable, as in prior behavior.

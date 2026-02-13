@@ -100,6 +100,12 @@ model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
 - モデルrepo側の `safe_ckpt` / `clap_ckpt` を取得
 - 専用の前処理 (`lang_x`, `audio_x`, `audio_x_mask`) で学習・推論を実行
 
+初回と2回目以降の挙動:
+- 初回: キャッシュにないファイルをダウンロード
+- 2回目以降: 既存キャッシュを再利用（通常は再ダウンロード不要）
+- ただし毎回、モデル構築・重み読込・GPU転送は実行されます
+- 完全オフラインでキャッシュのみ使う場合は `--audio_flamingo2_local_files_only` を指定
+
 最小実行例:
 
 ```bash
