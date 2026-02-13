@@ -42,6 +42,13 @@ Examples:
       --reuse-dir Experiment_RationaleCompare/analysis/model_feats_run_x \
       --all-intents \
       --distance-rank-step 3
+
+    # Extract vectors around intent-generation timing
+    python 08_visualize_model_features.py \
+      --model_name_or_path outputs/qwen_rationale_label_ft \
+      --pipeline sft \
+      --feature-source intent_generation \
+      --intent-max-new-tokens 256
 """
 
 import argparse
@@ -290,6 +297,34 @@ def _forward_with_retry(model: Any, kwargs: Dict[str, Any], max_retry: int = 6) 
     raise RuntimeError("forward() retry limit exceeded while dropping unsupported kwargs.")
 
 
+def _generate_sequences_with_retry(model: Any, kwargs: Dict[str, Any], max_retry: int = 6) -> torch.Tensor:
+    working = dict(kwargs)
+    for _ in range(max_retry):
+        try:
+            with torch.no_grad():
+                output = model.generate(**working)
+            if torch.is_tensor(output):
+                return output
+            sequences = getattr(output, "sequences", None)
+            if torch.is_tensor(sequences):
+                return sequences
+            if isinstance(output, (tuple, list)) and output and torch.is_tensor(output[0]):
+                return output[0]
+            raise RuntimeError("generate() returned unexpected output type.")
+        except Exception as exc:
+            unused = _extract_unused_model_kwargs_from_exception(exc)
+            if not unused:
+                raise
+            removed = []
+            for key in list(working.keys()):
+                if _key_matches_unused(key, unused):
+                    working.pop(key, None)
+                    removed.append(key)
+            if not removed:
+                raise
+    raise RuntimeError("generate() retry limit exceeded while dropping unsupported kwargs.")
+
+
 def _extract_label_from_json_obj(obj: Dict[str, Any]) -> Tuple[str, str]:
     scenario = str(obj.get("scenario", obj.get("Scenario", "")) or "").strip().lower()
     action = str(obj.get("action", obj.get("Action", "")) or "").strip().lower()
@@ -390,6 +425,99 @@ def _get_hidden_from_outputs(outputs: Any, layer_index: int) -> torch.Tensor:
     if hidden.dim() == 2:
         hidden = hidden.unsqueeze(0)
     return hidden
+
+
+def _decode_text_from_token_ids(tokenizer: Any, token_ids: Sequence[int]) -> str:
+    if not token_ids:
+        return ""
+    return str(
+        tokenizer.decode(
+            list(token_ids),
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        or ""
+    )
+
+
+def _decode_text_and_offsets(tokenizer: Any, token_ids: Sequence[int]) -> Tuple[str, List[Tuple[int, int]]]:
+    text = ""
+    offsets: List[Tuple[int, int]] = []
+    for tid in token_ids:
+        piece = _decode_text_from_token_ids(tokenizer, [int(tid)])
+        s = len(text)
+        text += piece
+        e = len(text)
+        offsets.append((s, e))
+    return text, offsets
+
+
+def _find_span_case_insensitive(text: str, needle: str) -> Optional[Tuple[int, int]]:
+    t = str(text or "")
+    n = str(needle or "")
+    if not t or not n:
+        return None
+    i = t.lower().find(n.lower())
+    if i < 0:
+        return None
+    return i, i + len(n)
+
+
+def _find_j_line_span(text: str) -> Optional[Tuple[int, int]]:
+    t = str(text or "")
+    if not t:
+        return None
+    match = None
+    for m in re.finditer(r"(?mi)^J\s*[:：]\s*(.+)$", t):
+        match = m
+    if match is None:
+        return None
+    return int(match.start(1)), int(match.end(1))
+
+
+def _select_generated_intent_token_indices(
+    tokenizer: Any,
+    generated_ids: Sequence[int],
+    intent_label: str,
+) -> Tuple[List[int], str]:
+    output_text, offsets = _decode_text_and_offsets(tokenizer, generated_ids)
+    candidate_idxs = [i for i, (s, e) in enumerate(offsets) if e > s]
+
+    span = _find_span_case_insensitive(output_text, intent_label)
+    span_source = "intent_label"
+    if span is None:
+        span = _find_j_line_span(output_text)
+        span_source = "j_line"
+    if span is None:
+        if candidate_idxs:
+            return candidate_idxs, "full_generated"
+        if offsets:
+            return [max(0, len(offsets) - 1)], "fallback_last"
+        return [], "empty_generated"
+
+    a, b = span
+    selected = [i for i, (s, e) in enumerate(offsets) if e > a and s < b and e > s]
+    if selected:
+        return selected, span_source
+    if candidate_idxs:
+        return candidate_idxs, "full_generated"
+    if offsets:
+        return [max(0, len(offsets) - 1)], "fallback_last"
+    return [], "empty_generated"
+
+
+def _pool_hidden_at_indices(hidden: torch.Tensor, token_indices: Sequence[int]) -> np.ndarray:
+    if hidden.dim() != 3 or hidden.shape[0] != 1:
+        raise ValueError(f"Expected hidden [1,T,D], got {tuple(hidden.shape)}")
+    if not token_indices:
+        idx = torch.tensor([hidden.shape[1] - 1], device=hidden.device, dtype=torch.long)
+    else:
+        idx = torch.tensor(sorted(set(int(i) for i in token_indices)), device=hidden.device, dtype=torch.long)
+        idx = idx[(idx >= 0) & (idx < hidden.shape[1])]
+        if idx.numel() == 0:
+            idx = torch.tensor([hidden.shape[1] - 1], device=hidden.device, dtype=torch.long)
+    vec = hidden[0, idx].mean(dim=0)
+    return vec.detach().float().cpu().numpy()
 
 
 def pool_feature(
@@ -1130,14 +1258,93 @@ def extract_features_from_model(
             one = _cast_floating_tensors_to_model_dtype(one, model)
             one = _filter_inputs_by_forward_signature(model, one)
 
-            kwargs: Dict[str, Any] = dict(one)
-            kwargs["output_hidden_states"] = True
-            kwargs["return_dict"] = True
-            kwargs["use_cache"] = False
+            span_source = "prompt_pool"
+            intent_token_count = 0
+            if args.feature_source == "intent_generation":
+                gen_kwargs: Dict[str, Any] = dict(one)
+                gen_kwargs["max_new_tokens"] = max(1, int(args.intent_max_new_tokens))
+                gen_kwargs["do_sample"] = False
+                if tokenizer.pad_token_id is not None:
+                    gen_kwargs["pad_token_id"] = int(tokenizer.pad_token_id)
+                elif tokenizer.eos_token_id is not None:
+                    gen_kwargs["pad_token_id"] = int(tokenizer.eos_token_id)
+                if tokenizer.eos_token_id is not None:
+                    gen_kwargs["eos_token_id"] = int(tokenizer.eos_token_id)
 
-            outputs = _forward_with_retry(model, kwargs)
-            hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
-            vec = pool_feature(hidden, one.get("attention_mask"), args.pooling)
+                sequences = _generate_sequences_with_retry(model, gen_kwargs)
+                if sequences.dim() == 1:
+                    sequences = sequences.unsqueeze(0)
+                if sequences.shape[0] != 1:
+                    sequences = sequences[:1]
+
+                prompt_len = int(one["input_ids"].shape[1])
+                seq_len = int(sequences.shape[1])
+                if seq_len > prompt_len:
+                    generated_ids = sequences[0, prompt_len:].detach().cpu().tolist()
+                    generated_text = _decode_text_from_token_ids(tokenizer, generated_ids)
+                    pred_intent_label = ""
+                    parse_fn = getattr(pipeline_mod, "parse_prediction_label", None)
+                    if callable(parse_fn):
+                        try:
+                            pred = parse_fn(generated_text)
+                            if isinstance(pred, dict):
+                                ps = str(pred.get("scenario", "") or "").strip().lower()
+                                pa = str(pred.get("action", "") or "").strip().lower()
+                                if ps and pa:
+                                    pred_intent_label = f"{ps}_{pa}"
+                        except Exception:
+                            pred_intent_label = ""
+
+                    if not pred_intent_label:
+                        _, _, pred_intent_label = infer_intent_from_item(
+                            item,
+                            gold_intent_by_slurp_id=gold_intent_by_slurp_id,
+                            gold_intent_by_file=gold_intent_by_file,
+                        )
+                        if pred_intent_label == "__unknown__":
+                            pred_intent_label = ""
+
+                    selected_local, span_source = _select_generated_intent_token_indices(
+                        tokenizer=tokenizer,
+                        generated_ids=generated_ids,
+                        intent_label=pred_intent_label,
+                    )
+                    intent_token_count = int(len(selected_local))
+                    selected_global = [prompt_len + int(i) for i in selected_local]
+
+                    full_inputs: Dict[str, Any] = dict(one)
+                    full_inputs["input_ids"] = sequences.to(device)
+                    full_inputs["attention_mask"] = torch.ones_like(full_inputs["input_ids"], dtype=torch.long)
+                    if hasattr(pipeline_mod, "_ensure_feature_masks_for_generation"):
+                        full_inputs = pipeline_mod._ensure_feature_masks_for_generation(full_inputs)
+                    full_inputs = _cast_floating_tensors_to_model_dtype(full_inputs, model)
+                    full_inputs = _filter_inputs_by_forward_signature(model, full_inputs)
+
+                    kwargs: Dict[str, Any] = dict(full_inputs)
+                    kwargs["output_hidden_states"] = True
+                    kwargs["return_dict"] = True
+                    kwargs["use_cache"] = False
+                    outputs = _forward_with_retry(model, kwargs)
+                    hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
+                    vec = _pool_hidden_at_indices(hidden, selected_global)
+                else:
+                    # If no new token is generated, fallback to prompt representation.
+                    kwargs = dict(one)
+                    kwargs["output_hidden_states"] = True
+                    kwargs["return_dict"] = True
+                    kwargs["use_cache"] = False
+                    outputs = _forward_with_retry(model, kwargs)
+                    hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
+                    vec = pool_feature(hidden, one.get("attention_mask"), args.pooling)
+                    span_source = "prompt_fallback_no_generation"
+            else:
+                kwargs = dict(one)
+                kwargs["output_hidden_states"] = True
+                kwargs["return_dict"] = True
+                kwargs["use_cache"] = False
+                outputs = _forward_with_retry(model, kwargs)
+                hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
+                vec = pool_feature(hidden, one.get("attention_mask"), args.pooling)
             if args.l2_normalize:
                 vec = _l2_normalize_rows(vec.reshape(1, -1))[0]
 
@@ -1156,6 +1363,9 @@ def extract_features_from_model(
                 "task_mode": str(item.get("task_mode", "")),
                 "input_type": "audio" if item.get("audio_path") else "text",
                 "audio_path": str(item.get("audio_path", "")) if item.get("audio_path") else "",
+                "feature_source": str(args.feature_source),
+                "intent_span_source": span_source,
+                "intent_token_count": int(intent_token_count),
             })
             features.append(vec.astype(np.float32))
         if hasattr(batch_iter, "set_postfix"):
@@ -1290,6 +1500,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="e.g., cuda, cuda:0, cpu")
     parser.add_argument("--pooling", type=str, default="mean", choices=["mean", "last"])
     parser.add_argument("--layer-index", type=int, default=-1, help="Hidden layer index (-1 means last hidden layer).")
+    parser.add_argument(
+        "--feature-source",
+        type=str,
+        default="prompt",
+        choices=["prompt", "intent_generation"],
+        help="prompt: 入力プロンプト hidden を集約 / intent_generation: 生成時にIntentが出るトークン近傍 hidden を集約",
+    )
+    parser.add_argument("--intent-max-new-tokens", type=int, default=256,
+                        help="feature-source=intent_generation 時の生成長上限")
     parser.add_argument("--l2-normalize", action="store_true", help="L2 normalize each feature vector.")
     parser.add_argument("--embeddings", type=str, default="pca,tsne,umap",
                         help="2D embeddings to compute (comma): pca,tsne,umap")
@@ -1337,6 +1556,8 @@ def main() -> None:
         if args.pipeline != "sft":
             raise SystemExit("ERROR: --only-json is available only when --pipeline sft.")
         args.task_mode = "json_only"
+    if int(args.intent_max_new_tokens) <= 0:
+        raise SystemExit("ERROR: --intent-max-new-tokens must be > 0.")
     if float(args.heatmap_gamma) <= 0:
         raise SystemExit("ERROR: --heatmap-gamma must be > 0.")
     if args.pipeline == "multitask":
@@ -1543,6 +1764,8 @@ def main() -> None:
         "text_only": bool(args.text_only),
         "pooling": args.pooling,
         "layer_index": int(args.layer_index),
+        "feature_source": str(args.feature_source),
+        "intent_max_new_tokens": int(args.intent_max_new_tokens),
         "l2_normalize": bool(args.l2_normalize),
         "min_intent_samples": int(args.min_intent_samples),
         "top_intents": int(args.top_intents),
