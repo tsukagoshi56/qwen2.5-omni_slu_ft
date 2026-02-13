@@ -204,6 +204,14 @@ def load_audio_model_from_pretrained(
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
+    def _has_unimplemented_forward(model: Any) -> bool:
+        try:
+            cls_forward = getattr(type(model), "forward", None)
+        except Exception:
+            return False
+        base_forward = getattr(torch.nn.Module, "forward", None)
+        return cls_forward is base_forward
+
     def _optional_transformers_class(*names: str) -> Optional[Any]:
         for name in names:
             cls = getattr(hf_transformers, name, None)
@@ -257,11 +265,16 @@ def load_audio_model_from_pretrained(
         qwen_errors: List[str] = []
         for loader_name, loader_cls in qwen_attempts:
             try:
-                return loader_cls.from_pretrained(
+                model = loader_cls.from_pretrained(
                     model_name_or_path,
                     torch_dtype=torch_dtype,
                     trust_remote_code=trust_remote_code,
                 )
+                if _has_unimplemented_forward(model):
+                    raise RuntimeError(
+                        f"{loader_name} loaded but forward() is unimplemented in this environment."
+                    )
+                return model
             except Exception as exc:
                 qwen_errors.append(f"{loader_name}: {exc}")
 
@@ -346,11 +359,16 @@ def load_audio_model_from_pretrained(
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
         try:
-            return loader_cls.from_pretrained(
+            model = loader_cls.from_pretrained(
                 model_name_or_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=trust_remote_code,
             )
+            if _has_unimplemented_forward(model):
+                raise RuntimeError(
+                    f"{loader_name} loaded but forward() is unimplemented in this environment."
+                )
+            return model
         except Exception as exc:
             errors.append(f"{loader_name}: {exc}")
 
