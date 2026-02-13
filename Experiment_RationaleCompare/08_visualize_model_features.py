@@ -49,6 +49,12 @@ Examples:
       --pipeline sft \
       --feature-source intent_generation \
       --intent-max-new-tokens 256
+
+    # Multi-GPU extraction with torchrun
+    torchrun --nproc_per_node 2 08_visualize_model_features.py \
+      --model_name_or_path outputs/qwen_rationale_label_ft \
+      --pipeline sft \
+      --task-mode cot
 """
 
 import argparse
@@ -69,6 +75,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 try:
     from tqdm.auto import tqdm
@@ -1196,6 +1203,7 @@ def extract_features_from_model(
     items: List[Dict[str, Any]],
     gold_intent_by_slurp_id: Optional[Dict[str, Tuple[str, str, str]]] = None,
     gold_intent_by_file: Optional[Dict[str, Tuple[str, str, str]]] = None,
+    show_progress: bool = True,
 ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
     device = torch.device(args.device)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
@@ -1240,6 +1248,7 @@ def extract_features_from_model(
         desc=f"Extract [{args.pipeline}/{args.task_mode}]",
         unit="batch",
         dynamic_ncols=True,
+        disable=not bool(show_progress),
     )
     for batch in batch_iter:
         unpacked = _unpack_batch(batch)
@@ -1354,6 +1363,7 @@ def extract_features_from_model(
                 gold_intent_by_file=gold_intent_by_file,
             )
             rows.append({
+                "_global_index": int(item.get("_global_index")) if item.get("_global_index") is not None else None,
                 "id": str(item.get("id", "")),
                 "slurp_id": str(item.get("slurp_id", "")),
                 "file": str(item.get("file", "")),
@@ -1372,7 +1382,7 @@ def extract_features_from_model(
             batch_iter.set_postfix(extracted=len(features), refresh=False)
 
     if not features:
-        raise RuntimeError("No features were extracted. Check test_file/audio_dir/model compatibility.")
+        return np.zeros((0, 0), dtype=np.float32), rows
 
     return np.vstack(features).astype(np.float32), rows
 
@@ -1448,7 +1458,61 @@ def load_feature_artifacts(reuse_dir: str) -> Tuple[np.ndarray, List[Dict[str, A
     return features, rows
 
 
-def choose_device(device_arg: Optional[str]) -> str:
+def _dist_is_initialized() -> bool:
+    return bool(dist.is_available() and dist.is_initialized())
+
+
+def _dist_rank() -> int:
+    if _dist_is_initialized():
+        return int(dist.get_rank())
+    return 0
+
+
+def _dist_world_size() -> int:
+    if _dist_is_initialized():
+        return int(dist.get_world_size())
+    return 1
+
+
+def _is_main_process() -> bool:
+    return _dist_rank() == 0
+
+
+def setup_distributed(dist_backend: str = "auto") -> Tuple[bool, int, int, int]:
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    world_size_env = int(os.environ.get("WORLD_SIZE", "1"))
+    rank_env = int(os.environ.get("RANK", "0"))
+    if local_rank < 0 or world_size_env <= 1:
+        return False, local_rank, rank_env, world_size_env
+    if _dist_is_initialized():
+        return True, local_rank, _dist_rank(), _dist_world_size()
+
+    backend = str(dist_backend or "auto").strip().lower()
+    if backend in {"", "auto"}:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if backend == "nccl" and not torch.cuda.is_available():
+        backend = "gloo"
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend=backend)
+    return True, local_rank, _dist_rank(), _dist_world_size()
+
+
+def finalize_distributed() -> None:
+    if _dist_is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
+def choose_device(device_arg: Optional[str], local_rank: int = -1) -> str:
+    if local_rank >= 0:
+        device_text = str(device_arg or "").strip().lower()
+        if device_text.startswith("cpu"):
+            return str(device_arg)
+        if torch.cuda.is_available():
+            return f"cuda:{local_rank}"
+        return "cpu"
     if device_arg:
         return device_arg
     return "cuda" if torch.cuda.is_available() else "cpu"
@@ -1479,6 +1543,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model_name_or_path", type=str, default=None, help="Model path/checkpoint.")
     parser.add_argument("--reuse-dir", type=str, default=None, help="Reuse saved features from this analysis dir.")
+    parser.add_argument("--dist-backend", type=str, default="auto", choices=["auto", "nccl", "gloo"],
+                        help="torchrun時のdistributed backend")
     parser.add_argument("--pipeline", type=str, default="sft", choices=["sft", "multitask"])
     parser.add_argument(
         "--task-mode",
@@ -1549,355 +1615,459 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if not args.reuse_dir and not args.model_name_or_path:
-        raise SystemExit("ERROR: --model_name_or_path is required unless --reuse-dir is set.")
-
-    if args.only_json:
-        if args.pipeline != "sft":
-            raise SystemExit("ERROR: --only-json is available only when --pipeline sft.")
-        args.task_mode = "json_only"
-    if int(args.intent_max_new_tokens) <= 0:
-        raise SystemExit("ERROR: --intent-max-new-tokens must be > 0.")
-    if float(args.heatmap_gamma) <= 0:
-        raise SystemExit("ERROR: --heatmap-gamma must be > 0.")
-    if args.pipeline == "multitask":
-        print(f"Multitask task_mode: {args.task_mode}")
-    if args.all_intents:
-        args.min_intent_samples = 1
-        args.top_intents = 0
-        print("All-intents mode: min_intent_samples=1, top_intents=0")
-
-    args.device = choose_device(args.device)
-    out_dir = build_output_dir(args)
-
-    if args.reuse_dir:
-        features, rows = load_feature_artifacts(out_dir)
-        print(f"Loaded cached features: {features.shape} from {out_dir}")
-    else:
-        sft_mod = _load_module_from_path("_sft_mod", SFT_PATH)
-        multitask_mod = _load_module_from_path("_mt_mod", MULTITASK_PATH)
-        pipeline_mod, items = build_items(args, sft_mod, multitask_mod)
-        if not items:
-            raise SystemExit("ERROR: No items built from test data.")
-        print(f"Items prepared: {len(items)}")
-        gold_by_sid, gold_by_file = load_gold_intent_maps_from_test_jsonl(args.test_file)
-        if gold_by_sid or gold_by_file:
-            print(f"Gold map loaded: slurp_id={len(gold_by_sid)} file={len(gold_by_file)}")
-        else:
-            print("Gold map not available; falling back to item-derived intent only.")
-        print(f"Loading model on device: {args.device}")
-        features, rows = extract_features_from_model(
-            args,
-            pipeline_mod,
-            items,
-            gold_intent_by_slurp_id=gold_by_sid,
-            gold_intent_by_file=gold_by_file,
-        )
-        print(f"Extracted features: {features.shape}")
-
-    if len(rows) != int(features.shape[0]):
-        n = min(len(rows), int(features.shape[0]))
-        rows = rows[:n]
-        features = features[:n]
-
-    unknown_n = sum(1 for r in rows if r.get("intent", "__unknown__") == "__unknown__")
-    resolved_n = len(rows) - unknown_n
-    print(f"Intent labels resolved: {resolved_n}/{len(rows)} (unknown={unknown_n})")
-    if unknown_n == len(rows) and len(rows) > 0:
-        print("WARNING: All intents are unknown. Check --test_file / metadata parsing.", file=sys.stderr)
-
-    intents = [r.get("intent", "__unknown__") for r in rows]
-    counts = Counter(intents)
-    stats = compute_intent_distance_stats(
-        features=features,
-        intents=intents,
-        min_intent_samples=max(1, int(args.min_intent_samples)),
-        include_unknown=bool(args.include_unknown_intent),
-    )
-    mean_rows = build_intent_mean_distance_rows(
-        valid_intents=stats["valid_intents"],
-        counts=stats["counts"],
-        dist=stats["distance_matrix"],
-    )
-    sampled_rows = sample_intent_rows_by_rank_step(
-        rows=mean_rows,
-        rank_step=max(1, int(args.distance_rank_step)),
-    )
-    sampled_intents = [str(r.get("intent", "")) for r in sampled_rows if str(r.get("intent", ""))]
-    sampled_order, sampled_dist = build_distance_submatrix(
-        valid_intents=stats["valid_intents"],
-        dist=stats["distance_matrix"],
-        ordered_intents=sampled_intents,
-    )
-    auto_heatmap_vmin, auto_heatmap_vmax = compute_heatmap_color_limits(stats["distance_matrix"])
-    heatmap_vmin, heatmap_vmax = auto_heatmap_vmin, auto_heatmap_vmax
-    heatmap_scale_source = "auto"
-    used_scale_file = bool(args.heatmap_scale_file and os.path.exists(args.heatmap_scale_file))
-
-    if used_scale_file:
-        file_vmin, file_vmax = _load_heatmap_scale(args.heatmap_scale_file)
-        if file_vmin is not None and file_vmax is not None:
-            heatmap_vmin, heatmap_vmax = file_vmin, file_vmax
-            heatmap_scale_source = f"file:{args.heatmap_scale_file}"
+    dist_enabled = False
+    local_rank = -1
+    rank = 0
+    world_size = 1
+    try:
+        dist_enabled, local_rank, rank, world_size = setup_distributed(args.dist_backend)
+        if dist_enabled:
             print(
-                f"Using heatmap scale from file: vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f}"
+                f"[rank {rank}] Distributed enabled: world_size={world_size}, "
+                f"local_rank={local_rank}, backend={dist.get_backend()}"
             )
 
-    cli_override = False
-    if args.heatmap_vmin is not None:
-        heatmap_vmin = float(args.heatmap_vmin)
-        heatmap_scale_source = "cli"
-        cli_override = True
-    if args.heatmap_vmax is not None:
-        heatmap_vmax = float(args.heatmap_vmax)
-        heatmap_scale_source = "cli"
-        cli_override = True
+        if not args.reuse_dir and not args.model_name_or_path:
+            raise SystemExit("ERROR: --model_name_or_path is required unless --reuse-dir is set.")
 
-    # Hard-coded default scale for cross-model comparability when not explicitly overridden.
-    if not used_scale_file and not cli_override:
-        heatmap_vmin = float(DEFAULT_HEATMAP_VMIN)
-        heatmap_vmax = float(DEFAULT_HEATMAP_VMAX)
-        heatmap_scale_source = "fixed_default"
+        if args.only_json:
+            if args.pipeline != "sft":
+                raise SystemExit("ERROR: --only-json is available only when --pipeline sft.")
+            args.task_mode = "json_only"
+        if int(args.intent_max_new_tokens) <= 0:
+            raise SystemExit("ERROR: --intent-max-new-tokens must be > 0.")
+        if float(args.heatmap_gamma) <= 0:
+            raise SystemExit("ERROR: --heatmap-gamma must be > 0.")
+        if args.pipeline == "multitask" and _is_main_process():
+            print(f"Multitask task_mode: {args.task_mode}")
+        if args.all_intents:
+            args.min_intent_samples = 1
+            args.top_intents = 0
+            if _is_main_process():
+                print("All-intents mode: min_intent_samples=1, top_intents=0")
 
-    if heatmap_vmin is not None and heatmap_vmax is not None and heatmap_vmax <= heatmap_vmin:
-        raise SystemExit("ERROR: heatmap scale requires vmax > vmin.")
+        args.device = choose_device(args.device, local_rank=local_rank)
 
-    if args.heatmap_scale_file and (not os.path.exists(args.heatmap_scale_file)):
-        _save_heatmap_scale(args.heatmap_scale_file, heatmap_vmin, heatmap_vmax)
-        if heatmap_vmin is not None and heatmap_vmax is not None:
+        features: np.ndarray
+        rows: List[Dict[str, Any]]
+        out_dir: Optional[str] = None
+
+        if args.reuse_dir:
+            if not _is_main_process():
+                return
+            out_dir = build_output_dir(args)
+            features, rows = load_feature_artifacts(out_dir)
+            print(f"Loaded cached features: {features.shape} from {out_dir}")
+        else:
+            sft_mod = _load_module_from_path("_sft_mod", SFT_PATH)
+            multitask_mod = _load_module_from_path("_mt_mod", MULTITASK_PATH)
+            pipeline_mod, base_items = build_items(args, sft_mod, multitask_mod)
+            if not base_items:
+                raise SystemExit("ERROR: No items built from test data.")
+
+            indexed_items: List[Dict[str, Any]] = []
+            for i, item in enumerate(base_items):
+                obj = dict(item)
+                obj["_global_index"] = int(i)
+                indexed_items.append(obj)
+
+            if dist_enabled:
+                my_items = indexed_items[rank::world_size]
+            else:
+                my_items = indexed_items
+            print(f"[rank {rank}] Items assigned: {len(my_items)}/{len(indexed_items)}")
+
+            gold_by_sid, gold_by_file = load_gold_intent_maps_from_test_jsonl(args.test_file)
+            if _is_main_process():
+                if gold_by_sid or gold_by_file:
+                    print(f"Gold map loaded: slurp_id={len(gold_by_sid)} file={len(gold_by_file)}")
+                else:
+                    print("Gold map not available; falling back to item-derived intent only.")
+                print(f"Loading model on device: {args.device}")
+
+            local_features, local_rows = extract_features_from_model(
+                args,
+                pipeline_mod,
+                my_items,
+                gold_intent_by_slurp_id=gold_by_sid,
+                gold_intent_by_file=gold_by_file,
+                show_progress=_is_main_process(),
+            )
+            print(f"[rank {rank}] Local extracted features: {local_features.shape}")
+
+            if dist_enabled:
+                gathered: List[Any] = [None for _ in range(world_size)]
+                dist.all_gather_object(
+                    gathered,
+                    {
+                        "features": local_features,
+                        "rows": local_rows,
+                    },
+                )
+                if not _is_main_process():
+                    return
+
+                merged: List[Tuple[int, Dict[str, Any], np.ndarray]] = []
+                merged_feature_dim = 0
+                for payload in gathered:
+                    if not isinstance(payload, dict):
+                        continue
+                    payload_rows = payload.get("rows") or []
+                    payload_features = np.asarray(payload.get("features"), dtype=np.float32)
+                    if payload_features.ndim == 1:
+                        payload_features = payload_features.reshape(1, -1)
+                    if payload_features.ndim != 2:
+                        continue
+                    if payload_features.shape[0] > 0 and payload_features.shape[1] > 0:
+                        merged_feature_dim = max(merged_feature_dim, int(payload_features.shape[1]))
+                    n = min(len(payload_rows), int(payload_features.shape[0]))
+                    for i in range(n):
+                        row_obj = payload_rows[i] if isinstance(payload_rows[i], dict) else {}
+                        row = dict(row_obj)
+                        try:
+                            gidx = int(row.get("_global_index"))
+                        except Exception:
+                            gidx = 10**12 + len(merged)
+                        merged.append((gidx, row, payload_features[i].astype(np.float32)))
+                merged.sort(key=lambda x: x[0])
+                if merged:
+                    rows = [x[1] for x in merged]
+                    features = np.vstack([x[2] for x in merged]).astype(np.float32)
+                else:
+                    rows = []
+                    features = np.zeros((0, merged_feature_dim), dtype=np.float32)
+                print(f"Gathered extracted features: {features.shape} from world_size={world_size}")
+            else:
+                features, rows = local_features, local_rows
+
+            out_dir = build_output_dir(args)
+
+        if not _is_main_process():
+            return
+
+        if out_dir is None:
+            out_dir = build_output_dir(args)
+
+        cleaned_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            obj = dict(row)
+            obj.pop("_global_index", None)
+            cleaned_rows.append(obj)
+        rows = cleaned_rows
+
+        if int(features.shape[0]) == 0:
+            raise RuntimeError("No features were extracted. Check test_file/audio_dir/model compatibility.")
+        if len(rows) != int(features.shape[0]):
+            n = min(len(rows), int(features.shape[0]))
+            rows = rows[:n]
+            features = features[:n]
+
+        unknown_n = sum(1 for r in rows if r.get("intent", "__unknown__") == "__unknown__")
+        resolved_n = len(rows) - unknown_n
+        print(f"Intent labels resolved: {resolved_n}/{len(rows)} (unknown={unknown_n})")
+        if unknown_n == len(rows) and len(rows) > 0:
+            print("WARNING: All intents are unknown. Check --test_file / metadata parsing.", file=sys.stderr)
+
+        intents = [r.get("intent", "__unknown__") for r in rows]
+        counts = Counter(intents)
+        stats = compute_intent_distance_stats(
+            features=features,
+            intents=intents,
+            min_intent_samples=max(1, int(args.min_intent_samples)),
+            include_unknown=bool(args.include_unknown_intent),
+        )
+        mean_rows = build_intent_mean_distance_rows(
+            valid_intents=stats["valid_intents"],
+            counts=stats["counts"],
+            dist=stats["distance_matrix"],
+        )
+        sampled_rows = sample_intent_rows_by_rank_step(
+            rows=mean_rows,
+            rank_step=max(1, int(args.distance_rank_step)),
+        )
+        sampled_intents = [str(r.get("intent", "")) for r in sampled_rows if str(r.get("intent", ""))]
+        sampled_order, sampled_dist = build_distance_submatrix(
+            valid_intents=stats["valid_intents"],
+            dist=stats["distance_matrix"],
+            ordered_intents=sampled_intents,
+        )
+        auto_heatmap_vmin, auto_heatmap_vmax = compute_heatmap_color_limits(stats["distance_matrix"])
+        heatmap_vmin, heatmap_vmax = auto_heatmap_vmin, auto_heatmap_vmax
+        heatmap_scale_source = "auto"
+        used_scale_file = bool(args.heatmap_scale_file and os.path.exists(args.heatmap_scale_file))
+
+        if used_scale_file:
+            file_vmin, file_vmax = _load_heatmap_scale(args.heatmap_scale_file)
+            if file_vmin is not None and file_vmax is not None:
+                heatmap_vmin, heatmap_vmax = file_vmin, file_vmax
+                heatmap_scale_source = f"file:{args.heatmap_scale_file}"
+                print(
+                    f"Using heatmap scale from file: vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f}"
+                )
+
+        cli_override = False
+        if args.heatmap_vmin is not None:
+            heatmap_vmin = float(args.heatmap_vmin)
+            heatmap_scale_source = "cli"
+            cli_override = True
+        if args.heatmap_vmax is not None:
+            heatmap_vmax = float(args.heatmap_vmax)
+            heatmap_scale_source = "cli"
+            cli_override = True
+
+        # Hard-coded default scale for cross-model comparability when not explicitly overridden.
+        if not used_scale_file and not cli_override:
+            heatmap_vmin = float(DEFAULT_HEATMAP_VMIN)
+            heatmap_vmax = float(DEFAULT_HEATMAP_VMAX)
+            heatmap_scale_source = "fixed_default"
+
+        if heatmap_vmin is not None and heatmap_vmax is not None and heatmap_vmax <= heatmap_vmin:
+            raise SystemExit("ERROR: heatmap scale requires vmax > vmin.")
+
+        if args.heatmap_scale_file and (not os.path.exists(args.heatmap_scale_file)):
+            _save_heatmap_scale(args.heatmap_scale_file, heatmap_vmin, heatmap_vmax)
+            if heatmap_vmin is not None and heatmap_vmax is not None:
+                print(
+                    f"Saved heatmap scale file: {args.heatmap_scale_file} "
+                    f"(vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f})"
+                )
+
+        use_rank_filtered_viz = int(args.distance_rank_step) > 1 and len(sampled_order) > 0
+        sampled_set = set(sampled_order)
+        if use_rank_filtered_viz:
+            viz_indices = np.asarray(
+                [i for i, intent in enumerate(intents) if intent in sampled_set],
+                dtype=np.int64,
+            )
+        else:
+            viz_indices = np.arange(len(intents), dtype=np.int64)
+        if viz_indices.size == 0:
+            viz_indices = np.arange(len(intents), dtype=np.int64)
+            use_rank_filtered_viz = False
+
+        viz_features = features[viz_indices]
+        viz_intents = [intents[int(i)] for i in viz_indices.tolist()]
+        viz_counts = Counter(viz_intents)
+        viz_top_k = 0 if use_rank_filtered_viz else int(args.top_intents)
+        if use_rank_filtered_viz:
             print(
-                f"Saved heatmap scale file: {args.heatmap_scale_file} "
-                f"(vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f})"
+                f"Visualization labels filtered by rank-step: intents={len(sampled_set)} samples={len(viz_intents)}"
             )
 
-    use_rank_filtered_viz = int(args.distance_rank_step) > 1 and len(sampled_order) > 0
-    sampled_set = set(sampled_order)
-    if use_rank_filtered_viz:
-        viz_indices = np.asarray(
-            [i for i, intent in enumerate(intents) if intent in sampled_set],
-            dtype=np.int64,
+        requested_embeddings = _parse_csv_set(args.embeddings)
+        if not requested_embeddings:
+            requested_embeddings = ["pca"]
+        valid_embedding_names = {"pca", "tsne", "umap"}
+        unknown_embeddings = [x for x in requested_embeddings if x not in valid_embedding_names]
+        if unknown_embeddings:
+            print(f"WARNING: Unknown embeddings ignored: {unknown_embeddings}", file=sys.stderr)
+        requested_embeddings = [x for x in requested_embeddings if x in valid_embedding_names]
+        if not requested_embeddings:
+            requested_embeddings = ["pca"]
+
+        projections: Dict[str, np.ndarray] = {}
+        embedding_notes: Dict[str, str] = {}
+        explained_ratio = (0.0, 0.0)
+
+        if "pca" in requested_embeddings:
+            print("Computing PCA-2D...")
+            pca_projection, explained_ratio = pca_project_2d(viz_features)
+            projections["pca"] = pca_projection
+            embedding_notes["pca"] = "ok"
+
+        if "tsne" in requested_embeddings:
+            print("Computing t-SNE-2D...")
+            tsne_projection, tsne_err = tsne_project_2d(
+                x=viz_features,
+                perplexity=args.tsne_perplexity,
+                learning_rate=args.tsne_learning_rate,
+                n_iter=args.tsne_n_iter,
+                init=args.tsne_init,
+                random_state=args.random_state,
+            )
+            if tsne_projection is not None:
+                projections["tsne"] = tsne_projection
+                embedding_notes["tsne"] = "ok"
+            else:
+                embedding_notes["tsne"] = f"skipped: {tsne_err}"
+                print(f"WARNING: t-SNE skipped: {tsne_err}", file=sys.stderr)
+
+        if "umap" in requested_embeddings:
+            print("Computing UMAP-2D...")
+            umap_projection, umap_err = umap_project_2d(
+                x=viz_features,
+                n_neighbors=args.umap_n_neighbors,
+                min_dist=args.umap_min_dist,
+                metric=args.umap_metric,
+                random_state=args.random_state,
+            )
+            if umap_projection is not None:
+                projections["umap"] = umap_projection
+                embedding_notes["umap"] = "ok"
+            else:
+                embedding_notes["umap"] = f"skipped: {umap_err}"
+                print(f"WARNING: UMAP skipped: {umap_err}", file=sys.stderr)
+
+        save_feature_artifacts(
+            out_dir=out_dir,
+            features=features,
+            rows=rows,
+            projections=projections,
+            pca_explained_ratio=explained_ratio,
+            projection_indices=viz_indices,
         )
-    else:
-        viz_indices = np.arange(len(intents), dtype=np.int64)
-    if viz_indices.size == 0:
-        viz_indices = np.arange(len(intents), dtype=np.int64)
-        use_rank_filtered_viz = False
 
-    viz_features = features[viz_indices]
-    viz_intents = [intents[int(i)] for i in viz_indices.tolist()]
-    viz_counts = Counter(viz_intents)
-    viz_top_k = 0 if use_rank_filtered_viz else int(args.top_intents)
-    if use_rank_filtered_viz:
-        print(
-            f"Visualization labels filtered by rank-step: intents={len(sampled_set)} samples={len(viz_intents)}"
+        config = {
+            "model_name_or_path": args.model_name_or_path,
+            "pipeline": args.pipeline,
+            "task_mode": args.task_mode,
+            "test_file": args.test_file,
+            "audio_dir": args.audio_dir,
+            "text_only": bool(args.text_only),
+            "pooling": args.pooling,
+            "layer_index": int(args.layer_index),
+            "feature_source": str(args.feature_source),
+            "intent_max_new_tokens": int(args.intent_max_new_tokens),
+            "l2_normalize": bool(args.l2_normalize),
+            "min_intent_samples": int(args.min_intent_samples),
+            "top_intents": int(args.top_intents),
+            "all_intents": bool(args.all_intents),
+            "include_unknown_intent": bool(args.include_unknown_intent),
+            "distance_rank_step": int(args.distance_rank_step),
+            "annotate_labels": bool(args.annotate_labels),
+            "device": args.device,
+            "distributed": bool(dist_enabled),
+            "world_size": int(world_size),
+            "rank": int(rank),
+            "local_rank": int(local_rank),
+            "num_samples": int(features.shape[0]),
+            "feature_dim": int(features.shape[1]),
+            "num_unique_intents": len(counts),
+            "num_intents_sampled_by_rank_step": len(sampled_order),
+            "visualization_filtered_by_rank_step": bool(use_rank_filtered_viz),
+            "num_visualization_samples": int(viz_features.shape[0]),
+            "num_visualization_intents": len(viz_counts),
+            "visualization_top_intents": int(viz_top_k),
+            "heatmap_vmin": float(heatmap_vmin) if heatmap_vmin is not None else None,
+            "heatmap_vmax": float(heatmap_vmax) if heatmap_vmax is not None else None,
+            "heatmap_gamma": float(args.heatmap_gamma),
+            "heatmap_scale_source": heatmap_scale_source,
+            "heatmap_scale_file": args.heatmap_scale_file,
+            "embeddings_requested": requested_embeddings,
+            "embeddings_computed": sorted(list(projections.keys())),
+            "embedding_notes": embedding_notes,
+            "random_state": int(args.random_state),
+            "tsne_perplexity": float(args.tsne_perplexity),
+            "tsne_learning_rate": float(args.tsne_learning_rate),
+            "tsne_n_iter": int(args.tsne_n_iter),
+            "tsne_init": str(args.tsne_init),
+            "umap_n_neighbors": int(args.umap_n_neighbors),
+            "umap_min_dist": float(args.umap_min_dist),
+            "umap_metric": str(args.umap_metric),
+            "pca_explained_var_ratio": [float(explained_ratio[0]), float(explained_ratio[1])],
+        }
+        _write_json(os.path.join(out_dir, "config.json"), config)
+        _write_json(os.path.join(out_dir, "summary.json"), stats["summary"])
+        save_intent_stats_csv(os.path.join(out_dir, "intent_stats.csv"), stats["intent_rows"])
+        save_centroid_distance_csv(
+            os.path.join(out_dir, "centroid_distances.csv"),
+            stats["valid_intents"],
+            stats["distance_matrix"],
+        )
+        save_intent_mean_distance_csv(
+            os.path.join(out_dir, "intent_mean_distance_ranking.csv"),
+            mean_rows,
+        )
+        save_intent_mean_distance_csv(
+            os.path.join(out_dir, "intent_mean_distance_rankstep.csv"),
+            sampled_rows,
+        )
+        save_distance_table_csv(
+            os.path.join(out_dir, "centroid_distance_rankstep_table.csv"),
+            sampled_order,
+            sampled_dist,
+        )
+        plot_distance_gradient_heatmap(
+            ordered_intents=sampled_order,
+            distance_matrix=sampled_dist,
+            out_path=os.path.join(out_dir, "centroid_distance_rankstep_heatmap.png"),
+            title=f"Centroid Distance Heatmap (rank-step={int(args.distance_rank_step)})",
+            vmin=heatmap_vmin,
+            vmax=heatmap_vmax,
+            heatmap_gamma=float(args.heatmap_gamma),
         )
 
-    requested_embeddings = _parse_csv_set(args.embeddings)
-    if not requested_embeddings:
-        requested_embeddings = ["pca"]
-    valid_embedding_names = {"pca", "tsne", "umap"}
-    unknown_embeddings = [x for x in requested_embeddings if x not in valid_embedding_names]
-    if unknown_embeddings:
-        print(f"WARNING: Unknown embeddings ignored: {unknown_embeddings}", file=sys.stderr)
-    requested_embeddings = [x for x in requested_embeddings if x in valid_embedding_names]
-    if not requested_embeddings:
-        requested_embeddings = ["pca"]
-
-    projections: Dict[str, np.ndarray] = {}
-    embedding_notes: Dict[str, str] = {}
-    explained_ratio = (0.0, 0.0)
-
-    if "pca" in requested_embeddings:
-        print("Computing PCA-2D...")
-        pca_projection, explained_ratio = pca_project_2d(viz_features)
-        projections["pca"] = pca_projection
-        embedding_notes["pca"] = "ok"
-
-    if "tsne" in requested_embeddings:
-        print("Computing t-SNE-2D...")
-        tsne_projection, tsne_err = tsne_project_2d(
-            x=viz_features,
-            perplexity=args.tsne_perplexity,
-            learning_rate=args.tsne_learning_rate,
-            n_iter=args.tsne_n_iter,
-            init=args.tsne_init,
-            random_state=args.random_state,
+        title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
+        if "pca" in projections:
+            plot_pca_scatter(
+                projection=projections["pca"],
+                intents=viz_intents,
+                counts=viz_counts,
+                out_path=os.path.join(out_dir, "pca_scatter_by_intent.png"),
+                title=title,
+                explained_ratio=explained_ratio,
+                top_k=viz_top_k,
+                show_label_text=bool(args.annotate_labels),
+            )
+        if "tsne" in projections:
+            plot_embedding_scatter(
+                projection=projections["tsne"],
+                intents=viz_intents,
+                counts=viz_counts,
+                out_path=os.path.join(out_dir, "tsne_scatter_by_intent.png"),
+                title=title,
+                x_label="t-SNE-1",
+                y_label="t-SNE-2",
+                subtitle="t-SNE-2D",
+                top_k=viz_top_k,
+                show_label_text=bool(args.annotate_labels),
+            )
+        if "umap" in projections:
+            plot_embedding_scatter(
+                projection=projections["umap"],
+                intents=viz_intents,
+                counts=viz_counts,
+                out_path=os.path.join(out_dir, "umap_scatter_by_intent.png"),
+                title=title,
+                x_label="UMAP-1",
+                y_label="UMAP-2",
+                subtitle="UMAP-2D",
+                top_k=viz_top_k,
+                show_label_text=bool(args.annotate_labels),
+            )
+        plot_centroid_heatmap(
+            valid_intents=stats["valid_intents"],
+            distance_matrix=stats["distance_matrix"],
+            counts=stats["counts"],
+            out_path=os.path.join(out_dir, "centroid_distance_heatmap.png"),
+            top_k=int(args.top_intents),
+            vmin=heatmap_vmin,
+            vmax=heatmap_vmax,
+            heatmap_gamma=float(args.heatmap_gamma),
         )
-        if tsne_projection is not None:
-            projections["tsne"] = tsne_projection
-            embedding_notes["tsne"] = "ok"
-        else:
-            embedding_notes["tsne"] = f"skipped: {tsne_err}"
-            print(f"WARNING: t-SNE skipped: {tsne_err}", file=sys.stderr)
 
-    if "umap" in requested_embeddings:
-        print("Computing UMAP-2D...")
-        umap_projection, umap_err = umap_project_2d(
-            x=viz_features,
-            n_neighbors=args.umap_n_neighbors,
-            min_dist=args.umap_min_dist,
-            metric=args.umap_metric,
-            random_state=args.random_state,
-        )
-        if umap_projection is not None:
-            projections["umap"] = umap_projection
-            embedding_notes["umap"] = "ok"
-        else:
-            embedding_notes["umap"] = f"skipped: {umap_err}"
-            print(f"WARNING: UMAP skipped: {umap_err}", file=sys.stderr)
-
-    save_feature_artifacts(
-        out_dir=out_dir,
-        features=features,
-        rows=rows,
-        projections=projections,
-        pca_explained_ratio=explained_ratio,
-        projection_indices=viz_indices,
-    )
-
-    config = {
-        "model_name_or_path": args.model_name_or_path,
-        "pipeline": args.pipeline,
-        "task_mode": args.task_mode,
-        "test_file": args.test_file,
-        "audio_dir": args.audio_dir,
-        "text_only": bool(args.text_only),
-        "pooling": args.pooling,
-        "layer_index": int(args.layer_index),
-        "feature_source": str(args.feature_source),
-        "intent_max_new_tokens": int(args.intent_max_new_tokens),
-        "l2_normalize": bool(args.l2_normalize),
-        "min_intent_samples": int(args.min_intent_samples),
-        "top_intents": int(args.top_intents),
-        "all_intents": bool(args.all_intents),
-        "include_unknown_intent": bool(args.include_unknown_intent),
-        "distance_rank_step": int(args.distance_rank_step),
-        "annotate_labels": bool(args.annotate_labels),
-        "device": args.device,
-        "num_samples": int(features.shape[0]),
-        "feature_dim": int(features.shape[1]),
-        "num_unique_intents": len(counts),
-        "num_intents_sampled_by_rank_step": len(sampled_order),
-        "visualization_filtered_by_rank_step": bool(use_rank_filtered_viz),
-        "num_visualization_samples": int(viz_features.shape[0]),
-        "num_visualization_intents": len(viz_counts),
-        "visualization_top_intents": int(viz_top_k),
-        "heatmap_vmin": float(heatmap_vmin) if heatmap_vmin is not None else None,
-        "heatmap_vmax": float(heatmap_vmax) if heatmap_vmax is not None else None,
-        "heatmap_gamma": float(args.heatmap_gamma),
-        "heatmap_scale_source": heatmap_scale_source,
-        "heatmap_scale_file": args.heatmap_scale_file,
-        "embeddings_requested": requested_embeddings,
-        "embeddings_computed": sorted(list(projections.keys())),
-        "embedding_notes": embedding_notes,
-        "random_state": int(args.random_state),
-        "tsne_perplexity": float(args.tsne_perplexity),
-        "tsne_learning_rate": float(args.tsne_learning_rate),
-        "tsne_n_iter": int(args.tsne_n_iter),
-        "tsne_init": str(args.tsne_init),
-        "umap_n_neighbors": int(args.umap_n_neighbors),
-        "umap_min_dist": float(args.umap_min_dist),
-        "umap_metric": str(args.umap_metric),
-        "pca_explained_var_ratio": [float(explained_ratio[0]), float(explained_ratio[1])],
-    }
-    _write_json(os.path.join(out_dir, "config.json"), config)
-    _write_json(os.path.join(out_dir, "summary.json"), stats["summary"])
-    save_intent_stats_csv(os.path.join(out_dir, "intent_stats.csv"), stats["intent_rows"])
-    save_centroid_distance_csv(
-        os.path.join(out_dir, "centroid_distances.csv"),
-        stats["valid_intents"],
-        stats["distance_matrix"],
-    )
-    save_intent_mean_distance_csv(
-        os.path.join(out_dir, "intent_mean_distance_ranking.csv"),
-        mean_rows,
-    )
-    save_intent_mean_distance_csv(
-        os.path.join(out_dir, "intent_mean_distance_rankstep.csv"),
-        sampled_rows,
-    )
-    save_distance_table_csv(
-        os.path.join(out_dir, "centroid_distance_rankstep_table.csv"),
-        sampled_order,
-        sampled_dist,
-    )
-    plot_distance_gradient_heatmap(
-        ordered_intents=sampled_order,
-        distance_matrix=sampled_dist,
-        out_path=os.path.join(out_dir, "centroid_distance_rankstep_heatmap.png"),
-        title=f"Centroid Distance Heatmap (rank-step={int(args.distance_rank_step)})",
-        vmin=heatmap_vmin,
-        vmax=heatmap_vmax,
-        heatmap_gamma=float(args.heatmap_gamma),
-    )
-
-    title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
-    if "pca" in projections:
-        plot_pca_scatter(
-            projection=projections["pca"],
-            intents=viz_intents,
-            counts=viz_counts,
-            out_path=os.path.join(out_dir, "pca_scatter_by_intent.png"),
-            title=title,
-            explained_ratio=explained_ratio,
-            top_k=viz_top_k,
-            show_label_text=bool(args.annotate_labels),
-        )
-    if "tsne" in projections:
-        plot_embedding_scatter(
-            projection=projections["tsne"],
-            intents=viz_intents,
-            counts=viz_counts,
-            out_path=os.path.join(out_dir, "tsne_scatter_by_intent.png"),
-            title=title,
-            x_label="t-SNE-1",
-            y_label="t-SNE-2",
-            subtitle="t-SNE-2D",
-            top_k=viz_top_k,
-            show_label_text=bool(args.annotate_labels),
-        )
-    if "umap" in projections:
-        plot_embedding_scatter(
-            projection=projections["umap"],
-            intents=viz_intents,
-            counts=viz_counts,
-            out_path=os.path.join(out_dir, "umap_scatter_by_intent.png"),
-            title=title,
-            x_label="UMAP-1",
-            y_label="UMAP-2",
-            subtitle="UMAP-2D",
-            top_k=viz_top_k,
-            show_label_text=bool(args.annotate_labels),
-        )
-    plot_centroid_heatmap(
-        valid_intents=stats["valid_intents"],
-        distance_matrix=stats["distance_matrix"],
-        counts=stats["counts"],
-        out_path=os.path.join(out_dir, "centroid_distance_heatmap.png"),
-        top_k=int(args.top_intents),
-        vmin=heatmap_vmin,
-        vmax=heatmap_vmax,
-        heatmap_gamma=float(args.heatmap_gamma),
-    )
-
-    print(f"Saved analysis dir: {out_dir}")
-    print(f"- {os.path.join(out_dir, 'features.npz')}")
-    print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
-    print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
-    print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
-    print(f"- {os.path.join(out_dir, 'intent_mean_distance_ranking.csv')}")
-    print(f"- {os.path.join(out_dir, 'intent_mean_distance_rankstep.csv')}")
-    print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_table.csv')}")
-    print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_heatmap.png')}")
-    if "pca" in projections:
-        print(f"- {os.path.join(out_dir, 'pca_scatter_by_intent.png')}")
-    if "tsne" in projections:
-        print(f"- {os.path.join(out_dir, 'tsne_scatter_by_intent.png')}")
-    if "umap" in projections:
-        print(f"- {os.path.join(out_dir, 'umap_scatter_by_intent.png')}")
-    print(f"- {os.path.join(out_dir, 'centroid_distance_heatmap.png')}")
-    print("Summary:")
-    print(json.dumps(stats["summary"], ensure_ascii=False, indent=2))
+        print(f"Saved analysis dir: {out_dir}")
+        print(f"- {os.path.join(out_dir, 'features.npz')}")
+        print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
+        print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
+        print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
+        print(f"- {os.path.join(out_dir, 'intent_mean_distance_ranking.csv')}")
+        print(f"- {os.path.join(out_dir, 'intent_mean_distance_rankstep.csv')}")
+        print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_table.csv')}")
+        print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_heatmap.png')}")
+        if "pca" in projections:
+            print(f"- {os.path.join(out_dir, 'pca_scatter_by_intent.png')}")
+        if "tsne" in projections:
+            print(f"- {os.path.join(out_dir, 'tsne_scatter_by_intent.png')}")
+        if "umap" in projections:
+            print(f"- {os.path.join(out_dir, 'umap_scatter_by_intent.png')}")
+        print(f"- {os.path.join(out_dir, 'centroid_distance_heatmap.png')}")
+        print("Summary:")
+        print(json.dumps(stats["summary"], ensure_ascii=False, indent=2))
+    finally:
+        finalize_distributed()
 
 
 if __name__ == "__main__":
