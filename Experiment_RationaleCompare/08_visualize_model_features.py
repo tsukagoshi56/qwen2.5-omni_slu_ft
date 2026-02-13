@@ -750,6 +750,8 @@ def plot_centroid_heatmap(
     counts: Counter,
     out_path: str,
     top_k: int,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
 ) -> None:
     if len(valid_intents) == 0 or distance_matrix.size == 0:
         return
@@ -761,7 +763,7 @@ def plot_centroid_heatmap(
     sub = distance_matrix[np.ix_(idxs, idxs)]
 
     fig, ax = plt.subplots(figsize=(max(6, len(top_order) * 0.4), max(5, len(top_order) * 0.35)))
-    im = ax.imshow(sub, cmap="viridis", interpolation="nearest")
+    im = ax.imshow(sub, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
     ax.set_xticks(np.arange(len(top_order)))
     ax.set_yticks(np.arange(len(top_order)))
     ax.set_xticklabels(top_order, rotation=60, ha="right", fontsize=7)
@@ -889,6 +891,50 @@ def build_distance_submatrix(
     return order, sub
 
 
+def compute_heatmap_color_limits(distance_matrix: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
+    if distance_matrix.size == 0:
+        return None, None
+    mat = np.asarray(distance_matrix, dtype=np.float32)
+    finite = mat[np.isfinite(mat)]
+    if finite.size == 0:
+        return None, None
+    vmax = float(np.max(finite))
+    vmin = 0.0
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    return vmin, vmax
+
+
+def _load_heatmap_scale(path: str) -> Tuple[Optional[float], Optional[float]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return None, None
+    if not isinstance(obj, dict):
+        return None, None
+    vmin = obj.get("vmin")
+    vmax = obj.get("vmax")
+    try:
+        vmin_f = float(vmin) if vmin is not None else None
+    except Exception:
+        vmin_f = None
+    try:
+        vmax_f = float(vmax) if vmax is not None else None
+    except Exception:
+        vmax_f = None
+    return vmin_f, vmax_f
+
+
+def _save_heatmap_scale(path: str, vmin: Optional[float], vmax: Optional[float]) -> None:
+    if vmin is None or vmax is None:
+        return
+    _ensure_dir(os.path.dirname(path) or ".")
+    payload = {"vmin": float(vmin), "vmax": float(vmax)}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def save_distance_table_csv(
     path: str,
     ordered_intents: Sequence[str],
@@ -908,6 +954,8 @@ def plot_distance_gradient_heatmap(
     distance_matrix: np.ndarray,
     out_path: str,
     title: str,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
 ) -> None:
     if len(ordered_intents) == 0 or distance_matrix.size == 0:
         return
@@ -915,7 +963,7 @@ def plot_distance_gradient_heatmap(
     _ensure_dir(os.path.dirname(out_path) or ".")
     sub = np.asarray(distance_matrix, dtype=np.float32)
     fig, ax = plt.subplots(figsize=(max(6, len(ordered_intents) * 0.45), max(5, len(ordered_intents) * 0.38)))
-    im = ax.imshow(sub, cmap="viridis", interpolation="nearest")
+    im = ax.imshow(sub, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
     ax.set_xticks(np.arange(len(ordered_intents)))
     ax.set_yticks(np.arange(len(ordered_intents)))
     ax.set_xticklabels(ordered_intents, rotation=60, ha="right", fontsize=7)
@@ -1247,6 +1295,12 @@ def parse_args() -> argparse.Namespace:
                         help="平均distance順位を何件おきに抽出するか (3なら rank=1,3,6,9,...,last)。2以上で可視化も抽出Intentのみで実行")
     parser.add_argument("--annotate-labels", action="store_true",
                         help="散布図上にIntentラベル文字を重ねて表示する（凡例は常時表示）")
+    parser.add_argument("--heatmap-vmin", type=float, default=None,
+                        help="ヒートマップ色スケール下限を固定（モデル間比較用）")
+    parser.add_argument("--heatmap-vmax", type=float, default=None,
+                        help="ヒートマップ色スケール上限を固定（モデル間比較用）")
+    parser.add_argument("--heatmap-scale-file", type=str, default=None,
+                        help="共通スケールJSON（存在すれば読込、無ければ今回値を書き出し）")
     parser.add_argument("--print-audio-search-paths", action="store_true")
     parser.add_argument("--audio-search-print-limit", type=int, default=20)
     parser.add_argument("--strict-audio-missing", action="store_true")
@@ -1331,6 +1385,35 @@ def main() -> None:
         dist=stats["distance_matrix"],
         ordered_intents=sampled_intents,
     )
+    auto_heatmap_vmin, auto_heatmap_vmax = compute_heatmap_color_limits(stats["distance_matrix"])
+    heatmap_vmin, heatmap_vmax = auto_heatmap_vmin, auto_heatmap_vmax
+    heatmap_scale_source = "auto"
+
+    if args.heatmap_scale_file and os.path.exists(args.heatmap_scale_file):
+        file_vmin, file_vmax = _load_heatmap_scale(args.heatmap_scale_file)
+        if file_vmin is not None and file_vmax is not None:
+            heatmap_vmin, heatmap_vmax = file_vmin, file_vmax
+            heatmap_scale_source = f"file:{args.heatmap_scale_file}"
+            print(
+                f"Using heatmap scale from file: vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f}"
+            )
+
+    if args.heatmap_vmin is not None:
+        heatmap_vmin = float(args.heatmap_vmin)
+        heatmap_scale_source = "cli"
+    if args.heatmap_vmax is not None:
+        heatmap_vmax = float(args.heatmap_vmax)
+        heatmap_scale_source = "cli"
+    if heatmap_vmin is not None and heatmap_vmax is not None and heatmap_vmax <= heatmap_vmin:
+        raise SystemExit("ERROR: heatmap scale requires vmax > vmin.")
+
+    if args.heatmap_scale_file and (not os.path.exists(args.heatmap_scale_file)):
+        _save_heatmap_scale(args.heatmap_scale_file, heatmap_vmin, heatmap_vmax)
+        if heatmap_vmin is not None and heatmap_vmax is not None:
+            print(
+                f"Saved heatmap scale file: {args.heatmap_scale_file} "
+                f"(vmin={heatmap_vmin:.6f}, vmax={heatmap_vmax:.6f})"
+            )
 
     use_rank_filtered_viz = int(args.distance_rank_step) > 1 and len(sampled_order) > 0
     sampled_set = set(sampled_order)
@@ -1442,6 +1525,10 @@ def main() -> None:
         "num_visualization_samples": int(viz_features.shape[0]),
         "num_visualization_intents": len(viz_counts),
         "visualization_top_intents": int(viz_top_k),
+        "heatmap_vmin": float(heatmap_vmin) if heatmap_vmin is not None else None,
+        "heatmap_vmax": float(heatmap_vmax) if heatmap_vmax is not None else None,
+        "heatmap_scale_source": heatmap_scale_source,
+        "heatmap_scale_file": args.heatmap_scale_file,
         "embeddings_requested": requested_embeddings,
         "embeddings_computed": sorted(list(projections.keys())),
         "embedding_notes": embedding_notes,
@@ -1481,6 +1568,8 @@ def main() -> None:
         distance_matrix=sampled_dist,
         out_path=os.path.join(out_dir, "centroid_distance_rankstep_heatmap.png"),
         title=f"Centroid Distance Heatmap (rank-step={int(args.distance_rank_step)})",
+        vmin=heatmap_vmin,
+        vmax=heatmap_vmax,
     )
 
     title = f"Intent Feature Map ({args.pipeline}/{args.task_mode})"
@@ -1527,6 +1616,8 @@ def main() -> None:
         counts=stats["counts"],
         out_path=os.path.join(out_dir, "centroid_distance_heatmap.png"),
         top_k=int(args.top_intents),
+        vmin=heatmap_vmin,
+        vmax=heatmap_vmax,
     )
 
     print(f"Saved analysis dir: {out_dir}")
