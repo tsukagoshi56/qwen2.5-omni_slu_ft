@@ -228,6 +228,19 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 - For **SF‑CoT**, the input file already contains both audio and text patterns.
 - Training log is saved by default to `<output_dir>/train.log` (override with `--log_file`).
 
+Qwen2.5-Omni を使う場合の例:
+
+```bash
+python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
+  --model_name_or_path Qwen/Qwen2.5-Omni-7B \
+  --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
+  --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
+  --test_file  slurp/dataset/slurp/test.jsonl \
+  --audio_dir  slurp/slurp_real \
+  --output_file outputs/qwen25_omni_rationale_ft/prediction.jsonl \
+  --add_text_only
+```
+
 ### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
 
 This variant trains two tasks together:

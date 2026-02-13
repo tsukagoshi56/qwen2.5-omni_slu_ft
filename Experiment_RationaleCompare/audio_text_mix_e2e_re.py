@@ -228,9 +228,10 @@ def load_audio_model_from_pretrained(
     family = _infer_model_family(model_name_or_path)
     model_name_lc = str(model_name_or_path or "").lower()
 
-    # Qwen path: mirror the stable script behavior and avoid AutoModel fallbacks.
+    # Qwen path: prioritize dedicated loaders, then fallback to AutoModel loaders.
     if family == "qwen":
-        qwen_errors: List[str] = []
+        qwen_attempts: List[Tuple[str, Any]] = []
+        seen_loader_ids = set()
         if "qwen2.5-omni" in model_name_lc:
             qwen_omni_cls = _optional_transformers_class(
                 "Qwen2_5OmniForConditionalGeneration",
@@ -238,31 +239,35 @@ def load_audio_model_from_pretrained(
                 "Qwen2OmniForConditionalGeneration",
                 "Qwen2OmniForCausalLM",
             )
-            if qwen_omni_cls is not None:
-                try:
-                    return qwen_omni_cls.from_pretrained(
-                        model_name_or_path,
-                        torch_dtype=torch_dtype,
-                        trust_remote_code=trust_remote_code,
-                    )
-                except Exception as exc:
-                    qwen_errors.append(f"{qwen_omni_cls.__name__}: {exc}")
+            _append_attempt(
+                qwen_attempts,
+                getattr(qwen_omni_cls, "__name__", "Qwen2_5Omni*"),
+                qwen_omni_cls,
+                seen_loader_ids,
+            )
+        _append_attempt(
+            qwen_attempts,
+            "Qwen2AudioForConditionalGeneration",
+            Qwen2AudioForConditionalGeneration,
+            seen_loader_ids,
+        )
+        _append_attempt(qwen_attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(qwen_attempts, "AutoModel", AutoModel, seen_loader_ids)
 
-        if Qwen2AudioForConditionalGeneration is not None:
+        qwen_errors: List[str] = []
+        for loader_name, loader_cls in qwen_attempts:
             try:
-                return Qwen2AudioForConditionalGeneration.from_pretrained(
+                return loader_cls.from_pretrained(
                     model_name_or_path,
                     torch_dtype=torch_dtype,
                     trust_remote_code=trust_remote_code,
                 )
             except Exception as exc:
-                qwen_errors.append(f"Qwen2AudioForConditionalGeneration: {exc}")
-        else:
-            qwen_errors.append("Qwen2AudioForConditionalGeneration is unavailable in current transformers.")
+                qwen_errors.append(f"{loader_name}: {exc}")
 
         detail = " | ".join(qwen_errors) if qwen_errors else "no qwen loader available"
         raise RuntimeError(
-            f"Failed to load Qwen model '{model_name_or_path}' with Qwen loaders only. Details: {detail}"
+            f"Failed to load Qwen model '{model_name_or_path}'. Details: {detail}"
         )
 
     attempts: List[Tuple[str, Any]] = []
@@ -569,6 +574,64 @@ def _audio_chat_content_variants(prompt_text: str, audio_ref: str) -> List[List[
         [{"type": "audio", "url": ref}, {"type": "text", "text": prompt_text}],
         [{"type": "audio", "audio_url": "placeholder"}, {"type": "text", "text": prompt_text}],
     ]
+
+
+def _dedupe_preserve_order(values: List[Any]) -> List[Any]:
+    seen = set()
+    out = []
+    for value in values:
+        key = repr(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _call_processor_with_audio_or_raise(
+    processor: Any,
+    *,
+    text: str,
+    audio: Any,
+    sampling_rate: int,
+    padding: bool = False,
+) -> Dict[str, Any]:
+    cached = getattr(processor, "_audio_processor_mode", None)
+    modes = _dedupe_preserve_order(
+        [
+            cached,
+            ("audio", True, True),
+            ("audios", True, True),
+            ("audio", False, True),
+            ("audios", False, True),
+            ("audio", True, False),
+            ("audios", True, False),
+            ("input_audio", True, True),
+            ("input_audios", True, True),
+        ]
+    )
+
+    errors: List[str] = []
+    for mode in modes:
+        if not mode:
+            continue
+        key, wrap_list, use_sr = mode
+        for include_padding in (True, False):
+            kwargs: Dict[str, Any] = {"text": text, "return_tensors": "pt"}
+            if include_padding:
+                kwargs["padding"] = padding
+            kwargs[key] = [audio] if wrap_list else audio
+            if use_sr:
+                kwargs["sampling_rate"] = sampling_rate
+            try:
+                out = processor(**kwargs)
+                setattr(processor, "_audio_processor_mode", mode)
+                return out
+            except Exception as exc:
+                errors.append(f"{mode}/{include_padding}: {exc}")
+                continue
+    detail = " | ".join(errors) if errors else "no audio processor signature accepted"
+    raise RuntimeError(f"Failed to encode audio/text inputs. Details: {detail}")
 
 
 def _infer_audio_input_mode(
@@ -2060,18 +2123,23 @@ class SmartCollator:
                 print(f"[DEBUG Visualizer] Target:\n{item['target']}")
                 self._print_count += 1
 
-            inputs = self.processor(
-                text=full_text,
-                audio=[audio],
-                sampling_rate=sr,
-                return_tensors="pt",
-            )
-            prompt_inputs = self.processor(
-                text=text_input,
-                audio=[audio],
-                sampling_rate=sr,
-                return_tensors="pt",
-            )
+            try:
+                inputs = _call_processor_with_audio_or_raise(
+                    self.processor,
+                    text=full_text,
+                    audio=audio,
+                    sampling_rate=sr,
+                    padding=False,
+                )
+                prompt_inputs = _call_processor_with_audio_or_raise(
+                    self.processor,
+                    text=text_input,
+                    audio=audio,
+                    sampling_rate=sr,
+                    padding=False,
+                )
+            except Exception:
+                continue
             prompt_len = prompt_inputs["input_ids"].shape[1]
 
             ids = inputs["input_ids"][0]
@@ -2330,12 +2398,22 @@ class SampleGenerationCallback(TrainerCallback):
                     add_generation_prompt=True,
                 )
 
-                inputs = self.processor(
-                    text=text_input,
-                    audio=[audio],
-                    sampling_rate=sr,
-                    return_tensors="pt",
-                )
+                try:
+                    inputs = _call_processor_with_audio_or_raise(
+                        self.processor,
+                        text=text_input,
+                        audio=audio,
+                        sampling_rate=sr,
+                        padding=False,
+                    )
+                except Exception:
+                    # Fallback for processors that only accept the classic signature.
+                    inputs = self.processor(
+                        text=text_input,
+                        audio=[audio],
+                        sampling_rate=sr,
+                        return_tensors="pt",
+                    )
                 inputs = {k: v.to(device) for k, v in inputs.items() if torch.is_tensor(v)}
                 if "input_ids" not in inputs:
                     tok = get_tokenizer_or_raise(self.processor)(text_input, return_tensors="pt")
@@ -2633,11 +2711,12 @@ class InferenceCollator:
                             [{"role": "user", "content": user_content}],
                             add_generation_prompt=True,
                         )
-                        net_inputs = self.processor(
+                        net_inputs = _call_processor_with_audio_or_raise(
+                            self.processor,
                             text=text_input,
-                            audio=[audio],
+                            audio=audio,
                             sampling_rate=sr,
-                            return_tensors="pt",
+                            padding=False,
                         )
                         if "input_ids" not in net_inputs:
                             tok = tokenizer(text_input, return_tensors="pt")
@@ -2670,11 +2749,12 @@ class InferenceCollator:
                                 [{"role": "user", "content": user_content}],
                                 add_generation_prompt=True,
                             )
-                            net_inputs = self.processor(
+                            net_inputs = _call_processor_with_audio_or_raise(
+                                self.processor,
                                 text=text_input,
-                                audio=[audio],
+                                audio=audio,
                                 sampling_rate=sr,
-                                return_tensors="pt",
+                                padding=False,
                             )
                             if "input_ids" not in net_inputs:
                                 tok = tokenizer(text_input, return_tensors="pt")
