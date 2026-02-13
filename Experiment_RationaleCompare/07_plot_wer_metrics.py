@@ -14,6 +14,7 @@ Output:
 """
 
 import argparse
+import csv
 import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,7 +23,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-import numpy as np
 
 # --- Import from 06 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -110,21 +110,47 @@ def setup_rcparams():
 
 
 # ============================================================================
-# WER bins (10% increments)
+# WER bins
 # ============================================================================
 
-def build_wer_bins_10() -> List[Tuple[float, float, str]]:
-    """0-10, 10-20, ..., 90-100 の WER ビンを作成。"""
-    bins = []
-    for lo in range(0, 100, 10):
-        hi = lo + 10
-        bins.append((lo / 100.0, hi / 100.0, f"{lo}-{hi}"))
+WerBin = Tuple[float, float, str, bool]  # lo, hi, label, include_hi
+
+
+def build_wer_bins(
+    bin_width_pct: int = 10,
+    max_wer: float = 1.0,
+    include_overflow: bool = False,
+) -> List[WerBin]:
+    """WER ビンを作成する。デフォルトは 0-10, ... ,90-100。"""
+    if bin_width_pct <= 0:
+        raise ValueError("--bin-width must be > 0")
+    if max_wer <= 0:
+        raise ValueError("--max-wer must be > 0")
+
+    max_pct = int(round(max_wer * 100.0))
+    if max_pct <= 0:
+        raise ValueError("--max-wer is too small")
+
+    bins: List[WerBin] = []
+    lo_pct = 0
+    while lo_pct < max_pct:
+        hi_pct = min(lo_pct + bin_width_pct, max_pct)
+        # Last finite bin includes hi (e.g., 90-100 includes 100%)
+        include_hi = hi_pct >= max_pct
+        bins.append((lo_pct / 100.0, hi_pct / 100.0, f"{lo_pct}-{hi_pct}", include_hi))
+        lo_pct = hi_pct
+
+    if include_overflow:
+        bins.append((max_wer, float("inf"), f">{max_pct}", False))
+
     return bins
 
 
-def _in_wer_bin_10(w: float, lo: float, hi: float) -> bool:
-    """[lo, hi) で判定。最後のビン [0.9, 1.0] は hi=1.0 を含む。"""
-    if hi >= 1.0:
+def _in_wer_bin(w: float, lo: float, hi: float, include_hi: bool) -> bool:
+    """WER ビン包含判定。overflow ビンは hi=inf で表現。"""
+    if hi == float("inf"):
+        return w > lo
+    if include_hi:
         return lo <= w <= hi
     return lo <= w < hi
 
@@ -134,7 +160,10 @@ def _in_wer_bin_10(w: float, lo: float, hi: float) -> bool:
 # ============================================================================
 
 def compute_bin_metrics(
-    model: ModelResult, lo: float, hi: float,
+    model: ModelResult,
+    lo: float,
+    hi: float,
+    include_hi: bool,
 ) -> Dict[str, Any]:
     """指定 WER 範囲のサンプルで Scenario/Action/Intent Acc, SLU-F1 を算出。"""
     scen_m = FMeasureAccumulator()
@@ -145,7 +174,7 @@ def compute_bin_metrics(
     for i, w in enumerate(model.wer_list):
         if w is None:
             continue
-        if not _in_wer_bin_10(w, lo, hi):
+        if not _in_wer_bin(w, lo, hi, include_hi):
             continue
         gi, pi = model.intent_pairs[i]
         gs, ga = gi.split("_", 1)
@@ -176,25 +205,76 @@ METRIC_LABELS = ["Scenario Accuracy", "Action Accuracy", "Intent Accuracy", "SLU
 MIN_SAMPLES = 5  # ビン内サンプル数がこれ未満なら非表示
 
 
+def _bin_center_percent(lo: float, hi: float, bin_width_pct: int) -> float:
+    if hi == float("inf"):
+        return lo * 100.0 + (bin_width_pct / 2.0)
+    return (lo + hi) / 2.0 * 100.0
+
+
+def export_bin_metrics_csv(
+    models: List[ModelResult],
+    wer_bins: List[WerBin],
+    model_data: List[List[Dict[str, Any]]],
+    csv_path: str,
+) -> None:
+    """モデル×WERビンの集計を CSV で保存する。"""
+    out_dir = os.path.dirname(csv_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    fieldnames = [
+        "model",
+        "bin_label",
+        "bin_lo",
+        "bin_hi",
+        "n",
+        "scenario_acc",
+        "action_acc",
+        "intent_acc",
+        "slu_f1",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for m_idx, m in enumerate(models):
+            for b_idx, (lo, hi, label, _) in enumerate(wer_bins):
+                metrics = model_data[m_idx][b_idx]["metrics"]
+                hi_str = "inf" if hi == float("inf") else f"{hi:.4f}"
+                row = {
+                    "model": m.name,
+                    "bin_label": label,
+                    "bin_lo": f"{lo:.4f}",
+                    "bin_hi": hi_str,
+                    "n": metrics["n"],
+                    "scenario_acc": "" if metrics["scenario_acc"] is None else f"{metrics['scenario_acc']:.6f}",
+                    "action_acc": "" if metrics["action_acc"] is None else f"{metrics['action_acc']:.6f}",
+                    "intent_acc": "" if metrics["intent_acc"] is None else f"{metrics['intent_acc']:.6f}",
+                    "slu_f1": "" if metrics["slu_f1"] is None else f"{metrics['slu_f1']:.6f}",
+                }
+                writer.writerow(row)
+    print(f"Saved: {csv_path}")
+
+
 def plot_wer_metrics(
     models: List[ModelResult],
     output_path: str,
+    wer_bins: List[WerBin],
+    bin_width_pct: int = 10,
     min_samples: int = MIN_SAMPLES,
+    csv_path: Optional[str] = None,
 ):
     """2x2 subplot の折れ線グラフを作成。"""
     setup_rcparams()
 
-    wer_bins = build_wer_bins_10()
-
     # --- Compute all data ---
-    # model_data[model_idx] = list of (bin_center, metrics_dict) per bin
-    model_data = []
+    # model_data[model_idx] = list of {"center","label","metrics"} per bin
+    model_data: List[List[Dict[str, Any]]] = []
     for m in models:
-        bins_metrics = []
-        for lo, hi, label in wer_bins:
-            d = compute_bin_metrics(m, lo, hi)
-            center = (lo + hi) / 2.0 * 100  # percent
-            bins_metrics.append((center, d))
+        bins_metrics: List[Dict[str, Any]] = []
+        for lo, hi, label, include_hi in wer_bins:
+            d = compute_bin_metrics(m, lo, hi, include_hi)
+            center = _bin_center_percent(lo, hi, bin_width_pct)
+            bins_metrics.append({"center": center, "label": label, "metrics": d})
         model_data.append(bins_metrics)
 
     # --- Create figure ---
@@ -208,7 +288,9 @@ def plot_wer_metrics(
 
         for m_idx, m in enumerate(models):
             xs, ys = [], []
-            for center, d in model_data[m_idx]:
+            for point in model_data[m_idx]:
+                center = point["center"]
+                d = point["metrics"]
                 if d["n"] < min_samples:
                     continue
                 val = d[metric_key]
@@ -234,8 +316,12 @@ def plot_wer_metrics(
         ax.yaxis.set_minor_locator(mticker.MultipleLocator(10))
 
         # x-axis
-        ax.set_xlim(-2, 102)
-        ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+        max_center = max(
+            point["center"] for per_model in model_data for point in per_model
+        )
+        x_max = max_center + (bin_width_pct / 2.0) + 2.0
+        ax.set_xlim(-2, x_max)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(bin_width_pct))
 
         # Only bottom row gets x-labels
         if ax_idx >= 2:
@@ -251,25 +337,34 @@ def plot_wer_metrics(
 
     # Shared legend at top
     handles, labels = axes_flat[0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels,
-        loc="upper center",
-        ncol=min(len(models), 4),
-        frameon=True,
-        bbox_to_anchor=(0.5, 1.02),
-        fontsize=9,
-    )
+    if handles:
+        fig.legend(
+            handles, labels,
+            loc="upper center",
+            ncol=min(len(models), 4),
+            frameon=True,
+            bbox_to_anchor=(0.5, 1.02),
+            fontsize=9,
+        )
 
     fig.align_ylabels(axes)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     # --- Add sample count annotation below bottom-left subplot ---
-    valid_bins = [(c, d) for c, d in model_data[0] if d["n"] >= min_samples]
+    valid_bins = []
+    for b_idx in range(len(wer_bins)):
+        counts = [model_data[m_idx][b_idx]["metrics"]["n"] for m_idx in range(len(models))]
+        n_max = max(counts)
+        if n_max < min_samples:
+            continue
+        label = f"n={counts[0]}" if len(set(counts)) == 1 else f"nmax={n_max}"
+        center = model_data[0][b_idx]["center"]
+        valid_bins.append((center, label))
     if valid_bins:
         ax_bottom = axes_flat[2]
-        for center, d in valid_bins:
+        for center, n_label in valid_bins:
             ax_bottom.annotate(
-                f"n={d['n']}", xy=(center, 0), xytext=(0, -28),
+                n_label, xy=(center, 0), xytext=(0, -28),
                 textcoords="offset points", ha="center", va="top",
                 fontsize=6.5, color="0.45",
             )
@@ -288,6 +383,9 @@ def plot_wer_metrics(
     fig.savefig(other_path, bbox_inches="tight")
     print(f"Saved: {other_path}")
     plt.close(fig)
+
+    if csv_path:
+        export_bin_metrics_csv(models, wer_bins, model_data, csv_path)
 
 
 # ============================================================================
@@ -310,7 +408,29 @@ def main():
                         help="出力先 (default: figure/wer_metrics.pdf)")
     parser.add_argument("--min-samples", type=int, default=MIN_SAMPLES,
                         help=f"ビン内最小サンプル数 (default: {MIN_SAMPLES})")
+    parser.add_argument("--bin-width", type=int, default=10,
+                        help="WER ビン幅 (%%, default: 10)")
+    parser.add_argument("--max-wer", type=float, default=1.0,
+                        help="有限ビンの最大 WER (default: 1.0)")
+    parser.add_argument("--include-overflow", action="store_true",
+                        help="max-wer より大きい WER 用の overflow ビンを追加")
+    parser.add_argument("--csv", type=str, default=None,
+                        help="ビン集計を CSV 保存")
     args = parser.parse_args()
+
+    if args.min_samples <= 0:
+        print("ERROR: --min-samples must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        wer_bins = build_wer_bins(
+            bin_width_pct=args.bin_width,
+            max_wer=args.max_wer,
+            include_overflow=args.include_overflow,
+        )
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # --- Resolve paths ---
     pred_paths = [resolve_prediction_path(p) for p in args.predictions]
@@ -374,7 +494,14 @@ def main():
         script_dir = os.path.dirname(os.path.abspath(__file__))
         out = os.path.join(script_dir, "figure", "wer_metrics.pdf")
 
-    plot_wer_metrics(models, out, min_samples=args.min_samples)
+    plot_wer_metrics(
+        models,
+        out,
+        wer_bins=wer_bins,
+        bin_width_pct=args.bin_width,
+        min_samples=args.min_samples,
+        csv_path=args.csv,
+    )
 
 
 if __name__ == "__main__":
