@@ -706,13 +706,12 @@ def plot_embedding_scatter(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.25, linewidth=0.5)
-    ncol = 1 if len(unique) <= 20 else 2 if len(unique) <= 40 else 3
     ax.legend(
         loc="center left",
         bbox_to_anchor=(1.02, 0.5),
         fontsize=7,
         frameon=True,
-        ncol=ncol,
+        ncol=1,
         title="intent",
     )
     fig.tight_layout()
@@ -916,7 +915,7 @@ def plot_distance_gradient_heatmap(
     _ensure_dir(os.path.dirname(out_path) or ".")
     sub = np.asarray(distance_matrix, dtype=np.float32)
     fig, ax = plt.subplots(figsize=(max(6, len(ordered_intents) * 0.45), max(5, len(ordered_intents) * 0.38)))
-    im = ax.imshow(sub, cmap="YlOrRd", interpolation="nearest")
+    im = ax.imshow(sub, cmap="viridis", interpolation="nearest")
     ax.set_xticks(np.arange(len(ordered_intents)))
     ax.set_yticks(np.arange(len(ordered_intents)))
     ax.set_xticklabels(ordered_intents, rotation=60, ha="right", fontsize=7)
@@ -1107,6 +1106,7 @@ def save_feature_artifacts(
     rows: List[Dict[str, Any]],
     projections: Dict[str, np.ndarray],
     pca_explained_ratio: Tuple[float, float],
+    projection_indices: Optional[np.ndarray] = None,
 ) -> None:
     _ensure_dir(out_dir)
     intents = np.asarray([r.get("intent", "__unknown__") for r in rows], dtype=object)
@@ -1130,6 +1130,8 @@ def save_feature_artifacts(
     umap_proj = projections.get("umap")
     if umap_proj is not None:
         payload["projection_umap_2d"] = np.asarray(umap_proj, dtype=np.float32)
+    if projection_indices is not None:
+        payload["projection_indices"] = np.asarray(projection_indices, dtype=np.int64)
 
     np.savez_compressed(os.path.join(out_dir, "features.npz"), **payload)
     _write_jsonl(os.path.join(out_dir, "metadata.jsonl"), rows)
@@ -1242,7 +1244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-unknown-intent", action="store_true",
                         help="__unknown__ Intentも解析対象に含める")
     parser.add_argument("--distance-rank-step", type=int, default=3,
-                        help="平均distance順位を何件おきに抽出するか (3なら rank=1,3,6,9,...,last)")
+                        help="平均distance順位を何件おきに抽出するか (3なら rank=1,3,6,9,...,last)。2以上で可視化も抽出Intentのみで実行")
     parser.add_argument("--annotate-labels", action="store_true",
                         help="散布図上にIntentラベル文字を重ねて表示する（凡例は常時表示）")
     parser.add_argument("--print-audio-search-paths", action="store_true")
@@ -1308,60 +1310,6 @@ def main() -> None:
 
     intents = [r.get("intent", "__unknown__") for r in rows]
     counts = Counter(intents)
-    requested_embeddings = _parse_csv_set(args.embeddings)
-    if not requested_embeddings:
-        requested_embeddings = ["pca"]
-    valid_embedding_names = {"pca", "tsne", "umap"}
-    unknown_embeddings = [x for x in requested_embeddings if x not in valid_embedding_names]
-    if unknown_embeddings:
-        print(f"WARNING: Unknown embeddings ignored: {unknown_embeddings}", file=sys.stderr)
-    requested_embeddings = [x for x in requested_embeddings if x in valid_embedding_names]
-    if not requested_embeddings:
-        requested_embeddings = ["pca"]
-
-    projections: Dict[str, np.ndarray] = {}
-    embedding_notes: Dict[str, str] = {}
-    explained_ratio = (0.0, 0.0)
-
-    if "pca" in requested_embeddings:
-        print("Computing PCA-2D...")
-        pca_projection, explained_ratio = pca_project_2d(features)
-        projections["pca"] = pca_projection
-        embedding_notes["pca"] = "ok"
-
-    if "tsne" in requested_embeddings:
-        print("Computing t-SNE-2D...")
-        tsne_projection, tsne_err = tsne_project_2d(
-            x=features,
-            perplexity=args.tsne_perplexity,
-            learning_rate=args.tsne_learning_rate,
-            n_iter=args.tsne_n_iter,
-            init=args.tsne_init,
-            random_state=args.random_state,
-        )
-        if tsne_projection is not None:
-            projections["tsne"] = tsne_projection
-            embedding_notes["tsne"] = "ok"
-        else:
-            embedding_notes["tsne"] = f"skipped: {tsne_err}"
-            print(f"WARNING: t-SNE skipped: {tsne_err}", file=sys.stderr)
-
-    if "umap" in requested_embeddings:
-        print("Computing UMAP-2D...")
-        umap_projection, umap_err = umap_project_2d(
-            x=features,
-            n_neighbors=args.umap_n_neighbors,
-            min_dist=args.umap_min_dist,
-            metric=args.umap_metric,
-            random_state=args.random_state,
-        )
-        if umap_projection is not None:
-            projections["umap"] = umap_projection
-            embedding_notes["umap"] = "ok"
-        else:
-            embedding_notes["umap"] = f"skipped: {umap_err}"
-            print(f"WARNING: UMAP skipped: {umap_err}", file=sys.stderr)
-
     stats = compute_intent_distance_stats(
         features=features,
         intents=intents,
@@ -1384,12 +1332,89 @@ def main() -> None:
         ordered_intents=sampled_intents,
     )
 
+    use_rank_filtered_viz = int(args.distance_rank_step) > 1 and len(sampled_order) > 0
+    sampled_set = set(sampled_order)
+    if use_rank_filtered_viz:
+        viz_indices = np.asarray(
+            [i for i, intent in enumerate(intents) if intent in sampled_set],
+            dtype=np.int64,
+        )
+    else:
+        viz_indices = np.arange(len(intents), dtype=np.int64)
+    if viz_indices.size == 0:
+        viz_indices = np.arange(len(intents), dtype=np.int64)
+        use_rank_filtered_viz = False
+
+    viz_features = features[viz_indices]
+    viz_intents = [intents[int(i)] for i in viz_indices.tolist()]
+    viz_counts = Counter(viz_intents)
+    viz_top_k = 0 if use_rank_filtered_viz else int(args.top_intents)
+    if use_rank_filtered_viz:
+        print(
+            f"Visualization labels filtered by rank-step: intents={len(sampled_set)} samples={len(viz_intents)}"
+        )
+
+    requested_embeddings = _parse_csv_set(args.embeddings)
+    if not requested_embeddings:
+        requested_embeddings = ["pca"]
+    valid_embedding_names = {"pca", "tsne", "umap"}
+    unknown_embeddings = [x for x in requested_embeddings if x not in valid_embedding_names]
+    if unknown_embeddings:
+        print(f"WARNING: Unknown embeddings ignored: {unknown_embeddings}", file=sys.stderr)
+    requested_embeddings = [x for x in requested_embeddings if x in valid_embedding_names]
+    if not requested_embeddings:
+        requested_embeddings = ["pca"]
+
+    projections: Dict[str, np.ndarray] = {}
+    embedding_notes: Dict[str, str] = {}
+    explained_ratio = (0.0, 0.0)
+
+    if "pca" in requested_embeddings:
+        print("Computing PCA-2D...")
+        pca_projection, explained_ratio = pca_project_2d(viz_features)
+        projections["pca"] = pca_projection
+        embedding_notes["pca"] = "ok"
+
+    if "tsne" in requested_embeddings:
+        print("Computing t-SNE-2D...")
+        tsne_projection, tsne_err = tsne_project_2d(
+            x=viz_features,
+            perplexity=args.tsne_perplexity,
+            learning_rate=args.tsne_learning_rate,
+            n_iter=args.tsne_n_iter,
+            init=args.tsne_init,
+            random_state=args.random_state,
+        )
+        if tsne_projection is not None:
+            projections["tsne"] = tsne_projection
+            embedding_notes["tsne"] = "ok"
+        else:
+            embedding_notes["tsne"] = f"skipped: {tsne_err}"
+            print(f"WARNING: t-SNE skipped: {tsne_err}", file=sys.stderr)
+
+    if "umap" in requested_embeddings:
+        print("Computing UMAP-2D...")
+        umap_projection, umap_err = umap_project_2d(
+            x=viz_features,
+            n_neighbors=args.umap_n_neighbors,
+            min_dist=args.umap_min_dist,
+            metric=args.umap_metric,
+            random_state=args.random_state,
+        )
+        if umap_projection is not None:
+            projections["umap"] = umap_projection
+            embedding_notes["umap"] = "ok"
+        else:
+            embedding_notes["umap"] = f"skipped: {umap_err}"
+            print(f"WARNING: UMAP skipped: {umap_err}", file=sys.stderr)
+
     save_feature_artifacts(
         out_dir=out_dir,
         features=features,
         rows=rows,
         projections=projections,
         pca_explained_ratio=explained_ratio,
+        projection_indices=viz_indices,
     )
 
     config = {
@@ -1413,6 +1438,10 @@ def main() -> None:
         "feature_dim": int(features.shape[1]),
         "num_unique_intents": len(counts),
         "num_intents_sampled_by_rank_step": len(sampled_order),
+        "visualization_filtered_by_rank_step": bool(use_rank_filtered_viz),
+        "num_visualization_samples": int(viz_features.shape[0]),
+        "num_visualization_intents": len(viz_counts),
+        "visualization_top_intents": int(viz_top_k),
         "embeddings_requested": requested_embeddings,
         "embeddings_computed": sorted(list(projections.keys())),
         "embedding_notes": embedding_notes,
@@ -1458,38 +1487,38 @@ def main() -> None:
     if "pca" in projections:
         plot_pca_scatter(
             projection=projections["pca"],
-            intents=intents,
-            counts=counts,
+            intents=viz_intents,
+            counts=viz_counts,
             out_path=os.path.join(out_dir, "pca_scatter_by_intent.png"),
             title=title,
             explained_ratio=explained_ratio,
-            top_k=int(args.top_intents),
+            top_k=viz_top_k,
             show_label_text=bool(args.annotate_labels),
         )
     if "tsne" in projections:
         plot_embedding_scatter(
             projection=projections["tsne"],
-            intents=intents,
-            counts=counts,
+            intents=viz_intents,
+            counts=viz_counts,
             out_path=os.path.join(out_dir, "tsne_scatter_by_intent.png"),
             title=title,
             x_label="t-SNE-1",
             y_label="t-SNE-2",
             subtitle="t-SNE-2D",
-            top_k=int(args.top_intents),
+            top_k=viz_top_k,
             show_label_text=bool(args.annotate_labels),
         )
     if "umap" in projections:
         plot_embedding_scatter(
             projection=projections["umap"],
-            intents=intents,
-            counts=counts,
+            intents=viz_intents,
+            counts=viz_counts,
             out_path=os.path.join(out_dir, "umap_scatter_by_intent.png"),
             title=title,
             x_label="UMAP-1",
             y_label="UMAP-2",
             subtitle="UMAP-2D",
-            top_k=int(args.top_intents),
+            top_k=viz_top_k,
             show_label_text=bool(args.annotate_labels),
         )
     plot_centroid_heatmap(
