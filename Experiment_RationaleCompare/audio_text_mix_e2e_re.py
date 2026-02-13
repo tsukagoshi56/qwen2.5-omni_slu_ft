@@ -3997,6 +3997,12 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=4e-5)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument(
+        "--logging_steps",
+        type=int,
+        default=1,
+        help="Trainer logging interval in optimizer steps.",
+    )
+    parser.add_argument(
         "--eval_max_samples",
         type=int,
         default=None,
@@ -4328,7 +4334,8 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "learning_rate": args.learning_rate,
         "bf16": True,
-        "logging_steps": 1 if args.smoke else 10,
+        "logging_steps": max(1, int(args.logging_steps)),
+        "logging_first_step": True,
         "eval_strategy": "steps" if len(eval_items) > 0 else "no",
         "eval_steps": 2 if args.smoke else 50,
         "save_strategy": "no",
@@ -4377,7 +4384,18 @@ def main():
         )
     trainer = CustomTrainer(**trainer_kwargs)
 
+    if rank == 0:
+        logger.info(
+            "Starting trainer.train() | epochs=%s batch_size=%s grad_acc=%s logging_steps=%s",
+            args.num_train_epochs,
+            args.batch_size,
+            args.gradient_accumulation_steps,
+            max(1, int(args.logging_steps)),
+        )
+    train_start = time.perf_counter()
     trainer.train()
+    if rank == 0:
+        logger.info("trainer.train() finished: elapsed=%.1fs", time.perf_counter() - train_start)
 
     if rank == 0:
         os.makedirs(args.output_dir, exist_ok=True)
