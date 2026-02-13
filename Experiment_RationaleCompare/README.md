@@ -85,6 +85,43 @@ model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
 
 ---
 
+### Audio Flamingo 2 (`cannot load feature extractor`) 対応
+
+`nvidia/audio-flamingo-2*` は通常の `AutoProcessor.from_pretrained(...)` では失敗しやすいため、  
+`audio_text_mix_e2e_re.py` に **専用ロード経路**を追加しています。
+
+対応モデル:
+- `nvidia/audio-flamingo-2`
+- `nvidia/audio-flamingo-2-0.5B`
+- `nvidia/audio-flamingo-2-1.5B`
+
+このモデル群を `--model_name_or_path` に指定すると、自動で以下を行います:
+- HF Space (`nvidia/audio-flamingo-2`) から推論コード/設定を取得
+- モデルrepo側の `safe_ckpt` / `clap_ckpt` を取得
+- 専用の前処理 (`lang_x`, `audio_x`, `audio_x_mask`) で学習・推論を実行
+
+最小実行例:
+
+```bash
+python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
+  --model_name_or_path nvidia/audio-flamingo-2-0.5B \
+  --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
+  --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
+  --test_file  slurp/dataset/slurp/test.jsonl \
+  --audio_dir  slurp/slurp_real \
+  --output_dir outputs/audio_flamingo2_05b \
+  --output_file outputs/audio_flamingo2_05b/prediction.jsonl
+```
+
+主なAF2専用オプション:
+- `--audio_flamingo2_space_repo` (default: `nvidia/audio-flamingo-2`)
+- `--audio_flamingo2_cache_dir` (default: `~/.cache/huggingface/audio_flamingo2`)
+- `--audio_flamingo2_local_files_only` (ネットワークを使わずローカルのみ)
+- `--audio_flamingo2_lang_encoder_path` (LLMパス上書き)
+- `--audio_flamingo2_tokenizer_path` (Tokenizerパス上書き)
+
+---
+
 ## 1) Oracle CoT generation (Method 2)
 
 ```bash

@@ -12,6 +12,7 @@ Audio/text mixed SLU training and distributed inference.
 
 import argparse
 import glob
+import importlib
 import inspect
 import json
 import logging
@@ -19,6 +20,7 @@ import os
 import random
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -75,6 +77,12 @@ PROJECTOR_MODULE_NAME_HINTS = (
     "mm_projector",
 )
 _PROCESSOR_TOKENIZER_REGISTRY: Dict[int, Any] = {}
+AUDIO_FLAMINGO2_DEFAULT_SPACE_REPO = "nvidia/audio-flamingo-2"
+AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL = {
+    "nvidia/audio-flamingo-2": "Qwen/Qwen2.5-3B",
+    "nvidia/audio-flamingo-2-0.5b": "Qwen/Qwen2.5-0.5B",
+    "nvidia/audio-flamingo-2-1.5b": "Qwen/Qwen2.5-1.5B",
+}
 
 
 class ProcessorWithTokenizerProxy:
@@ -187,6 +195,8 @@ def load_audio_or_raise(audio_path: str, sr: int) -> Tuple[Any, int]:
 
 def _infer_model_family(model_name_or_path: str) -> str:
     name_lc = str(model_name_or_path or "").lower()
+    if "audio-flamingo-2" in name_lc:
+        return "audio-flamingo-2"
     if "music-flamingo" in name_lc:
         return "music-flamingo"
     if "audio-flamingo-3" in name_lc or "flamingo" in name_lc:
@@ -196,6 +206,416 @@ def _infer_model_family(model_name_or_path: str) -> str:
     if "qwen" in name_lc:
         return "qwen"
     return "other"
+
+
+class AudioFlamingo2ProcessorProxy:
+    def __init__(
+        self,
+        *,
+        tokenizer: Any,
+        clap_config: Dict[str, Any],
+        sampling_rate: int,
+        max_tokens: int,
+    ):
+        self.tokenizer = tokenizer
+        self.clap_config = dict(clap_config or {})
+        self.sampling_rate = int(sampling_rate)
+        self.max_tokens = int(max_tokens)
+        self.audio_flamingo2 = True
+
+    def decode(self, *args, **kwargs):
+        return self.tokenizer.decode(*args, **kwargs)
+
+    def batch_decode(self, *args, **kwargs):
+        return self.tokenizer.batch_decode(*args, **kwargs)
+
+    def save_pretrained(self, save_dir: str) -> None:
+        os.makedirs(save_dir, exist_ok=True)
+        if hasattr(self.tokenizer, "save_pretrained"):
+            self.tokenizer.save_pretrained(save_dir)
+
+
+def _normalize_repo_like_name(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _repo_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9._-]+", "_", _normalize_repo_like_name(value))
+
+
+def _resolve_audio_flamingo2_snapshot_or_local(
+    *,
+    repo_or_dir: str,
+    cache_root: str,
+    repo_type: Optional[str] = None,
+    local_files_only: bool = False,
+    allow_patterns: Optional[List[str]] = None,
+) -> str:
+    path = os.path.abspath(os.path.expanduser(str(repo_or_dir or "").strip()))
+    if path and os.path.isdir(path):
+        return path
+
+    repo_id = str(repo_or_dir or "").strip()
+    if not repo_id:
+        raise ValueError("Audio-Flamingo-2 loader received an empty repo_or_dir.")
+
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to auto-download Audio-Flamingo-2 assets. "
+            "Install with: pip install -U huggingface_hub"
+        ) from exc
+
+    local_dir = os.path.join(cache_root, _repo_slug(repo_id))
+    download_kwargs: Dict[str, Any] = {
+        "repo_id": repo_id,
+        "local_dir": local_dir,
+        "local_files_only": bool(local_files_only),
+    }
+    if repo_type:
+        download_kwargs["repo_type"] = repo_type
+    if allow_patterns:
+        download_kwargs["allow_patterns"] = allow_patterns
+    try:
+        snapshot_path = snapshot_download(**download_kwargs)
+    except TypeError:
+        # Backward compatibility for older huggingface_hub that may reject allow_patterns/local_dir args.
+        fallback_kwargs = {"repo_id": repo_id, "local_files_only": bool(local_files_only)}
+        if repo_type:
+            fallback_kwargs["repo_type"] = repo_type
+        snapshot_path = snapshot_download(**fallback_kwargs)
+    return os.path.abspath(snapshot_path)
+
+
+def _load_yaml_file_or_raise(yaml_path: str) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "PyYAML is required for Audio-Flamingo-2 configs. Install with: pip install -U pyyaml"
+        ) from exc
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML at '{yaml_path}' must be a mapping.")
+    return data
+
+
+def _audio_flamingo2_pick_safe_ckpt_dir_or_raise(model_dir: str) -> str:
+    candidates = [
+        os.path.join(model_dir, "safe_ckpt"),
+        model_dir,
+    ]
+    for c in candidates:
+        if os.path.isfile(os.path.join(c, "metadata.json")):
+            return c
+        if glob.glob(os.path.join(c, "*.safetensors")):
+            return c
+    raise FileNotFoundError(
+        "Audio-Flamingo-2 safe checkpoint directory was not found. "
+        f"Tried: {candidates}"
+    )
+
+
+def _audio_flamingo2_pick_clap_ckpt_or_raise(model_dir: str, checkpoint_name_hint: str) -> str:
+    candidates: List[str] = []
+    clap_dir = os.path.join(model_dir, "clap_ckpt")
+    if checkpoint_name_hint:
+        candidates.append(os.path.join(clap_dir, checkpoint_name_hint))
+        candidates.append(os.path.join(model_dir, checkpoint_name_hint))
+    candidates.extend(glob.glob(os.path.join(clap_dir, "*.pt")))
+    candidates.extend(glob.glob(os.path.join(model_dir, "*.pt")))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        "Audio-Flamingo-2 CLAP checkpoint (.pt) was not found under model directory."
+    )
+
+
+def _audio_flamingo2_pick_lm_path(
+    model_name_or_path: str,
+    *,
+    override_lm_path: str,
+    fallback_lm_path: str,
+) -> str:
+    if str(override_lm_path or "").strip():
+        return str(override_lm_path).strip()
+    key = _normalize_repo_like_name(model_name_or_path)
+    for repo_name, lm_path in AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL.items():
+        if _normalize_repo_like_name(repo_name) == key:
+            return lm_path
+    if "audio-flamingo-2-0.5" in key:
+        return AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL["nvidia/audio-flamingo-2-0.5b"]
+    if "audio-flamingo-2-1.5" in key:
+        return AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL["nvidia/audio-flamingo-2-1.5b"]
+    return str(fallback_lm_path or AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL["nvidia/audio-flamingo-2"]).strip()
+
+
+def _audio_flamingo2_load_state_dict_or_raise(safe_ckpt_dir: str) -> Dict[str, torch.Tensor]:
+    try:
+        from safetensors.torch import load_file
+    except Exception as exc:
+        raise RuntimeError(
+            "safetensors is required for Audio-Flamingo-2 checkpoints. "
+            "Install with: pip install -U safetensors"
+        ) from exc
+
+    metadata_path = os.path.join(safe_ckpt_dir, "metadata.json")
+    chunk_names: List[str] = []
+    if os.path.isfile(metadata_path):
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        if isinstance(metadata, dict):
+            chunk_names = [str(k) for k in metadata.keys()]
+        elif isinstance(metadata, list):
+            chunk_names = [str(x) for x in metadata]
+
+    if not chunk_names:
+        chunk_names = [os.path.basename(p) for p in glob.glob(os.path.join(safe_ckpt_dir, "*.safetensors"))]
+
+    if not chunk_names:
+        raise FileNotFoundError(
+            f"No safetensors chunks found in '{safe_ckpt_dir}'."
+        )
+
+    checkpoint: Dict[str, torch.Tensor] = {}
+    for chunk_name in chunk_names:
+        chunk_name = str(chunk_name).strip()
+        if not chunk_name:
+            continue
+        chunk_path = os.path.join(safe_ckpt_dir, chunk_name)
+        if not os.path.isfile(chunk_path) and not chunk_name.endswith(".safetensors"):
+            chunk_path = os.path.join(safe_ckpt_dir, f"{chunk_name}.safetensors")
+        if not os.path.isfile(chunk_path):
+            raise FileNotFoundError(f"Audio-Flamingo-2 checkpoint chunk not found: {chunk_path}")
+        checkpoint.update(load_file(chunk_path))
+    return checkpoint
+
+
+def load_audio_flamingo2_bundle_or_raise(
+    *,
+    model_name_or_path: str,
+    space_repo_or_dir: str,
+    cache_dir: str,
+    local_files_only: bool,
+    override_lm_path: str,
+    override_tokenizer_path: str,
+) -> Tuple[Any, Any, Any]:
+    cache_root = os.path.abspath(os.path.expanduser(str(cache_dir or "~/.cache/huggingface/audio_flamingo2")))
+    os.makedirs(cache_root, exist_ok=True)
+
+    space_dir = _resolve_audio_flamingo2_snapshot_or_local(
+        repo_or_dir=space_repo_or_dir,
+        cache_root=cache_root,
+        repo_type="space",
+        local_files_only=local_files_only,
+        allow_patterns=["configs/*", "src/*"],
+    )
+    model_dir = _resolve_audio_flamingo2_snapshot_or_local(
+        repo_or_dir=model_name_or_path,
+        cache_root=cache_root,
+        repo_type=None,
+        local_files_only=local_files_only,
+    )
+
+    infer_yaml = os.path.join(space_dir, "configs", "inference.yaml")
+    if not os.path.isfile(infer_yaml):
+        raise FileNotFoundError(f"Audio-Flamingo-2 inference config not found: {infer_yaml}")
+    cfg = _load_yaml_file_or_raise(infer_yaml)
+    model_config = dict(cfg.get("model_config") or {})
+    clap_config = dict(cfg.get("clap_config") or {})
+    train_config = dict(cfg.get("train_config") or {})
+
+    if not model_config:
+        raise ValueError("Audio-Flamingo-2 inference.yaml has empty model_config.")
+
+    lm_path = _audio_flamingo2_pick_lm_path(
+        model_name_or_path,
+        override_lm_path=override_lm_path,
+        fallback_lm_path=str(model_config.get("lang_encoder_path") or ""),
+    )
+    tokenizer_path = str(override_tokenizer_path or "").strip() or lm_path
+    model_config["lang_encoder_path"] = lm_path
+    model_config["tokenizer_path"] = tokenizer_path
+    model_config["cache_dir"] = cache_root
+
+    clap_checkpoint_hint = str(clap_config.get("checkpoint") or "").strip()
+    clap_checkpoint = _audio_flamingo2_pick_clap_ckpt_or_raise(model_dir, clap_checkpoint_hint)
+    clap_config["checkpoint"] = clap_checkpoint
+
+    inserted_path = False
+    if space_dir not in sys.path:
+        sys.path.insert(0, space_dir)
+        inserted_path = True
+    try:
+        factory_mod = importlib.import_module("src.factory")
+        create_model_and_transforms = getattr(factory_mod, "create_model_and_transforms", None)
+        if create_model_and_transforms is None:
+            raise AttributeError("src.factory.create_model_and_transforms is missing.")
+        created = create_model_and_transforms(
+            clap_config=clap_config,
+            use_local_files=bool(local_files_only),
+            **model_config,
+        )
+    finally:
+        if inserted_path:
+            try:
+                sys.path.remove(space_dir)
+            except ValueError:
+                pass
+
+    if not isinstance(created, (tuple, list)) or len(created) < 2:
+        raise RuntimeError("Audio-Flamingo-2 factory did not return (model, tokenizer).")
+    model = created[0]
+    tokenizer = _coerce_tokenizer_candidate(created[1]) or _coerce_tokenizer_candidate(created)
+    if tokenizer is None:
+        raise RuntimeError("Audio-Flamingo-2 tokenizer was not returned by factory.")
+
+    safe_ckpt_dir = _audio_flamingo2_pick_safe_ckpt_dir_or_raise(model_dir)
+    state_dict = _audio_flamingo2_load_state_dict_or_raise(safe_ckpt_dir)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        logger.warning("Audio-Flamingo-2 load_state_dict missing keys: %d", len(missing))
+    if unexpected:
+        logger.warning("Audio-Flamingo-2 load_state_dict unexpected keys: %d", len(unexpected))
+
+    sampling_rate = int(clap_config.get("sampling_rate") or 16000)
+    max_tokens = int(train_config.get("max_tokens") or model_config.get("max_tokens") or 4096)
+    processor = AudioFlamingo2ProcessorProxy(
+        tokenizer=tokenizer,
+        clap_config=clap_config,
+        sampling_rate=sampling_rate,
+        max_tokens=max_tokens,
+    )
+    return model, processor, tokenizer
+
+
+def _is_audio_flamingo2_processor(processor: Any) -> bool:
+    return bool(getattr(processor, "audio_flamingo2", False))
+
+
+def _audio_flamingo2_prompt_text(prompt_text: str) -> str:
+    text = str(prompt_text or "").strip()
+    if "<audio>" not in text.lower():
+        text = f"<audio>{text}"
+    return text
+
+
+def _audio_flamingo2_window_params(clap_config: Dict[str, Any]) -> Tuple[int, int, int, float]:
+    window_seconds = float(clap_config.get("window_length", 1.0) or 1.0)
+    overlap_seconds = float(clap_config.get("window_overlap", 0.2) or 0.2)
+    max_windows = int(clap_config.get("max_num_window", 16) or 16)
+    sampling_rate = int(clap_config.get("sampling_rate", 16000) or 16000)
+    return max_windows, sampling_rate, max(1, int(window_seconds * sampling_rate)), overlap_seconds
+
+
+def _audio_flamingo2_make_audio_windows_or_silence(
+    *,
+    audio_path: Optional[str],
+    clap_config: Dict[str, Any],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    max_windows, sampling_rate, window_length, overlap_seconds = _audio_flamingo2_window_params(clap_config)
+    overlap_length = int(max(0.0, overlap_seconds) * sampling_rate)
+    stride = max(1, window_length - overlap_length)
+    clip_duration = (window_length + (max_windows - 1) * stride) / float(sampling_rate)
+
+    if audio_path:
+        try:
+            audio, _ = load_audio_or_raise(audio_path, sr=sampling_rate)
+        except Exception:
+            audio = None
+    else:
+        audio = None
+
+    if audio is None:
+        audio = torch.zeros((window_length,), dtype=torch.float32).numpy()
+
+    audio_tensor = torch.tensor(audio, dtype=torch.float32)
+    if audio_tensor.dim() == 0:
+        audio_tensor = audio_tensor.unsqueeze(0)
+    if audio_tensor.dim() > 1:
+        audio_tensor = audio_tensor.reshape(-1)
+    max_samples = int(clip_duration * sampling_rate)
+    if audio_tensor.numel() > max_samples:
+        audio_tensor = audio_tensor[:max_samples]
+
+    num_windows = int(max(1, min(max_windows, (audio_tensor.numel() - window_length) // stride + 1)))
+    full_length = window_length + (num_windows - 1) * stride
+    if audio_tensor.numel() < full_length:
+        pad_len = full_length - audio_tensor.numel()
+        audio_tensor = torch.nn.functional.pad(audio_tensor, (0, pad_len), value=0.0)
+
+    windows: List[torch.Tensor] = []
+    for i in range(num_windows):
+        start = i * stride
+        end = start + window_length
+        windows.append(audio_tensor[start:end].unsqueeze(0))
+    audio_x = torch.cat(windows, dim=0)
+    audio_mask = torch.ones((num_windows,), dtype=torch.float32)
+    return audio_x, audio_mask
+
+
+def _audio_flamingo2_pad_audio_windows(
+    audio_windows_list: List[torch.Tensor],
+    audio_masks_list: List[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not audio_windows_list:
+        raise RuntimeError("Audio-Flamingo-2 collator received no audio windows to pad.")
+    max_windows = max(int(x.shape[0]) for x in audio_windows_list)
+    window_length = int(audio_windows_list[0].shape[1])
+
+    padded_audio: List[torch.Tensor] = []
+    padded_masks: List[torch.Tensor] = []
+    for audio_x, mask_x in zip(audio_windows_list, audio_masks_list):
+        cur_windows = int(audio_x.shape[0])
+        if cur_windows < max_windows:
+            pad_audio = torch.zeros((max_windows - cur_windows, window_length), dtype=audio_x.dtype)
+            audio_x = torch.cat([audio_x, pad_audio], dim=0)
+            pad_mask = torch.zeros((max_windows - cur_windows,), dtype=mask_x.dtype)
+            mask_x = torch.cat([mask_x, pad_mask], dim=0)
+        elif cur_windows > max_windows:
+            audio_x = audio_x[:max_windows]
+            mask_x = mask_x[:max_windows]
+        padded_audio.append(audio_x)
+        padded_masks.append(mask_x)
+
+    audio_batch = torch.stack(padded_audio, dim=0)
+    mask_batch = torch.stack(padded_masks, dim=0)
+    return audio_batch, mask_batch
+
+
+def _audio_flamingo2_labels_from_input_ids(
+    input_ids: torch.Tensor,
+    *,
+    tokenizer: Any,
+    ignore_index: int,
+) -> torch.Tensor:
+    labels = input_ids.clone()
+    labels[labels == tokenizer.pad_token_id] = ignore_index
+    media_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+    labels[labels == media_token_id] = ignore_index
+
+    sep_token_id = tokenizer.sep_token_id
+    eoc_token_id = tokenizer.convert_tokens_to_ids("<|endofchunk|>")
+    eos_token_id = tokenizer.eos_token_id
+    for i in range(labels.shape[0]):
+        should_mask = True
+        for j in range(labels.shape[1]):
+            token_id = labels[i, j].item()
+            if should_mask and token_id != eos_token_id:
+                labels[i, j] = ignore_index
+            if token_id == sep_token_id:
+                should_mask = False
+            elif token_id == eoc_token_id:
+                should_mask = True
+
+        tail = labels.shape[1] - 1
+        while tail >= 0 and labels[i, tail].item() not in [ignore_index, eos_token_id, tokenizer.pad_token_id, eoc_token_id]:
+            labels[i, tail] = ignore_index
+            tail -= 1
+    return labels
 
 
 def load_audio_model_from_pretrained(
@@ -601,7 +1021,7 @@ def _infer_audio_input_mode(
     family = _infer_model_family(" ".join(probes))
     # For Qwen/Flamingo families, keep audio waveform path explicit via processor(..., audio=[...]).
     # Tokenized chat-template can succeed without real audio features on some model versions.
-    if family in {"qwen", "flamingo", "music-flamingo", "voxtral"}:
+    if family in {"qwen", "flamingo", "music-flamingo", "voxtral", "audio-flamingo-2"}:
         return "processor_audio"
     return "tokenized_chat_template"
 
@@ -1990,6 +2410,147 @@ class DistributedHomogeneousBatchSampler(Sampler):
 
 
 @dataclass
+class AudioFlamingo2TrainCollator:
+    processor: Any
+    max_length: int = 4096
+    ignore_index: int = -100
+    debug: bool = False
+    _print_count: int = 0
+
+    def __post_init__(self):
+        self._print_count = 0
+
+    def _build_target_text(self, item: Dict[str, Any], is_audio_batch: bool) -> str:
+        prompt_text = build_prompt_text(item, include_transcript=not is_audio_batch)
+        prompt_text = _audio_flamingo2_prompt_text(prompt_text)
+        tokenizer = get_tokenizer_or_raise(self.processor)
+        sep = str(getattr(tokenizer, "sep_token", "") or "")
+        if not sep:
+            raise ValueError("Audio-Flamingo-2 tokenizer has no sep_token.")
+        eos = str(getattr(tokenizer, "eos_token", "") or "")
+        if not eos:
+            raise ValueError("Audio-Flamingo-2 tokenizer has no eos_token.")
+        return f"{prompt_text}{sep}{str(item.get('target', '')).strip()}<|endofchunk|>{eos}"
+
+    def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
+        if not batch:
+            raise RuntimeError("AudioFlamingo2TrainCollator received an empty batch.")
+        tokenizer = get_tokenizer_or_raise(self.processor)
+        clap_config = dict(getattr(self.processor, "clap_config", {}) or {})
+        if not clap_config:
+            raise ValueError("Audio-Flamingo-2 processor is missing clap_config.")
+
+        is_audio_batch = batch[0].get("audio_path") is not None
+        text_inputs: List[str] = []
+        audio_windows_list: List[torch.Tensor] = []
+        audio_masks_list: List[torch.Tensor] = []
+
+        for item in batch:
+            text_inputs.append(self._build_target_text(item, is_audio_batch=is_audio_batch))
+            audio_x, audio_mask = _audio_flamingo2_make_audio_windows_or_silence(
+                audio_path=item.get("audio_path"),
+                clap_config=clap_config,
+            )
+            audio_windows_list.append(audio_x)
+            audio_masks_list.append(audio_mask)
+
+            if self.debug and self._print_count < 3:
+                logger.info(
+                    "[AF2 DEBUG] sample=%s windows=%d text_len=%d",
+                    item.get("id"),
+                    int(audio_x.shape[0]),
+                    len(text_inputs[-1]),
+                )
+                self._print_count += 1
+
+        tokenized = tokenizer(
+            text_inputs,
+            padding=True,
+            truncation=True,
+            max_length=max(16, int(self.max_length)),
+            return_tensors="pt",
+        )
+        lang_x = tokenized["input_ids"]
+        attention_mask = tokenized.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(lang_x, dtype=torch.long)
+        labels = _audio_flamingo2_labels_from_input_ids(
+            lang_x,
+            tokenizer=tokenizer,
+            ignore_index=self.ignore_index,
+        )
+
+        audio_x, audio_x_mask = _audio_flamingo2_pad_audio_windows(audio_windows_list, audio_masks_list)
+        return {
+            "lang_x": lang_x,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "audio_x": audio_x,
+            "audio_x_mask": audio_x_mask,
+        }
+
+
+@dataclass
+class AudioFlamingo2InferenceCollator:
+    processor: Any
+    max_length: int = 4096
+
+    def __call__(self, batch: List[Dict]) -> Dict[str, Any]:
+        if not batch:
+            return {}
+        tokenizer = get_tokenizer_or_raise(self.processor)
+        clap_config = dict(getattr(self.processor, "clap_config", {}) or {})
+        if not clap_config:
+            raise ValueError("Audio-Flamingo-2 processor is missing clap_config.")
+
+        is_audio_batch = batch[0].get("audio_path") is not None
+        valid_items: List[Dict[str, Any]] = []
+        net_inputs_list: List[Dict[str, torch.Tensor]] = []
+        prompt_lens: List[int] = []
+
+        for item in batch:
+            try:
+                prompt_text = build_prompt_text(item, include_transcript=not is_audio_batch)
+                prompt_text = _audio_flamingo2_prompt_text(prompt_text)
+                sep = str(getattr(tokenizer, "sep_token", "") or "")
+                if not sep:
+                    raise ValueError("Audio-Flamingo-2 tokenizer has no sep_token.")
+                prompt = f"{prompt_text}{sep}"
+                tok = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max(16, int(self.max_length)),
+                )
+                lang_x = tok["input_ids"]
+                attention_mask = tok.get("attention_mask")
+                if attention_mask is None:
+                    attention_mask = torch.ones_like(lang_x, dtype=torch.long)
+
+                audio_x, audio_mask = _audio_flamingo2_make_audio_windows_or_silence(
+                    audio_path=item.get("audio_path"),
+                    clap_config=clap_config,
+                )
+                net_inputs_list.append(
+                    {
+                        "lang_x": lang_x,
+                        "attention_mask": attention_mask,
+                        "audio_x": audio_x.unsqueeze(0),
+                        "audio_x_mask": audio_mask.unsqueeze(0),
+                    }
+                )
+                prompt_lens.append(int(lang_x.shape[1]))
+                valid_items.append(item)
+            except Exception as exc:
+                logger.warning("Failed to build AF2 inference input for %s: %s", item.get("id"), exc)
+                continue
+
+        if not net_inputs_list:
+            return {}
+        return {"net_inputs_list": net_inputs_list, "items": valid_items, "prompt_lens": prompt_lens}
+
+
+@dataclass
 class SmartCollator:
     processor: Any
     max_length: int = 512
@@ -2772,6 +3333,69 @@ def _generate_batch(
     return results
 
 
+def _generate_batch_audio_flamingo2(
+    model,
+    processor,
+    batch_data: Dict[str, Any],
+    device,
+    max_new_tokens: int,
+) -> List[Dict[str, Any]]:
+    if not batch_data:
+        return []
+
+    net_inputs_list = batch_data.get("net_inputs_list") or []
+    items = batch_data.get("items") or []
+    prompt_lens = batch_data.get("prompt_lens") or [0] * len(net_inputs_list)
+    tokenizer = get_tokenizer_or_raise(processor)
+
+    results: List[Dict[str, Any]] = []
+    for item, net_inputs, prompt_len in zip(items, net_inputs_list, prompt_lens):
+        if not isinstance(net_inputs, dict):
+            continue
+        net_inputs = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
+        if "lang_x" not in net_inputs:
+            logger.warning("Skip AF2 generation item %s because lang_x is missing.", item.get("id"))
+            continue
+        if "attention_mask" not in net_inputs:
+            net_inputs["attention_mask"] = torch.ones_like(net_inputs["lang_x"], dtype=torch.long)
+
+        output_ids, dropped = _generate_with_retry_drop_unused_kwargs(
+            model,
+            net_inputs=net_inputs,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if dropped:
+            logger.debug("AF2 generate dropped unsupported kwargs for item %s: %s", item.get("id"), dropped)
+
+        input_len = int(prompt_len) if int(prompt_len) > 0 else int(net_inputs["lang_x"].shape[1])
+        raw_output = decode_token_ids(processor, output_ids[0][input_len:])
+        pred_label = parse_prediction_label(raw_output)
+        wer_score = calculate_wer(item.get("transcript", ""), raw_output)
+
+        results.append(
+            {
+                "scenario": pred_label["scenario"],
+                "action": pred_label["action"],
+                "entities": pred_label["entities"],
+                "pred_label": pred_label,
+                "file": item.get("file"),
+                "slurp_id": item.get("slurp_id"),
+                "id": item.get("id"),
+                "wer": wer_score,
+                "transcript": item.get("transcript", ""),
+                "candidates": item.get("candidates", []),
+                "rationale_text": item.get("rationale_text", ""),
+                "raw_output": raw_output,
+                "target": item.get("target", ""),
+                "target_label": item.get("target_obj", {}),
+                "type": "audio" if item.get("audio_path") else "text",
+            }
+        )
+
+    return results
+
+
 def run_distributed_inference(
     model,
     processor,
@@ -2794,25 +3418,39 @@ def run_distributed_inference(
 
     local_results: List[Dict[str, Any]] = []
     tokenizer = get_tokenizer_or_raise(processor)
-    tokenizer.padding_side = "left"
-    audio_input_mode = _infer_audio_input_mode(
-        model_name_or_path,
-        processor=processor,
-        tokenizer=tokenizer,
-    )
+    if hasattr(tokenizer, "padding_side"):
+        tokenizer.padding_side = "left"
+    family = _infer_model_family(model_name_or_path)
+    af2_mode = family == "audio-flamingo-2" or _is_audio_flamingo2_processor(processor)
+    audio_input_mode = ""
+    if not af2_mode:
+        audio_input_mode = _infer_audio_input_mode(
+            model_name_or_path,
+            processor=processor,
+            tokenizer=tokenizer,
+        )
+    inference_max_len = int(getattr(processor, "max_tokens", 4096) or 4096)
 
     if rank == 0:
         logger.info("Starting Inference. Items: %d (Audio: %d, Text: %d), Batch size: %d",
                     len(my_items), len(my_audio_items), len(my_text_items), batch_size)
-        logger.info("Inference audio input mode: %s", audio_input_mode)
+        if af2_mode:
+            logger.info("Inference mode: Audio-Flamingo-2 dedicated route (family=%s)", family)
+        else:
+            logger.info("Inference audio input mode: %s", audio_input_mode)
 
     # Audio Loader
     if my_audio_items:
+        collator = (
+            AudioFlamingo2InferenceCollator(processor, max_length=inference_max_len)
+            if af2_mode
+            else InferenceCollator(processor, audio_input_mode=audio_input_mode)
+        )
         audio_loader = DataLoader(
             MixedDataset(my_audio_items),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=InferenceCollator(processor, audio_input_mode=audio_input_mode),
+            collate_fn=collator,
             drop_last=False,
             shuffle=False,
         )
@@ -2820,8 +3458,9 @@ def run_distributed_inference(
             if rank == 0 and i % 10 == 0:
                 logger.info("Audio batch %d/%d", i + 1, len(audio_loader))
             try:
+                generator = _generate_batch_audio_flamingo2 if af2_mode else _generate_batch
                 local_results.extend(
-                    _generate_batch(
+                    generator(
                         model=model,
                         processor=processor,
                         batch_data=batch_data,
@@ -2836,11 +3475,16 @@ def run_distributed_inference(
 
     # Text Loader
     if my_text_items:
+        collator = (
+            AudioFlamingo2InferenceCollator(processor, max_length=inference_max_len)
+            if af2_mode
+            else InferenceCollator(processor, audio_input_mode=audio_input_mode)
+        )
         text_loader = DataLoader(
             MixedDataset(my_text_items),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=InferenceCollator(processor, audio_input_mode=audio_input_mode),
+            collate_fn=collator,
             drop_last=False,
             shuffle=False,
         )
@@ -2848,8 +3492,9 @@ def run_distributed_inference(
             if rank == 0 and i % 10 == 0:
                 logger.info("Text batch %d/%d", i + 1, len(text_loader))
             try:
+                generator = _generate_batch_audio_flamingo2 if af2_mode else _generate_batch
                 local_results.extend(
-                    _generate_batch(
+                    generator(
                         model=model,
                         processor=processor,
                         batch_data=batch_data,
@@ -3184,6 +3829,35 @@ def main():
         help="DataLoader workers for test inference (0 is safer to avoid deadlocks).",
     )
     parser.add_argument(
+        "--audio_flamingo2_space_repo",
+        type=str,
+        default=AUDIO_FLAMINGO2_DEFAULT_SPACE_REPO,
+        help="HF Space repo id (or local dir) that contains Audio-Flamingo-2 src/configs.",
+    )
+    parser.add_argument(
+        "--audio_flamingo2_cache_dir",
+        type=str,
+        default="~/.cache/huggingface/audio_flamingo2",
+        help="Cache directory used to download/load Audio-Flamingo-2 assets.",
+    )
+    parser.add_argument(
+        "--audio_flamingo2_local_files_only",
+        action="store_true",
+        help="Do not use network for Audio-Flamingo-2 asset loading (use local cache/files only).",
+    )
+    parser.add_argument(
+        "--audio_flamingo2_lang_encoder_path",
+        type=str,
+        default="",
+        help="Override base LLM path for Audio-Flamingo-2 (default inferred from model id).",
+    )
+    parser.add_argument(
+        "--audio_flamingo2_tokenizer_path",
+        type=str,
+        default="",
+        help="Override tokenizer path for Audio-Flamingo-2 (default: same as lang encoder).",
+    )
+    parser.add_argument(
         "--train_audio_encoder",
         action="store_true",
         help="Enable training of audio-related encoder parameters.",
@@ -3250,6 +3924,7 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run tiny smoke test.")
 
     args = parser.parse_args()
+    model_family = _infer_model_family(args.model_name_or_path)
 
     if not (0.0 <= args.train_id_sample_ratio <= 1.0):
         raise ValueError("--train_id_sample_ratio must be between 0.0 and 1.0")
@@ -3313,6 +3988,7 @@ def main():
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
+        logger.info("Detected model family: %s", model_family)
 
     train_max_samples = args.max_samples
     eval_max_samples = args.eval_max_samples
@@ -3379,15 +4055,27 @@ def main():
     if len(train_items) == 0:
         raise RuntimeError("No train items loaded. Check train_file/audio_dir paths.")
 
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    processor, tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
-    _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
+    if model_family == "audio-flamingo-2":
+        model, processor, tokenizer = load_audio_flamingo2_bundle_or_raise(
+            model_name_or_path=args.model_name_or_path,
+            space_repo_or_dir=args.audio_flamingo2_space_repo,
+            cache_dir=args.audio_flamingo2_cache_dir,
+            local_files_only=args.audio_flamingo2_local_files_only,
+            override_lm_path=args.audio_flamingo2_lang_encoder_path,
+            override_tokenizer_path=args.audio_flamingo2_tokenizer_path,
+        )
+        processor, tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
+    else:
+        processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        processor, tokenizer = ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
+        model = load_audio_model_from_pretrained(
+            args.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+        )
 
-    model = load_audio_model_from_pretrained(
-        args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-    ).to(device)
+    _ = get_audio_sampling_rate_or_raise(processor, args.model_name_or_path)
+    model = model.to(device)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
 
     # Keep audio modules trainable by default and keep projector trainable, as in prior behavior.
@@ -3429,12 +4117,23 @@ def main():
         disable_tqdm=True,
     )
 
+    use_af2_route = model_family == "audio-flamingo-2" or _is_audio_flamingo2_processor(processor)
+    train_collator = (
+        AudioFlamingo2TrainCollator(
+            processor,
+            max_length=int(getattr(processor, "max_tokens", 4096) or 4096),
+            debug=args.smoke,
+        )
+        if use_af2_route
+        else SmartCollator(processor, debug=args.smoke)
+    )
+
     trainer_kwargs = {
         "model": model,
         "args": training_args,
         "train_dataset": MixedDataset(train_items),
         "eval_dataset": MixedDataset(eval_items) if len(eval_items) > 0 else None,
-        "data_collator": SmartCollator(processor, debug=args.smoke),
+        "data_collator": train_collator,
     }
     trainer_init_params = inspect.signature(CustomTrainer.__init__).parameters
     if "tokenizer" in trainer_init_params:
