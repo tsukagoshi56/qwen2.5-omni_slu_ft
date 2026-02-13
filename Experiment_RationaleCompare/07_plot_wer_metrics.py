@@ -211,6 +211,66 @@ def build_wer_bins_equal_count(
     return bins
 
 
+def build_wer_bins_log(
+    models: List[ModelResult],
+    n_bins: int = 10,
+    max_wer: float = 1.0,
+    include_overflow: bool = False,
+    min_positive_wer: float = 1e-4,
+) -> List[WerBin]:
+    """WER の対数幅ビンを作成（低WERを細かく、高WERを粗く）。"""
+    if n_bins <= 1:
+        raise ValueError("--n-bins must be >= 2 for log binning")
+    if max_wer <= 0:
+        raise ValueError("--max-wer must be > 0")
+    if min_positive_wer <= 0:
+        raise ValueError("--min-positive-wer must be > 0")
+
+    positive_values: List[float] = []
+    has_overflow = False
+    for m in models:
+        for w in m.wer_list:
+            if w is None:
+                continue
+            wf = float(w)
+            if wf > max_wer:
+                has_overflow = True
+                continue
+            if wf > 0.0:
+                positive_values.append(wf)
+
+    if not positive_values:
+        # 全て 0 か overflow の場合
+        bins: List[WerBin] = [(0.0, max_wer, f"0-{_format_pct_text(max_wer)}", True)]
+        if include_overflow and has_overflow:
+            bins.append((max_wer, float("inf"), f">{_format_pct_text(max_wer)}", False))
+        return bins
+
+    start = max(min_positive_wer, min(positive_values))
+    if start >= max_wer:
+        bins = [(0.0, max_wer, f"0-{_format_pct_text(max_wer)}", True)]
+        if include_overflow and has_overflow:
+            bins.append((max_wer, float("inf"), f">{_format_pct_text(max_wer)}", False))
+        return bins
+
+    # one linear bin for zero-heavy region + log-spaced bins for positive region
+    n_log_bins = max(1, n_bins - 1)
+    edges = np.geomspace(start, max_wer, num=n_log_bins + 1)
+
+    bins = [(0.0, float(edges[0]), f"0-{_format_pct_text(float(edges[0]))}", False)]
+    for i in range(n_log_bins):
+        lo = float(edges[i])
+        hi = float(edges[i + 1])
+        if hi <= lo:
+            continue
+        include_hi = (i == n_log_bins - 1)
+        bins.append((lo, hi, f"{_format_pct_text(lo)}-{_format_pct_text(hi)}", include_hi))
+
+    if include_overflow and has_overflow:
+        bins.append((max_wer, float("inf"), f">{_format_pct_text(max_wer)}", False))
+    return bins
+
+
 def _in_wer_bin(w: float, lo: float, hi: float, include_hi: bool) -> bool:
     """WER ビン包含判定。overflow ビンは hi=inf で表現。"""
     if hi == float("inf"):
@@ -288,6 +348,33 @@ def estimate_bin_width_pct(wer_bins: List[WerBin], fallback: int = 10) -> int:
     return max(1, int(round(mean_w)))
 
 
+def _x_transform(value: float, mode: str) -> float:
+    if mode == "log1p":
+        return float(np.log1p(max(0.0, value)))
+    return value
+
+
+def _set_x_axis(
+    ax: Any,
+    x_scale: str,
+    x_max_linear: float,
+    x_tick_step_pct: Optional[int],
+) -> None:
+    if x_scale == "log1p":
+        ax.set_xlim(_x_transform(0.0, x_scale) - 0.02, _x_transform(x_max_linear, x_scale) + 0.02)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=8))
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"{max(0.0, np.expm1(v)):.0f}")
+        )
+        return
+
+    ax.set_xlim(-2, x_max_linear + 2.0)
+    if x_tick_step_pct is not None and x_tick_step_pct > 0:
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(x_tick_step_pct))
+    else:
+        ax.xaxis.set_major_locator(mticker.AutoLocator())
+
+
 def export_bin_metrics_csv(
     models: List[ModelResult],
     wer_bins: List[WerBin],
@@ -338,6 +425,7 @@ def plot_wer_metrics(
     wer_bins: List[WerBin],
     bin_width_pct: int = 10,
     x_tick_step_pct: Optional[int] = 10,
+    x_scale: str = "linear",
     min_samples: int = MIN_SAMPLES,
     csv_path: Optional[str] = None,
 ):
@@ -374,7 +462,7 @@ def plot_wer_metrics(
                 val = d[metric_key]
                 if val is None:
                     continue
-                xs.append(center)
+                xs.append(_x_transform(center, x_scale))
                 ys.append(val * 100)  # convert to percentage
 
             color = COLORS[m_idx % len(COLORS)]
@@ -397,16 +485,15 @@ def plot_wer_metrics(
         max_center = max(
             point["center"] for per_model in model_data for point in per_model
         )
-        x_max = max_center + (bin_width_pct / 2.0) + 2.0
-        ax.set_xlim(-2, x_max)
-        if x_tick_step_pct is not None and x_tick_step_pct > 0:
-            ax.xaxis.set_major_locator(mticker.MultipleLocator(x_tick_step_pct))
-        else:
-            ax.xaxis.set_major_locator(mticker.AutoLocator())
+        x_max = max_center + (bin_width_pct / 2.0)
+        _set_x_axis(ax, x_scale=x_scale, x_max_linear=x_max, x_tick_step_pct=x_tick_step_pct)
 
         # Only bottom row gets x-labels
         if ax_idx >= 2:
-            ax.set_xlabel("WER (%)")
+            if x_scale == "log1p":
+                ax.set_xlabel("WER (%) [log1p scale]")
+            else:
+                ax.set_xlabel("WER (%)")
 
         # Subtle grid
         ax.grid(True, which="major", axis="y", linewidth=0.5, alpha=0.3)
@@ -440,7 +527,7 @@ def plot_wer_metrics(
             continue
         label = f"n={counts[0]}" if len(set(counts)) == 1 else f"nmax={n_max}"
         center = model_data[0][b_idx]["center"]
-        valid_bins.append((center, label))
+        valid_bins.append((_x_transform(center, x_scale), label))
     if valid_bins:
         ax_bottom = axes_flat[2]
         for center, n_label in valid_bins:
@@ -492,10 +579,15 @@ def main():
     parser.add_argument("--bin-width", type=int, default=10,
                         help="WER ビン幅 (%%, default: 10)")
     parser.add_argument("--binning", type=str, default="fixed",
-                        choices=["fixed", "equal_count"],
-                        help="ビン生成方式: fixed(固定幅) or equal_count(等頻度)")
+                        choices=["fixed", "equal_count", "log"],
+                        help="ビン生成方式: fixed(固定幅), equal_count(等頻度), log(対数幅)")
     parser.add_argument("--n-bins", type=int, default=10,
-                        help="equal_count 時のビン数 (default: 10)")
+                        help="equal_count/log 時のビン数 (default: 10)")
+    parser.add_argument("--min-positive-wer", type=float, default=1e-4,
+                        help="log ビンの最小正WER (default: 1e-4)")
+    parser.add_argument("--x-scale", type=str, default="linear",
+                        choices=["linear", "log1p"],
+                        help="横軸表示スケール (default: linear)")
     parser.add_argument("--max-wer", type=float, default=1.0,
                         help="有限ビンの最大 WER (default: 1.0)")
     parser.add_argument("--include-overflow", action="store_true",
@@ -573,6 +665,16 @@ def main():
             )
             plot_bin_width = estimate_bin_width_pct(wer_bins, fallback=args.bin_width)
             x_tick_step = None
+        elif args.binning == "log":
+            wer_bins = build_wer_bins_log(
+                models=models,
+                n_bins=args.n_bins,
+                max_wer=args.max_wer,
+                include_overflow=args.include_overflow,
+                min_positive_wer=args.min_positive_wer,
+            )
+            plot_bin_width = estimate_bin_width_pct(wer_bins, fallback=args.bin_width)
+            x_tick_step = None
         else:
             wer_bins = build_wer_bins(
                 bin_width_pct=args.bin_width,
@@ -598,6 +700,7 @@ def main():
         wer_bins=wer_bins,
         bin_width_pct=plot_bin_width,
         x_tick_step_pct=x_tick_step,
+        x_scale=args.x_scale,
         min_samples=args.min_samples,
         csv_path=args.csv,
     )
