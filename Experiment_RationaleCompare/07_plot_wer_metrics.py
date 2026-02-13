@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import numpy as np
 
 # --- Import from 06 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -116,6 +117,11 @@ def setup_rcparams():
 WerBin = Tuple[float, float, str, bool]  # lo, hi, label, include_hi
 
 
+def _format_pct_text(value_01: float) -> str:
+    text = f"{value_01 * 100.0:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
 def build_wer_bins(
     bin_width_pct: int = 10,
     max_wer: float = 1.0,
@@ -142,6 +148,65 @@ def build_wer_bins(
 
     if include_overflow:
         bins.append((max_wer, float("inf"), f">{max_pct}", False))
+
+    return bins
+
+
+def _quantile(values: np.ndarray, q: float) -> float:
+    try:
+        return float(np.quantile(values, q, method="linear"))
+    except TypeError:
+        return float(np.quantile(values, q, interpolation="linear"))
+
+
+def build_wer_bins_equal_count(
+    models: List[ModelResult],
+    n_bins: int = 10,
+    max_wer: float = 1.0,
+    include_overflow: bool = False,
+) -> List[WerBin]:
+    """WER の等頻度ビンを作成（各ビンの母数をほぼ均等化）。"""
+    if n_bins <= 0:
+        raise ValueError("--n-bins must be > 0 for equal_count binning")
+    if max_wer <= 0:
+        raise ValueError("--max-wer must be > 0")
+
+    main_values: List[float] = []
+    has_overflow = False
+    for m in models:
+        for w in m.wer_list:
+            if w is None:
+                continue
+            wf = float(w)
+            if wf <= max_wer:
+                main_values.append(wf)
+            elif include_overflow:
+                has_overflow = True
+
+    if not main_values:
+        if include_overflow and has_overflow:
+            return [(max_wer, float("inf"), f">{_format_pct_text(max_wer)}", False)]
+        raise ValueError("No WER values available for equal_count binning.")
+
+    values = np.asarray(main_values, dtype=np.float64)
+    n_bins = min(n_bins, int(values.shape[0]))
+
+    edges = [_quantile(values, i / n_bins) for i in range(n_bins + 1)]
+    edges[0] = 0.0
+    edges[-1] = max_wer
+    for i in range(1, len(edges)):
+        if edges[i] < edges[i - 1]:
+            edges[i] = edges[i - 1]
+
+    bins: List[WerBin] = []
+    for i in range(n_bins):
+        lo = float(edges[i])
+        hi = float(edges[i + 1])
+        include_hi = (i == n_bins - 1)
+        bins.append((lo, hi, f"{_format_pct_text(lo)}-{_format_pct_text(hi)}", include_hi))
+
+    if include_overflow and has_overflow:
+        bins.append((max_wer, float("inf"), f">{_format_pct_text(max_wer)}", False))
 
     return bins
 
@@ -211,6 +276,18 @@ def _bin_center_percent(lo: float, hi: float, bin_width_pct: int) -> float:
     return (lo + hi) / 2.0 * 100.0
 
 
+def estimate_bin_width_pct(wer_bins: List[WerBin], fallback: int = 10) -> int:
+    widths = [
+        (hi - lo) * 100.0
+        for lo, hi, _, _ in wer_bins
+        if hi != float("inf") and hi >= lo
+    ]
+    if not widths:
+        return fallback
+    mean_w = sum(widths) / len(widths)
+    return max(1, int(round(mean_w)))
+
+
 def export_bin_metrics_csv(
     models: List[ModelResult],
     wer_bins: List[WerBin],
@@ -260,6 +337,7 @@ def plot_wer_metrics(
     output_path: str,
     wer_bins: List[WerBin],
     bin_width_pct: int = 10,
+    x_tick_step_pct: Optional[int] = 10,
     min_samples: int = MIN_SAMPLES,
     csv_path: Optional[str] = None,
 ):
@@ -321,7 +399,10 @@ def plot_wer_metrics(
         )
         x_max = max_center + (bin_width_pct / 2.0) + 2.0
         ax.set_xlim(-2, x_max)
-        ax.xaxis.set_major_locator(mticker.MultipleLocator(bin_width_pct))
+        if x_tick_step_pct is not None and x_tick_step_pct > 0:
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(x_tick_step_pct))
+        else:
+            ax.xaxis.set_major_locator(mticker.AutoLocator())
 
         # Only bottom row gets x-labels
         if ax_idx >= 2:
@@ -410,6 +491,11 @@ def main():
                         help=f"ビン内最小サンプル数 (default: {MIN_SAMPLES})")
     parser.add_argument("--bin-width", type=int, default=10,
                         help="WER ビン幅 (%%, default: 10)")
+    parser.add_argument("--binning", type=str, default="fixed",
+                        choices=["fixed", "equal_count"],
+                        help="ビン生成方式: fixed(固定幅) or equal_count(等頻度)")
+    parser.add_argument("--n-bins", type=int, default=10,
+                        help="equal_count 時のビン数 (default: 10)")
     parser.add_argument("--max-wer", type=float, default=1.0,
                         help="有限ビンの最大 WER (default: 1.0)")
     parser.add_argument("--include-overflow", action="store_true",
@@ -420,16 +506,6 @@ def main():
 
     if args.min_samples <= 0:
         print("ERROR: --min-samples must be > 0", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        wer_bins = build_wer_bins(
-            bin_width_pct=args.bin_width,
-            max_wer=args.max_wer,
-            include_overflow=args.include_overflow,
-        )
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
     # --- Resolve paths ---
@@ -487,6 +563,28 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
+    try:
+        if args.binning == "equal_count":
+            wer_bins = build_wer_bins_equal_count(
+                models=models,
+                n_bins=args.n_bins,
+                max_wer=args.max_wer,
+                include_overflow=args.include_overflow,
+            )
+            plot_bin_width = estimate_bin_width_pct(wer_bins, fallback=args.bin_width)
+            x_tick_step = None
+        else:
+            wer_bins = build_wer_bins(
+                bin_width_pct=args.bin_width,
+                max_wer=args.max_wer,
+                include_overflow=args.include_overflow,
+            )
+            plot_bin_width = args.bin_width
+            x_tick_step = args.bin_width
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
     # --- Output path ---
     if args.output:
         out = args.output
@@ -498,7 +596,8 @@ def main():
         models,
         out,
         wer_bins=wer_bins,
-        bin_width_pct=args.bin_width,
+        bin_width_pct=plot_bin_width,
+        x_tick_step_pct=x_tick_step,
         min_samples=args.min_samples,
         csv_path=args.csv,
     )
