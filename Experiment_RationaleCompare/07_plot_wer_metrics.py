@@ -357,22 +357,58 @@ def _x_transform(value: float, mode: str) -> float:
 def _set_x_axis(
     ax: Any,
     x_scale: str,
+    x_min_linear: float,
     x_max_linear: float,
     x_tick_step_pct: Optional[int],
 ) -> None:
     if x_scale == "log1p":
-        ax.set_xlim(_x_transform(0.0, x_scale) - 0.02, _x_transform(x_max_linear, x_scale) + 0.02)
+        lo = _x_transform(max(0.0, x_min_linear), x_scale)
+        hi = _x_transform(max(0.0, x_max_linear), x_scale)
+        if hi <= lo:
+            hi = lo + 0.05
+        pad = max(0.01, 0.04 * (hi - lo))
+        ax.set_xlim(lo - pad, hi + pad)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=8))
         ax.xaxis.set_major_formatter(
             mticker.FuncFormatter(lambda v, _: f"{max(0.0, np.expm1(v)):.0f}")
         )
         return
 
-    ax.set_xlim(-2, x_max_linear + 2.0)
+    if x_max_linear <= x_min_linear:
+        x_max_linear = x_min_linear + 1.0
+    ax.set_xlim(x_min_linear, x_max_linear)
     if x_tick_step_pct is not None and x_tick_step_pct > 0:
         ax.xaxis.set_major_locator(mticker.MultipleLocator(x_tick_step_pct))
     else:
-        ax.xaxis.set_major_locator(mticker.AutoLocator())
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=8))
+
+
+def _compute_adaptive_ylim(values: List[float]) -> Tuple[float, float]:
+    if not values:
+        return 0.0, 100.0
+    y_min = min(values)
+    y_max = max(values)
+    if y_max <= y_min:
+        pad = max(1.5, abs(y_max) * 0.05)
+        lo = max(0.0, y_min - pad)
+        hi = min(100.0, y_max + pad)
+        if hi <= lo:
+            hi = min(100.0, lo + 3.0)
+        return lo, hi
+
+    span = y_max - y_min
+    pad = max(1.0, span * 0.15)
+    lo = max(0.0, y_min - pad)
+    hi = min(100.0, y_max + pad)
+    # ensure minimal visible range
+    min_span = 6.0
+    if (hi - lo) < min_span:
+        center = (hi + lo) / 2.0
+        lo = max(0.0, center - min_span / 2.0)
+        hi = min(100.0, center + min_span / 2.0)
+        if (hi - lo) < min_span:
+            hi = min(100.0, lo + min_span)
+    return lo, hi
 
 
 def export_bin_metrics_csv(
@@ -451,6 +487,8 @@ def plot_wer_metrics(
         zip(METRIC_KEYS, METRIC_LABELS)
     ):
         ax = axes_flat[ax_idx]
+        all_x_linear: List[float] = []
+        all_y: List[float] = []
 
         for m_idx, m in enumerate(models):
             xs, ys = [], []
@@ -464,6 +502,8 @@ def plot_wer_metrics(
                     continue
                 xs.append(_x_transform(center, x_scale))
                 ys.append(val * 100)  # convert to percentage
+                all_x_linear.append(center)
+                all_y.append(val * 100)
 
             color = COLORS[m_idx % len(COLORS)]
             marker = MARKERS[m_idx % len(MARKERS)]
@@ -477,16 +517,32 @@ def plot_wer_metrics(
             )
 
         ax.set_ylabel("Score (%)")
-        ax.set_ylim(0, 105)
-        ax.yaxis.set_major_locator(mticker.MultipleLocator(20))
-        ax.yaxis.set_minor_locator(mticker.MultipleLocator(10))
+        y_lo, y_hi = _compute_adaptive_ylim(all_y)
+        ax.set_ylim(y_lo, y_hi)
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=6))
+        ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(2))
 
         # x-axis
-        max_center = max(
-            point["center"] for per_model in model_data for point in per_model
+        if all_x_linear:
+            x_min_raw = min(all_x_linear)
+            x_max_raw = max(all_x_linear)
+            x_span = max(1.0, x_max_raw - x_min_raw)
+            x_pad = max(1.0, x_span * 0.06)
+            x_min = max(0.0, x_min_raw - x_pad)
+            x_max = x_max_raw + x_pad
+        else:
+            max_center = max(
+                point["center"] for per_model in model_data for point in per_model
+            )
+            x_min = 0.0
+            x_max = max_center + (bin_width_pct / 2.0)
+        _set_x_axis(
+            ax,
+            x_scale=x_scale,
+            x_min_linear=x_min,
+            x_max_linear=x_max,
+            x_tick_step_pct=x_tick_step_pct,
         )
-        x_max = max_center + (bin_width_pct / 2.0)
-        _set_x_axis(ax, x_scale=x_scale, x_max_linear=x_max, x_tick_step_pct=x_tick_step_pct)
 
         # Only bottom row gets x-labels
         if ax_idx >= 2:
@@ -530,9 +586,10 @@ def plot_wer_metrics(
         valid_bins.append((_x_transform(center, x_scale), label))
     if valid_bins:
         ax_bottom = axes_flat[2]
+        y_anchor = ax_bottom.get_ylim()[0]
         for center, n_label in valid_bins:
             ax_bottom.annotate(
-                n_label, xy=(center, 0), xytext=(0, -28),
+                n_label, xy=(center, y_anchor), xytext=(0, -18),
                 textcoords="offset points", ha="center", va="top",
                 fontsize=6.5, color="0.45",
             )
