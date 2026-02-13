@@ -81,7 +81,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SFT_PATH = os.path.join(SCRIPT_DIR, "audio_text_mix_e2e_re.py")
 MULTITASK_PATH = os.path.join(SCRIPT_DIR, "audio_text_mix_e2e_re_multitask.py")
 DEFAULT_HEATMAP_VMIN = 0.0
-DEFAULT_HEATMAP_VMAX = 62.859520
+DEFAULT_HEATMAP_VMAX = 100.0
 
 
 def _load_module_from_path(name: str, path: str) -> Any:
