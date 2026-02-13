@@ -21,6 +21,7 @@ import logging
 import os
 import random
 import re
+import signal
 import shutil
 import sys
 import time
@@ -91,6 +92,7 @@ AUDIO_FLAMINGO2_DEFAULT_LM_PATH_BY_MODEL = {
     "nvidia/audio-flamingo-2-0.5b": "Qwen/Qwen2.5-0.5B",
     "nvidia/audio-flamingo-2-1.5b": "Qwen/Qwen2.5-1.5B",
 }
+_TERMINATION_SIGNAL_COUNT = 0
 
 
 class ProcessorWithTokenizerProxy:
@@ -3552,6 +3554,44 @@ def _distributed_barrier_or_raise(*, rank: int, stage: str) -> None:
         logger.info("Distributed barrier done: %s (elapsed=%.1fs)", stage, time.perf_counter() - t0)
 
 
+def _install_termination_signal_handlers() -> Dict[int, Any]:
+    previous_handlers: Dict[int, Any] = {}
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        global _TERMINATION_SIGNAL_COUNT
+        _TERMINATION_SIGNAL_COUNT += 1
+        try:
+            sig_name = signal.Signals(signum).name
+        except Exception:
+            sig_name = str(signum)
+        logger.warning(
+            "Received %s (%d), interrupt_count=%d",
+            sig_name,
+            signum,
+            _TERMINATION_SIGNAL_COUNT,
+        )
+        if _TERMINATION_SIGNAL_COUNT >= 2:
+            logger.warning("Second interrupt received. Forcing immediate exit.")
+            os._exit(128 + int(signum))
+        raise KeyboardInterrupt
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[int(sig)] = signal.getsignal(sig)
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            continue
+    return previous_handlers
+
+
+def _restore_termination_signal_handlers(previous_handlers: Dict[int, Any]) -> None:
+    for signum, handler in previous_handlers.items():
+        try:
+            signal.signal(signum, handler)
+        except Exception:
+            continue
+
+
 def run_distributed_inference(
     model,
     processor,
@@ -4154,6 +4194,8 @@ def main():
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if local_rank != -1:
+        os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+        os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
         timeout_seconds = max(60, int(args.ddp_timeout_seconds))
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         if backend == "nccl":
@@ -4382,7 +4424,12 @@ def main():
             "Trainer init has neither 'tokenizer' nor 'processing_class'. "
             "Proceeding without explicitly passing tokenizer."
         )
+    if rank == 0:
+        logger.info("Initializing CustomTrainer...")
+    init_start = time.perf_counter()
     trainer = CustomTrainer(**trainer_kwargs)
+    if rank == 0:
+        logger.info("CustomTrainer initialized: elapsed=%.1fs", time.perf_counter() - init_start)
 
     if rank == 0:
         logger.info(
@@ -4471,12 +4518,14 @@ def main():
 
 
 if __name__ == "__main__":
+    _previous_handlers = _install_termination_signal_handlers()
     try:
         main()
     except KeyboardInterrupt:
         logger.warning("Interrupted by user (KeyboardInterrupt).")
         raise
     finally:
+        _restore_termination_signal_handlers(_previous_handlers)
         if dist.is_available() and dist.is_initialized():
             try:
                 dist.destroy_process_group()
