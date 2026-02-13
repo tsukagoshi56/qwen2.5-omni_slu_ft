@@ -231,7 +231,10 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
 Qwen2.5-Omni を使う場合の例:
 
 ```bash
-python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
+uv run \
+  --with "git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview" \
+  --with accelerate \
+  Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
   --model_name_or_path Qwen/Qwen2.5-Omni-7B \
   --train_file Experiment_RationaleCompare/sft_success_train.jsonl \
   --eval_file  Experiment_RationaleCompare/sft_success_train.jsonl \
@@ -240,6 +243,8 @@ python Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
   --output_file outputs/qwen25_omni_rationale_ft/prediction.jsonl \
   --add_text_only
 ```
+
+他モデルでは通常どおり `uv run ...`（`--with` なし）を使ってください。
 
 ### Multitask SFT (CoT + Label) (`audio_text_mix_e2e_re_multitask.py`)
 

@@ -20,6 +20,19 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
+For Qwen2.5-Omni only, use `uv run --with` to temporarily use the preview transformers build:
+
+```bash
+uv run \
+  --with "git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview" \
+  --with accelerate \
+  Experiment_RationaleCompare/audio_text_mix_e2e_re.py \
+  --model_name_or_path Qwen/Qwen2.5-Omni-3B \
+  ...
+```
+
+For other models, use normal `uv run ...` without `--with`.
+
 ## Data Preparation
 
 The training script requires SLURP audio data. Use `prepare_data.py` to download and extract:
