@@ -36,6 +36,7 @@ Examples:
     # Reuse already extracted features only
     python 08_visualize_model_features.py \
       --reuse-dir Experiment_RationaleCompare/analysis/model_feats_run_x
+    # (same as --resume)
 
     # All intents + mean-distance rank-step table (no re-inference)
     python 08_visualize_model_features.py \
@@ -97,6 +98,7 @@ SFT_PATH = os.path.join(SCRIPT_DIR, "audio_text_mix_e2e_re.py")
 MULTITASK_PATH = os.path.join(SCRIPT_DIR, "audio_text_mix_e2e_re_multitask.py")
 DEFAULT_HEATMAP_VMIN = 0.0
 DEFAULT_HEATMAP_VMAX = 100.0
+DEFAULT_HEATMAP_VMAX_L2 = 2.0
 
 
 def _load_module_from_path(name: str, path: str) -> Any:
@@ -1081,6 +1083,23 @@ def _save_heatmap_scale(path: str, vmin: Optional[float], vmax: Optional[float])
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+def _load_saved_run_l2_flag(reuse_dir: str) -> Optional[bool]:
+    cfg_path = os.path.join(reuse_dir, "config.json")
+    if not os.path.exists(cfg_path):
+        return None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    value = obj.get("l2_normalize")
+    if isinstance(value, bool):
+        return value
+    return None
+
+
 def save_distance_table_csv(
     path: str,
     ordered_intents: Sequence[str],
@@ -1542,7 +1561,14 @@ def parse_args() -> argparse.Namespace:
         description="Extract model features and visualize intent separation."
     )
     parser.add_argument("--model_name_or_path", type=str, default=None, help="Model path/checkpoint.")
-    parser.add_argument("--reuse-dir", type=str, default=None, help="Reuse saved features from this analysis dir.")
+    parser.add_argument(
+        "--reuse-dir",
+        "--resume",
+        dest="reuse_dir",
+        type=str,
+        default=None,
+        help="Reuse saved features from this analysis dir.",
+    )
     parser.add_argument("--dist-backend", type=str, default="auto", choices=["auto", "nccl", "gloo"],
                         help="torchrun時のdistributed backend")
     parser.add_argument("--pipeline", type=str, default="sft", choices=["sft", "multitask"])
@@ -1647,6 +1673,7 @@ def main() -> None:
                 print("All-intents mode: min_intent_samples=1, top_intents=0")
 
         args.device = choose_device(args.device, local_rank=local_rank)
+        effective_l2_normalize = bool(args.l2_normalize)
 
         features: np.ndarray
         rows: List[Dict[str, Any]]
@@ -1658,6 +1685,10 @@ def main() -> None:
             out_dir = build_output_dir(args)
             features, rows = load_feature_artifacts(out_dir)
             print(f"Loaded cached features: {features.shape} from {out_dir}")
+            saved_l2_flag = _load_saved_run_l2_flag(out_dir)
+            if saved_l2_flag is not None:
+                effective_l2_normalize = bool(saved_l2_flag)
+                print(f"Using saved l2_normalize from config: {effective_l2_normalize}")
         else:
             sft_mod = _load_module_from_path("_sft_mod", SFT_PATH)
             multitask_mod = _load_module_from_path("_mt_mod", MULTITASK_PATH)
@@ -1820,11 +1851,20 @@ def main() -> None:
         # Hard-coded default scale for cross-model comparability when not explicitly overridden.
         if not used_scale_file and not cli_override:
             heatmap_vmin = float(DEFAULT_HEATMAP_VMIN)
-            heatmap_vmax = float(DEFAULT_HEATMAP_VMAX)
-            heatmap_scale_source = "fixed_default"
+            if effective_l2_normalize:
+                heatmap_vmax = float(DEFAULT_HEATMAP_VMAX_L2)
+                heatmap_scale_source = "fixed_default_l2"
+            else:
+                heatmap_vmax = float(DEFAULT_HEATMAP_VMAX)
+                heatmap_scale_source = "fixed_default"
 
         if heatmap_vmin is not None and heatmap_vmax is not None and heatmap_vmax <= heatmap_vmin:
             raise SystemExit("ERROR: heatmap scale requires vmax > vmin.")
+        if heatmap_vmin is not None and heatmap_vmax is not None:
+            print(
+                f"Heatmap scale: source={heatmap_scale_source} "
+                f"vmin={heatmap_vmin:.6f} vmax={heatmap_vmax:.6f}"
+            )
 
         if args.heatmap_scale_file and (not os.path.exists(args.heatmap_scale_file)):
             _save_heatmap_scale(args.heatmap_scale_file, heatmap_vmin, heatmap_vmax)
@@ -1930,7 +1970,7 @@ def main() -> None:
             "layer_index": int(args.layer_index),
             "feature_source": str(args.feature_source),
             "intent_max_new_tokens": int(args.intent_max_new_tokens),
-            "l2_normalize": bool(args.l2_normalize),
+            "l2_normalize": bool(effective_l2_normalize),
             "min_intent_samples": int(args.min_intent_samples),
             "top_intents": int(args.top_intents),
             "all_intents": bool(args.all_intents),
