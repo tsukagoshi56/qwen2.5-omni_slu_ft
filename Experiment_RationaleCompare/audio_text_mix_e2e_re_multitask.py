@@ -4408,7 +4408,11 @@ def main():
 
     for mode in test_modes:
         normalized_mode = normalize_task_mode(mode)
-        mode_items = [build_task_item(item, normalized_mode) for item in test_items]
+        cot_components_for_mode = selected_train_components if normalized_mode == "cot" else None
+        mode_items = [
+            build_task_item(item, normalized_mode, cot_target_components=cot_components_for_mode)
+            for item in test_items
+        ]
         if raw_output_file:
             base, ext = os.path.splitext(raw_output_file)
             if not ext:

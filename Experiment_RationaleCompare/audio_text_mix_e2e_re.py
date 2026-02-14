@@ -4224,8 +4224,10 @@ def main():
         print_audio_search_paths=args.print_audio_search_paths,
         audio_search_print_limit=args.audio_search_print_limit,
         strict_audio_missing=args.strict_audio_missing,
-        train_candidates_only=False,
-        train_json_only=False,
+        # Keep inference prompt/target format aligned with train/eval components (CRJ/CJ/RJ/J/...).
+        train_candidates_only=args.train_candidates_only,
+        train_json_only=args.train_json_only,
+        train_target_components=selected_train_components,
     )
 
     output_jsonl = args.output_file.strip() if args.output_file.strip() else os.path.join(args.output_dir, "prediction.jsonl")
