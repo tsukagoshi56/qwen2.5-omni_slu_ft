@@ -505,26 +505,126 @@ def _chat_template_owner_or_raise(processor: Any) -> Any:
     )
 
 
+def _decode_token_ids_maybe(processor: Any, token_ids: Any) -> Optional[str]:
+    try:
+        if torch.is_tensor(token_ids):
+            ids = token_ids.detach().cpu()
+        else:
+            ids = torch.tensor(token_ids)
+        if ids.dim() > 1:
+            ids = ids[0]
+        tokenizer = get_tokenizer_or_raise(processor)
+        return tokenizer.decode(ids, skip_special_tokens=False)
+    except Exception:
+        return None
+
+
+def _extract_text_from_chat_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        ctype = str(content.get("type", "")).strip().lower()
+        if ctype == "text":
+            text = content.get("text")
+            return str(text) if text is not None else ""
+        if ctype in {"audio", "image", "video"}:
+            return f"<{ctype}>"
+        for key in ("text", "content", "value"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+    if isinstance(content, (list, tuple)):
+        parts = [_extract_text_from_chat_content(part) for part in content]
+        return "\n".join([part for part in parts if part])
+    return str(content)
+
+
+def _render_messages_as_plain_text(messages: List[Dict[str, Any]], *, add_generation_prompt: bool) -> str:
+    lines: List[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role", "user")).strip() or "user"
+        content = _extract_text_from_chat_content(message.get("content"))
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if add_generation_prompt:
+        lines.append("assistant:")
+    return "\n".join(lines).strip()
+
+
+def _coerce_chat_template_text_output(processor: Any, out: Any) -> Optional[str]:
+    if isinstance(out, str):
+        return out
+    if isinstance(out, (list, tuple)):
+        if len(out) == 1:
+            return _coerce_chat_template_text_output(processor, out[0])
+        if out and all(isinstance(x, str) for x in out):
+            return "\n".join([x for x in out if x is not None])
+        decoded = _decode_token_ids_maybe(processor, out)
+        if decoded is not None:
+            return decoded
+        return None
+    if isinstance(out, dict):
+        for key in ("text", "prompt", "formatted_text", "chat"):
+            if key in out:
+                text = _coerce_chat_template_text_output(processor, out.get(key))
+                if text is not None:
+                    return text
+        for key in ("input_ids", "ids", "tokens"):
+            if key in out:
+                decoded = _decode_token_ids_maybe(processor, out.get(key))
+                if decoded is not None:
+                    return decoded
+        return None
+    decoded = _decode_token_ids_maybe(processor, out)
+    if decoded is not None:
+        return decoded
+    return None
+
+
 def render_chat_template_as_text_or_raise(
     processor: Any,
     messages: List[Dict[str, Any]],
     *,
     add_generation_prompt: bool = True,
 ) -> str:
-    owner = _chat_template_owner_or_raise(processor)
+    owner = None
+    errors: List[str] = []
+    try:
+        owner = _chat_template_owner_or_raise(processor)
+    except Exception as exc:
+        errors.append(f"owner: {exc}")
+
     attempts = [
         {"tokenize": False, "add_generation_prompt": add_generation_prompt},
+        {"tokenize": False, "add_generation_prompt": add_generation_prompt, "return_dict": False},
         {"tokenize": False},
         {"add_generation_prompt": add_generation_prompt},
     ]
-    errors: List[str] = []
-    for kwargs in attempts:
-        try:
-            out = owner.apply_chat_template(messages, **kwargs)
-            if isinstance(out, str):
-                return out
-        except Exception as exc:
-            errors.append(f"{kwargs}: {exc}")
+    if owner is not None:
+        for kwargs in attempts:
+            try:
+                out = owner.apply_chat_template(messages, **kwargs)
+                rendered = _coerce_chat_template_text_output(processor, out)
+                if isinstance(rendered, str) and rendered.strip():
+                    return rendered
+                errors.append(f"{kwargs}: returned {type(out).__name__}")
+            except Exception as exc:
+                errors.append(f"{kwargs}: {exc}")
+
+    fallback = _render_messages_as_plain_text(messages, add_generation_prompt=add_generation_prompt)
+    if fallback:
+        logger.warning(
+            "Chat template rendering failed; fallback to plain text. Details: %s",
+            " | ".join(errors[:3]) if errors else "no details",
+        )
+        return fallback
+
     detail = " | ".join(errors) if errors else "no chat-template variant accepted"
     raise RuntimeError(f"Failed to render chat template as text. Details: {detail}")
 
