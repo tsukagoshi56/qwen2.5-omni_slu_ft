@@ -3808,10 +3808,20 @@ def main():
     args = parser.parse_args()
     if args.train_id_sample_seed is None:
         args.train_id_sample_seed = int(args.seed)
+    strict_determinism = not bool(args.allow_nondeterministic)
+    deterministic_warn_only = bool(args.deterministic_warn_only)
+    if args.smoke and strict_determinism:
+        # Smoke is for quick sanity checks; strict deterministic kernels can stall on some stacks.
+        logger.warning(
+            "Smoke mode: strict deterministic algorithms are disabled to avoid startup stalls. "
+            "Seed-based reproducibility remains enabled."
+        )
+        strict_determinism = False
+        deterministic_warn_only = True
     configure_reproducibility(
         args.seed,
-        strict_determinism=not bool(args.allow_nondeterministic),
-        deterministic_warn_only=bool(args.deterministic_warn_only),
+        strict_determinism=strict_determinism,
+        deterministic_warn_only=deterministic_warn_only,
     )
     explicit_components = str(args.train_target_components or "").strip()
     if explicit_components:
@@ -3867,8 +3877,8 @@ def main():
             "Reproducibility config | seed=%d train_id_sample_seed=%d strict_determinism=%s warn_only=%s",
             int(args.seed),
             int(args.train_id_sample_seed),
-            not bool(args.allow_nondeterministic),
-            bool(args.deterministic_warn_only),
+            bool(strict_determinism),
+            bool(deterministic_warn_only),
         )
 
     metadata = load_metadata(args.metadata_file)
@@ -4020,7 +4030,7 @@ def main():
     }
     training_sig = inspect.signature(TrainingArguments.__init__).parameters
     if "full_determinism" in training_sig:
-        training_kwargs["full_determinism"] = not bool(args.allow_nondeterministic)
+        training_kwargs["full_determinism"] = bool(strict_determinism)
     if "tf32" in training_sig:
         training_kwargs["tf32"] = False
     training_args = TrainingArguments(**training_kwargs)
