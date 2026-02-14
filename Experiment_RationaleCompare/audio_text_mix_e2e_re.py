@@ -3175,12 +3175,11 @@ class InferenceCollator:
                             [{"role": "user", "content": user_content}],
                             add_generation_prompt=True,
                         )
-                        net_inputs = _call_processor_with_audio_or_raise(
-                            self.processor,
+                        net_inputs = self.processor(
                             text=text_input,
-                            audio=audio,
+                            audio=[audio],
                             sampling_rate=sr,
-                            padding=False,
+                            return_tensors="pt",
                         )
                         if "input_ids" not in net_inputs:
                             tok = tokenizer(text_input, return_tensors="pt")
@@ -3213,12 +3212,11 @@ class InferenceCollator:
                                 [{"role": "user", "content": user_content}],
                                 add_generation_prompt=True,
                             )
-                            net_inputs = _call_processor_with_audio_or_raise(
-                                self.processor,
+                            net_inputs = self.processor(
                                 text=text_input,
-                                audio=audio,
+                                audio=[audio],
                                 sampling_rate=sr,
-                                padding=False,
+                                return_tensors="pt",
                             )
                             if "input_ids" not in net_inputs:
                                 tok = tokenizer(text_input, return_tensors="pt")
