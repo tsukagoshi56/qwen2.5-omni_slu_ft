@@ -21,6 +21,12 @@ Examples:
       --task-mode cot \
       --embeddings pca,tsne,umap
 
+    # SFT prompt components (same rule as audio_text_mix_e2e_re.py)
+    python 08_visualize_model_features.py \
+      --model_name_or_path outputs/qwen_rationale_label_ft \
+      --sft \
+      --target-components RJ
+
     # SFT json_only prompt (shortcut flag)
     python 08_visualize_model_features.py \
       --model_name_or_path outputs/qwen_rationale_label_ft \
@@ -127,6 +133,31 @@ def _sanitize_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9._-]+", "_", value)
     value = re.sub(r"_+", "_", value).strip("._")
     return value or "run"
+
+
+def normalize_target_components_or_raise(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        raise ValueError("target components cannot be empty")
+
+    aliases = {
+        "CANDIDATES": "C",
+        "CANDIDATE": "C",
+        "RATIONALE": "R",
+        "REASONING": "R",
+        "JSON": "J",
+    }
+    for key, token in aliases.items():
+        raw = raw.replace(key, token)
+    raw = raw.replace(",", "").replace("/", "").replace("|", "").replace(" ", "")
+
+    picked = set(ch for ch in raw if ch in {"C", "R", "J"})
+    normalized = "".join(ch for ch in "CRJ" if ch in picked)
+    if not normalized:
+        raise ValueError(
+            f"Invalid target components '{value}'. Use any combination of C, R, J (e.g., CRJ, CJ, J, RJ)."
+        )
+    return normalized
 
 
 def _read_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -1329,6 +1360,8 @@ def build_items(
     sft_mod: Any,
     multitask_mod: Any,
 ) -> Tuple[Any, List[Dict[str, Any]]]:
+    explicit_components = str(args.target_components or "").strip()
+    explicit_components = explicit_components if explicit_components else None
     if args.pipeline == "sft":
         if args.task_mode not in {"cot", "candidates", "json_only"}:
             raise ValueError("--task-mode for pipeline=sft must be one of: cot, candidates, json_only")
@@ -1344,6 +1377,7 @@ def build_items(
             strict_audio_missing=args.strict_audio_missing,
             train_candidates_only=(args.task_mode == "candidates"),
             train_json_only=(args.task_mode == "json_only"),
+            train_target_components=explicit_components,
         )
         return sft_mod, items
 
@@ -1362,7 +1396,9 @@ def build_items(
         multitask=False,
     )
     mode = multitask_mod.normalize_task_mode(args.task_mode)
-    items = [multitask_mod.build_task_item(item, mode) for item in base_items]
+    # Keep parity with multitask inference script: apply component override only to cot mode.
+    cot_components_for_mode = explicit_components if mode == "cot" else None
+    items = [multitask_mod.build_task_item(item, mode, cot_target_components=cot_components_for_mode) for item in base_items]
     return multitask_mod, items
 
 
@@ -1628,6 +1664,7 @@ def extract_features_from_model(
                 "intent_lookup_action": intent_lookup_action,
                 "intent_span_source": span_source,
                 "intent_token_count": int(intent_token_count),
+                "target_components": str(item.get("target_components", "")),
             }
             if intent_debug_payload is not None:
                 row_obj["intent_debug"] = intent_debug_payload
@@ -1808,6 +1845,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dist-backend", type=str, default="auto", choices=["auto", "nccl", "gloo"],
                         help="torchrun時のdistributed backend")
     parser.add_argument("--pipeline", type=str, default="sft", choices=["sft", "multitask"])
+    parser.add_argument("--sft", action="store_true", help="Shortcut for --pipeline sft")
+    parser.add_argument("--multitask", action="store_true", help="Shortcut for --pipeline multitask")
     parser.add_argument(
         "--task-mode",
         "--task_model",
@@ -1816,6 +1855,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="cot",
         help="sft: cot|candidates|json_only, multitask: cot|label|candidates",
+    )
+    parser.add_argument(
+        "--target-components",
+        "--train_target_components",
+        "--train-target-components",
+        dest="target_components",
+        type=str,
+        default=None,
+        help=(
+            "Prompt/target components as combination of C,R,J (examples: CRJ, CJ, J, RJ, CR). "
+            "SFTでは re.py 同様に build_items へ反映。multitask では task-mode=cot 時のみ反映。"
+        ),
     )
     parser.add_argument("--only-json", "--json-only", action="store_true",
                         help="SFT時に task-mode を json_only にするショートカット")
@@ -1899,6 +1950,21 @@ def main() -> None:
     rank = 0
     world_size = 1
     try:
+        if bool(args.sft) and bool(args.multitask):
+            raise SystemExit("ERROR: --sft and --multitask cannot be used together.")
+        if bool(args.sft):
+            args.pipeline = "sft"
+        elif bool(args.multitask):
+            args.pipeline = "multitask"
+
+        if args.target_components is not None and str(args.target_components).strip():
+            try:
+                args.target_components = normalize_target_components_or_raise(args.target_components)
+            except ValueError as exc:
+                raise SystemExit(f"ERROR: {exc}")
+        else:
+            args.target_components = None
+
         dist_enabled, local_rank, rank, world_size = setup_distributed(args.dist_backend)
         if dist_enabled:
             print(
@@ -1913,6 +1979,16 @@ def main() -> None:
             if args.pipeline != "sft":
                 raise SystemExit("ERROR: --only-json is available only when --pipeline sft.")
             args.task_mode = "json_only"
+        if args.target_components and args.only_json and _is_main_process():
+            print(
+                "WARNING: --target-components is set; it takes precedence over --only-json/task-mode format selection.",
+                file=sys.stderr,
+            )
+        if args.target_components and args.pipeline == "multitask" and args.task_mode != "cot" and _is_main_process():
+            print(
+                "WARNING: multitask pipeline applies --target-components only when --task-mode cot.",
+                file=sys.stderr,
+            )
         if int(args.intent_max_new_tokens) <= 0:
             raise SystemExit("ERROR: --intent-max-new-tokens must be > 0.")
         if int(args.debug_intent_focus_limit) <= 0:
@@ -2248,6 +2324,7 @@ def main() -> None:
             "model_name_or_path": args.model_name_or_path,
             "pipeline": args.pipeline,
             "task_mode": args.task_mode,
+            "target_components": args.target_components,
             "test_file": args.test_file,
             "audio_dir": args.audio_dir,
             "text_only": bool(args.text_only),
