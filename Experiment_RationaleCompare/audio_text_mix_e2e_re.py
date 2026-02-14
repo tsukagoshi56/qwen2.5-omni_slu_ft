@@ -65,6 +65,19 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class _SuppressSystemPromptModifiedFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage().lower()
+        except Exception:
+            return True
+        if "system prompt modified" in msg or "system prompts modified" in msg:
+            return False
+        return True
+
+
 if os.environ.get("SHOW_SYSTEM_PROMPT_WARNING", "0") != "1":
     warnings.filterwarnings(
         "ignore",
@@ -76,6 +89,7 @@ if os.environ.get("SHOW_SYSTEM_PROMPT_WARNING", "0") != "1":
         message=r".*system prompt.*modified.*",
         category=UserWarning,
     )
+    logging.getLogger().addFilter(_SuppressSystemPromptModifiedFilter())
 AUDIO_ENCODER_MODULE_NAME_HINTS = (
     "audio_tower",
     "audio_encoder",
