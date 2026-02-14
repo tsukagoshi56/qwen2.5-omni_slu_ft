@@ -16,6 +16,7 @@ import os
 import random
 import re
 import shutil
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -41,6 +42,10 @@ try:
     from transformers import AudioFlamingo3ForConditionalGeneration
 except Exception:  # pragma: no cover
     AudioFlamingo3ForConditionalGeneration = None
+try:
+    from transformers import AutoModelForImageTextToText
+except Exception:  # pragma: no cover
+    AutoModelForImageTextToText = None
 from common import build_db_definitions, load_metadata
 
 try:
@@ -62,6 +67,31 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class _SuppressSystemPromptModifiedFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage().lower()
+        except Exception:
+            return True
+        if "system prompt modified" in msg or "system prompts modified" in msg:
+            return False
+        return True
+
+
+if os.environ.get("SHOW_SYSTEM_PROMPT_WARNING", "0") != "1":
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*system prompts? modified.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*system prompt.*modified.*",
+        category=UserWarning,
+    )
+    logging.getLogger().addFilter(_SuppressSystemPromptModifiedFilter())
 AUDIO_ENCODER_MODULE_NAME_HINTS = (
     "audio_tower",
     "audio_encoder",
@@ -264,6 +294,22 @@ def load_audio_model_from_pretrained(
     torch_dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
+    def _has_unimplemented_forward(model: Any) -> bool:
+        try:
+            cls_forward = getattr(type(model), "forward", None)
+        except Exception:
+            return False
+        if cls_forward is None:
+            return True
+        base_forward = getattr(torch.nn.Module, "forward", None)
+        if cls_forward is base_forward:
+            return True
+        fwd_name = getattr(cls_forward, "__name__", "")
+        fwd_qualname = getattr(cls_forward, "__qualname__", "")
+        if fwd_name == "_forward_unimplemented" or "_forward_unimplemented" in fwd_qualname:
+            return True
+        return False
+
     def _optional_transformers_class(*names: str) -> Optional[Any]:
         for name in names:
             cls = getattr(hf_transformers, name, None)
@@ -288,40 +334,61 @@ def load_audio_model_from_pretrained(
     family = _infer_model_family(model_name_or_path)
     model_name_lc = str(model_name_or_path or "").lower()
 
+    # Qwen path: prioritize dedicated loaders, then fallback to AutoModel loaders.
     if family == "qwen":
-        qwen_errors: List[str] = []
-        if "qwen2.5-omni" in model_name_lc:
+        qwen_attempts: List[Tuple[str, Any]] = []
+        seen_loader_ids = set()
+        is_qwen_omni = "omni" in model_name_lc
+        if is_qwen_omni:
             qwen_omni_cls = _optional_transformers_class(
+                "Qwen2_5OmniThinkerForConditionalGeneration",
+                "Qwen2_5OmniThinkerForCausalLM",
                 "Qwen2_5OmniForConditionalGeneration",
                 "Qwen2_5OmniForCausalLM",
                 "Qwen2OmniForConditionalGeneration",
                 "Qwen2OmniForCausalLM",
             )
-            if qwen_omni_cls is not None:
-                try:
-                    return qwen_omni_cls.from_pretrained(
-                        model_name_or_path,
-                        torch_dtype=torch_dtype,
-                        trust_remote_code=trust_remote_code,
-                    )
-                except Exception as exc:
-                    qwen_errors.append(f"{qwen_omni_cls.__name__}: {exc}")
+            _append_attempt(
+                qwen_attempts,
+                getattr(qwen_omni_cls, "__name__", "Qwen2_5Omni*"),
+                qwen_omni_cls,
+                seen_loader_ids,
+            )
+        if not is_qwen_omni:
+            _append_attempt(
+                qwen_attempts,
+                "Qwen2AudioForConditionalGeneration",
+                Qwen2AudioForConditionalGeneration,
+                seen_loader_ids,
+            )
+        _append_attempt(
+            qwen_attempts,
+            "AutoModelForImageTextToText",
+            AutoModelForImageTextToText,
+            seen_loader_ids,
+        )
+        _append_attempt(qwen_attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
+        _append_attempt(qwen_attempts, "AutoModel", AutoModel, seen_loader_ids)
 
-        if Qwen2AudioForConditionalGeneration is not None:
+        qwen_errors: List[str] = []
+        for loader_name, loader_cls in qwen_attempts:
             try:
-                return Qwen2AudioForConditionalGeneration.from_pretrained(
+                model = loader_cls.from_pretrained(
                     model_name_or_path,
                     torch_dtype=torch_dtype,
                     trust_remote_code=trust_remote_code,
                 )
+                if _has_unimplemented_forward(model):
+                    raise RuntimeError(
+                        f"{loader_name} loaded but forward() is unimplemented in this environment."
+                    )
+                return model
             except Exception as exc:
-                qwen_errors.append(f"Qwen2AudioForConditionalGeneration: {exc}")
-        else:
-            qwen_errors.append("Qwen2AudioForConditionalGeneration is unavailable in current transformers.")
+                qwen_errors.append(f"{loader_name}: {exc}")
 
         detail = " | ".join(qwen_errors) if qwen_errors else "no qwen loader available"
         raise RuntimeError(
-            f"Failed to load Qwen model '{model_name_or_path}' with Qwen loaders only. Details: {detail}"
+            f"Failed to load Qwen model '{model_name_or_path}'. Details: {detail}"
         )
 
     attempts: List[Tuple[str, Any]] = []
@@ -365,6 +432,7 @@ def load_audio_model_from_pretrained(
         )
         _append_attempt(attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
         _append_attempt(attempts, "AutoModel", AutoModel, seen_loader_ids)
+
     elif family == "voxtral":
         voxtral_cls = _optional_transformers_class(
             "VoxtralForConditionalGeneration",
@@ -397,11 +465,16 @@ def load_audio_model_from_pretrained(
     errors: List[str] = []
     for loader_name, loader_cls in attempts:
         try:
-            return loader_cls.from_pretrained(
+            model = loader_cls.from_pretrained(
                 model_name_or_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=trust_remote_code,
             )
+            if _has_unimplemented_forward(model):
+                raise RuntimeError(
+                    f"{loader_name} loaded but forward() is unimplemented in this environment."
+                )
+            return model
         except Exception as exc:
             errors.append(f"{loader_name}: {exc}")
 
@@ -497,11 +570,117 @@ def get_tokenizer_or_raise(processor: Any) -> Any:
 
 
 def attach_tokenizer_to_model_for_compat(model: Any, tokenizer: Any) -> None:
+    # Some multimodal generation paths expect `model.tokenizer` to exist.
     try:
         if getattr(model, "tokenizer", None) is None:
             setattr(model, "tokenizer", tokenizer)
     except Exception:
         pass
+
+
+def ensure_model_vocab_size_for_compat(model: Any, tokenizer: Optional[Any] = None) -> Optional[int]:
+    target = getattr(model, "module", None) if getattr(model, "module", None) is not None else model
+
+    def _to_valid_int(value: Any) -> Optional[int]:
+        try:
+            ivalue = int(value)
+        except Exception:
+            return None
+        return ivalue if ivalue > 0 else None
+
+    nested_candidates = (
+        "text_config",
+        "language_config",
+        "llm_config",
+        "decoder_config",
+        "model_config",
+        "thinker_config",
+        "thinking_config",
+    )
+    seen_cfg_ids = set()
+    configs: List[Any] = []
+
+    def _add_config(cfg: Any) -> None:
+        if cfg is None:
+            return
+        cid = id(cfg)
+        if cid in seen_cfg_ids:
+            return
+        seen_cfg_ids.add(cid)
+        configs.append(cfg)
+
+    _add_config(getattr(target, "config", None))
+    module_attrs = (
+        "model",
+        "base_model",
+        "language_model",
+        "thinker",
+        "decoder",
+        "transformer",
+    )
+    for attr in module_attrs:
+        module = getattr(target, attr, None)
+        if module is None:
+            continue
+        _add_config(getattr(module, "config", None))
+        _add_config(getattr(getattr(module, "model", None), "config", None))
+
+    idx = 0
+    while idx < len(configs):
+        cfg = configs[idx]
+        idx += 1
+        for attr in nested_candidates:
+            _add_config(getattr(cfg, attr, None))
+
+    if not configs:
+        return None
+
+    candidate: Optional[int] = None
+    for cfg in configs:
+        found = _to_valid_int(getattr(cfg, "vocab_size", None))
+        if found is not None:
+            candidate = found
+            break
+
+    if candidate is None:
+        getter = getattr(target, "get_input_embeddings", None)
+        if callable(getter):
+            try:
+                emb = getter()
+            except Exception:
+                emb = None
+            if emb is not None and hasattr(emb, "weight"):
+                try:
+                    candidate = _to_valid_int(emb.weight.shape[0])
+                except Exception:
+                    candidate = None
+
+    if candidate is None and tokenizer is not None:
+        try:
+            candidate = _to_valid_int(len(tokenizer))
+        except Exception:
+            candidate = None
+
+    if candidate is None:
+        return None
+
+    updated_count = 0
+    for cfg in configs:
+        current = _to_valid_int(getattr(cfg, "vocab_size", None))
+        if current == int(candidate):
+            continue
+        try:
+            setattr(cfg, "vocab_size", int(candidate))
+            updated_count += 1
+        except Exception:
+            continue
+    if updated_count > 0:
+        logger.info(
+            "Synchronized vocab_size=%d across %d config object(s) for compatibility.",
+            int(candidate),
+            updated_count,
+        )
+    return int(candidate)
 
 
 def _chat_template_owner_or_raise(processor: Any) -> Any:
@@ -515,26 +694,80 @@ def _chat_template_owner_or_raise(processor: Any) -> Any:
     )
 
 
+def _decode_token_ids_maybe(processor: Any, token_ids: Any) -> Optional[str]:
+    try:
+        if torch.is_tensor(token_ids):
+            ids = token_ids.detach().cpu()
+        else:
+            ids = torch.tensor(token_ids)
+        if ids.dim() > 1:
+            ids = ids[0]
+        tokenizer = get_tokenizer_or_raise(processor)
+        return tokenizer.decode(ids, skip_special_tokens=False)
+    except Exception:
+        return None
+
+
+def _coerce_chat_template_text_output(processor: Any, out: Any) -> Optional[str]:
+    if isinstance(out, str):
+        return out
+    if isinstance(out, (list, tuple)):
+        if len(out) == 1:
+            return _coerce_chat_template_text_output(processor, out[0])
+        if out and all(isinstance(x, str) for x in out):
+            return "\n".join([x for x in out if x is not None])
+        decoded = _decode_token_ids_maybe(processor, out)
+        if decoded is not None:
+            return decoded
+        return None
+    if isinstance(out, dict):
+        for key in ("text", "prompt", "formatted_text", "chat"):
+            if key in out:
+                text = _coerce_chat_template_text_output(processor, out.get(key))
+                if text is not None:
+                    return text
+        for key in ("input_ids", "ids", "tokens"):
+            if key in out:
+                decoded = _decode_token_ids_maybe(processor, out.get(key))
+                if decoded is not None:
+                    return decoded
+        return None
+    decoded = _decode_token_ids_maybe(processor, out)
+    if decoded is not None:
+        return decoded
+    return None
+
+
 def render_chat_template_as_text_or_raise(
     processor: Any,
     messages: List[Dict[str, Any]],
     *,
     add_generation_prompt: bool = True,
 ) -> str:
-    owner = _chat_template_owner_or_raise(processor)
+    owner = None
+    errors: List[str] = []
+    try:
+        owner = _chat_template_owner_or_raise(processor)
+    except Exception as exc:
+        errors.append(f"owner: {exc}")
+
     attempts = [
         {"tokenize": False, "add_generation_prompt": add_generation_prompt},
+        {"tokenize": False, "add_generation_prompt": add_generation_prompt, "return_dict": False},
         {"tokenize": False},
         {"add_generation_prompt": add_generation_prompt},
     ]
-    errors: List[str] = []
-    for kwargs in attempts:
-        try:
-            out = owner.apply_chat_template(messages, **kwargs)
-            if isinstance(out, str):
-                return out
-        except Exception as exc:
-            errors.append(f"{kwargs}: {exc}")
+    if owner is not None:
+        for kwargs in attempts:
+            try:
+                out = owner.apply_chat_template(messages, **kwargs)
+                rendered = _coerce_chat_template_text_output(processor, out)
+                if isinstance(rendered, str) and rendered.strip():
+                    return rendered
+                errors.append(f"{kwargs}: returned {type(out).__name__}")
+            except Exception as exc:
+                errors.append(f"{kwargs}: {exc}")
+
     detail = " | ".join(errors) if errors else "no chat-template variant accepted"
     raise RuntimeError(f"Failed to render chat template as text. Details: {detail}")
 
@@ -2308,6 +2541,10 @@ class CustomTrainer(Trainer):
         )
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if not getattr(self, "_vocab_size_compat_checked", False):
+            trainer_tokenizer = getattr(self, "tokenizer", None)
+            ensure_model_vocab_size_for_compat(model, trainer_tokenizer)
+            self._vocab_size_compat_checked = True
         task_ids = inputs.pop("task_ids", None)
         inputs = self._sanitize_model_inputs(inputs)
         inputs = self._drop_unsupported_feature_masks(model, inputs)
@@ -3839,6 +4076,12 @@ def main():
         trust_remote_code=True,
     ).to(device)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
+    vocab_size_for_compat = ensure_model_vocab_size_for_compat(model, tokenizer)
+    if rank == 0 and vocab_size_for_compat is None:
+        logger.warning(
+            "Could not infer model.config.vocab_size for compatibility. "
+            "If a downstream component expects vocab_size, model-specific code may still fail."
+        )
 
     # Match prior behavior: train audio encoder/projector for training runs; freeze both in inference-only mode.
     audio_matches, projector_matches = configure_audio_trainability(
