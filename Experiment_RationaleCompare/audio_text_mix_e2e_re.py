@@ -2826,7 +2826,7 @@ class CustomTrainer(Trainer):
 
 
 class SampleGenerationCallback(TrainerCallback):
-    def __init__(self, eval_items, processor, model, num_samples: int = 3, max_new_tokens: int = 4096):
+    def __init__(self, eval_items, processor, model, num_samples: int = 3, max_new_tokens: int = 2048):
         self.eval_items = eval_items
         self.processor = processor
         self.model = model
@@ -3743,7 +3743,7 @@ def main():
         default=None,
         help="Cap eval set size to speed up validation (None means no extra cap).",
     )
-    parser.add_argument("--max_new_tokens", type=int, default=4096)
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument(
         "--inference_num_workers",
         type=int,
