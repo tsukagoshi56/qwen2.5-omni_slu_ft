@@ -494,6 +494,111 @@ def attach_tokenizer_to_model_for_compat(model: Any, tokenizer: Any) -> None:
         pass
 
 
+def ensure_model_vocab_size_for_compat(model: Any, tokenizer: Optional[Any] = None) -> Optional[int]:
+    target = getattr(model, "module", None) if getattr(model, "module", None) is not None else model
+
+    def _to_valid_int(value: Any) -> Optional[int]:
+        try:
+            ivalue = int(value)
+        except Exception:
+            return None
+        return ivalue if ivalue > 0 else None
+
+    nested_candidates = (
+        "text_config",
+        "language_config",
+        "llm_config",
+        "decoder_config",
+        "model_config",
+        "thinker_config",
+        "thinking_config",
+    )
+    seen_cfg_ids = set()
+    configs: List[Any] = []
+
+    def _add_config(cfg: Any) -> None:
+        if cfg is None:
+            return
+        cid = id(cfg)
+        if cid in seen_cfg_ids:
+            return
+        seen_cfg_ids.add(cid)
+        configs.append(cfg)
+
+    _add_config(getattr(target, "config", None))
+    module_attrs = (
+        "model",
+        "base_model",
+        "language_model",
+        "thinker",
+        "decoder",
+        "transformer",
+    )
+    for attr in module_attrs:
+        module = getattr(target, attr, None)
+        if module is None:
+            continue
+        _add_config(getattr(module, "config", None))
+        _add_config(getattr(getattr(module, "model", None), "config", None))
+
+    idx = 0
+    while idx < len(configs):
+        cfg = configs[idx]
+        idx += 1
+        for attr in nested_candidates:
+            _add_config(getattr(cfg, attr, None))
+
+    if not configs:
+        return None
+
+    candidate: Optional[int] = None
+    for cfg in configs:
+        found = _to_valid_int(getattr(cfg, "vocab_size", None))
+        if found is not None:
+            candidate = found
+            break
+
+    if candidate is None:
+        getter = getattr(target, "get_input_embeddings", None)
+        if callable(getter):
+            try:
+                emb = getter()
+            except Exception:
+                emb = None
+            if emb is not None and hasattr(emb, "weight"):
+                try:
+                    candidate = _to_valid_int(emb.weight.shape[0])
+                except Exception:
+                    candidate = None
+
+    if candidate is None and tokenizer is not None:
+        try:
+            candidate = _to_valid_int(len(tokenizer))
+        except Exception:
+            candidate = None
+
+    if candidate is None:
+        return None
+
+    updated_count = 0
+    for cfg in configs:
+        current = _to_valid_int(getattr(cfg, "vocab_size", None))
+        if current == int(candidate):
+            continue
+        try:
+            setattr(cfg, "vocab_size", int(candidate))
+            updated_count += 1
+        except Exception:
+            continue
+    if updated_count > 0:
+        logger.info(
+            "Synchronized vocab_size=%d across %d config object(s) for compatibility.",
+            int(candidate),
+            updated_count,
+        )
+    return int(candidate)
+
+
 def _chat_template_owner_or_raise(processor: Any) -> Any:
     if hasattr(processor, "apply_chat_template"):
         return processor
@@ -2469,6 +2574,10 @@ class CustomTrainer(Trainer):
         return filtered
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        if not getattr(self, "_vocab_size_compat_checked", False):
+            trainer_tokenizer = getattr(self, "tokenizer", None)
+            ensure_model_vocab_size_for_compat(model, trainer_tokenizer)
+            self._vocab_size_compat_checked = True
         inputs = self._sanitize_model_inputs(inputs)
         inputs = self._drop_unsupported_feature_masks(model, inputs)
         inputs = _cast_floating_tensors_to_model_dtype(inputs, model)
@@ -3609,6 +3718,12 @@ def main():
         trust_remote_code=True,
     ).to(device)
     attach_tokenizer_to_model_for_compat(model, tokenizer)
+    vocab_size_for_compat = ensure_model_vocab_size_for_compat(model, tokenizer)
+    if rank == 0 and vocab_size_for_compat is None:
+        logger.warning(
+            "Could not infer model.config.vocab_size for compatibility. "
+            "If a downstream component expects vocab_size, model-specific code may still fail."
+        )
 
     # Keep audio modules trainable by default and keep projector trainable, as in prior behavior.
     audio_matches, projector_matches = configure_audio_trainability(
