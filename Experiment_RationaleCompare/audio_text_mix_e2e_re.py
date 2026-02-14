@@ -3376,8 +3376,6 @@ def run_distributed_inference(
                         max_new_tokens=max_new_tokens,
                     )
                 )
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             except Exception as exc:
                 logger.error("Rank %d failed on audio batch %d: %s", rank, i, exc)
 
@@ -3408,8 +3406,6 @@ def run_distributed_inference(
                         max_new_tokens=max_new_tokens,
                     )
                 )
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             except Exception as exc:
                 logger.error("Rank %d failed on text batch %d: %s", rank, i, exc)
 
