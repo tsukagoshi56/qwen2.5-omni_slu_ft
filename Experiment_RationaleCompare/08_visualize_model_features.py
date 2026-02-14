@@ -669,6 +669,8 @@ def _build_intent_focus_debug_payload(
     sel = sorted(set(int(i) for i in selected_local if 0 <= int(i) < len(offsets)))
     ranges = [offsets[i] for i in sel]
     preview = _build_highlight_preview(output_text, ranges, context_chars=context_chars)
+    selected_segments = [output_text[a:b] for a, b in ranges if 0 <= a < b <= len(output_text)]
+    selected_text = " | ".join(seg for seg in selected_segments if seg)
 
     token_dump: List[Dict[str, Any]] = []
     token_cap = max(0, int(max_token_dump))
@@ -686,6 +688,8 @@ def _build_intent_focus_debug_payload(
     payload: Dict[str, Any] = {
         "generated_text": output_text,
         "focus_preview": preview,
+        "selected_text_segments": selected_segments,
+        "selected_text": selected_text,
         "selected_local_indices": [int(i) for i in sel],
         "selected_global_indices": [int(i) for i in selected_global],
         "selected_char_ranges": [[int(a), int(b)] for a, b in ranges],
@@ -1566,8 +1570,23 @@ def extract_features_from_model(
                             "gold_action": str(action),
                             "gold_intent": str(intent),
                         })
+                        focus_intent = (
+                            f"{intent_lookup_scenario}_{intent_lookup_action}"
+                            if intent_lookup_scenario and intent_lookup_action
+                            else (str(intent) if str(intent) else "__unknown__")
+                        )
+                        selected_text = str(intent_debug_payload.get("selected_text", "") or "")
+                        if selected_text:
+                            intent_debug_payload["focus_statement"] = (
+                                f"Intent: {focus_intent} の区間 '{selected_text}' のベクトルを平均抽出"
+                            )
+                        else:
+                            intent_debug_payload["focus_statement"] = (
+                                f"Intent: {focus_intent} の区間を抽出しようとしたが、選択テキストが空です"
+                            )
                         debug_intent_focus_count += 1
                         if show_progress:
+                            print("[intent-focus-debug] " + str(intent_debug_payload.get("focus_statement", "")))
                             preview_obj = {
                                 "id": str(item.get("id", "")),
                                 "file": str(item.get("file", "")),
@@ -1576,9 +1595,10 @@ def extract_features_from_model(
                                 "lookup": f"{intent_lookup_scenario}_{intent_lookup_action}" if intent_lookup_scenario and intent_lookup_action else "",
                                 "span_source": str(span_source),
                                 "token_count": int(intent_debug_payload.get("selected_token_count", 0)),
+                                "selected_text": str(intent_debug_payload.get("selected_text", "")),
                                 "focus_preview": str(intent_debug_payload.get("focus_preview", "")),
                             }
-                            print("[intent-focus-debug] " + json.dumps(preview_obj, ensure_ascii=False))
+                            print("[intent-focus-debug-detail] " + json.dumps(preview_obj, ensure_ascii=False))
 
                     full_inputs: Dict[str, Any] = dict(one)
                     full_inputs["input_ids"] = sequences.to(device)
@@ -1609,15 +1629,22 @@ def extract_features_from_model(
                             "gold_intent": str(intent),
                             "generated_text": "",
                             "focus_preview": "",
+                            "selected_text_segments": [],
+                            "selected_text": "",
                             "selected_local_indices": [],
                             "selected_global_indices": [],
                             "selected_char_ranges": [],
                             "selected_tokens": [],
                             "selected_token_count": 0,
                             "selected_token_dump_truncated": False,
+                            "focus_statement": (
+                                f"Intent: {intent if intent else '__unknown__'} は生成トークンが無いため、"
+                                "プロンプト表現へフォールバックしてベクトルを抽出"
+                            ),
                         }
                         debug_intent_focus_count += 1
                         if show_progress:
+                            print("[intent-focus-debug] " + str(intent_debug_payload.get("focus_statement", "")))
                             preview_obj = {
                                 "id": str(item.get("id", "")),
                                 "file": str(item.get("file", "")),
@@ -1626,7 +1653,7 @@ def extract_features_from_model(
                                 "span_source": "prompt_fallback_no_generation",
                                 "note": "no token generated; used prompt pooling fallback",
                             }
-                            print("[intent-focus-debug] " + json.dumps(preview_obj, ensure_ascii=False))
+                            print("[intent-focus-debug-detail] " + json.dumps(preview_obj, ensure_ascii=False))
                     kwargs = dict(one)
                     kwargs["output_hidden_states"] = True
                     kwargs["return_dict"] = True
