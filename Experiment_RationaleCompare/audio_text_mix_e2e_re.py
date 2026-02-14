@@ -19,6 +19,7 @@ import os
 import random
 import re
 import shutil
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -64,6 +65,17 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+if os.environ.get("SHOW_SYSTEM_PROMPT_WARNING", "0") != "1":
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*system prompts? modified.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*system prompt.*modified.*",
+        category=UserWarning,
+    )
 AUDIO_ENCODER_MODULE_NAME_HINTS = (
     "audio_tower",
     "audio_encoder",
