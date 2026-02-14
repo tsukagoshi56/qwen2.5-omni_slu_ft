@@ -734,14 +734,6 @@ def render_chat_template_as_text_or_raise(
             except Exception as exc:
                 errors.append(f"{kwargs}: {exc}")
 
-    fallback = _render_messages_as_plain_text(messages, add_generation_prompt=add_generation_prompt)
-    if fallback:
-        logger.warning(
-            "Chat template rendering failed; fallback to plain text. Details: %s",
-            " | ".join(errors[:3]) if errors else "no details",
-        )
-        return fallback
-
     detail = " | ".join(errors) if errors else "no chat-template variant accepted"
     raise RuntimeError(f"Failed to render chat template as text. Details: {detail}")
 
