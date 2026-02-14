@@ -1346,6 +1346,69 @@ PROMPT_OUTPUT_FORMAT_JSON_ONLY = (
 PROMPT_DB_DEFINITIONS = "Intents: (none)\nSlot Types: (none)"
 
 
+def normalize_target_components_or_raise(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        raise ValueError("target components cannot be empty")
+
+    aliases = {
+        "CANDIDATES": "C",
+        "CANDIDATE": "C",
+        "RATIONALE": "R",
+        "REASONING": "R",
+        "JSON": "J",
+    }
+    for key, token in aliases.items():
+        raw = raw.replace(key, token)
+    raw = raw.replace(",", "").replace("/", "").replace("|", "").replace(" ", "")
+
+    picked = set(ch for ch in raw if ch in {"C", "R", "J"})
+    normalized = "".join(ch for ch in "CRJ" if ch in picked)
+    if not normalized:
+        raise ValueError(
+            f"Invalid target components '{value}'. Use any combination of C, R, J (e.g., CRJ, CJ, J)."
+        )
+    return normalized
+
+
+def default_target_components_from_legacy_flags(
+    *,
+    train_candidates_only: bool,
+    train_json_only: bool,
+) -> str:
+    if train_json_only:
+        return "J"
+    if train_candidates_only:
+        return "CJ"
+    return "CRJ"
+
+
+def describe_target_components(components: str) -> str:
+    labels = {"C": "Candidates", "R": "Rationale", "J": "JSON"}
+    return "+".join(labels[ch] for ch in components if ch in labels)
+
+
+def prompt_output_format_for_components(components: str) -> str:
+    comps = normalize_target_components_or_raise(components)
+    if comps == "CRJ":
+        return PROMPT_OUTPUT_FORMAT
+    if comps == "CJ":
+        return PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
+    if comps == "J":
+        return PROMPT_OUTPUT_FORMAT_JSON_ONLY
+
+    lines = ["Output Format:"]
+    if "C" in comps:
+        lines.append(
+            "C: Intent candidates: intent1 | intent2 | intent3; Slot candidates: slot_type1(value1|value2) | slot_type2"
+        )
+    if "R" in comps:
+        lines.append("R: label1!reason1; label2!reason2; ...")
+    if "J" in comps:
+        lines.append(f"J: {OUTPUT_SCHEMA}")
+    return "\n".join(lines)
+
+
 def set_prompt_db_definitions(db_definitions: str) -> None:
     global PROMPT_DB_DEFINITIONS
     text = str(db_definitions or "").strip()
@@ -1482,13 +1545,17 @@ def _sanitize_c_line(c_line: str) -> str:
 
 def build_prompt_text(item: Dict[str, Any], include_transcript: bool = False) -> str:
     transcript = str(item.get("transcript", "") or "").strip()
-    task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
-    if task_mode == "json_only":
-        output_format = PROMPT_OUTPUT_FORMAT_JSON_ONLY
-    elif task_mode == "candidates":
-        output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
+    components = str(item.get("target_components", "") or "").strip()
+    if components:
+        output_format = prompt_output_format_for_components(components)
     else:
-        output_format = PROMPT_OUTPUT_FORMAT
+        task_mode = str(item.get("task_mode", "cot") or "cot").strip().lower()
+        if task_mode == "json_only":
+            output_format = PROMPT_OUTPUT_FORMAT_JSON_ONLY
+        elif task_mode == "candidates":
+            output_format = PROMPT_OUTPUT_FORMAT_CANDIDATES_ONLY
+        else:
+            output_format = PROMPT_OUTPUT_FORMAT
 
     if include_transcript and transcript:
         return (
@@ -1510,7 +1577,28 @@ def build_training_target(
     final_json: str,
     use_rationale: bool = True,
     use_candidates: bool = True,
+    target_components: Optional[str] = None,
 ) -> str:
+    if target_components is not None:
+        components = normalize_target_components_or_raise(target_components)
+        rationale = (rationale_text or "").strip()
+        lines = [line.strip() for line in rationale.splitlines() if line.strip()]
+        lines = [_sanitize_c_line(line) if line.startswith("C:") else line for line in lines]
+
+        c_line = next((line for line in lines if line.startswith("C:")), "")
+        r_line = next((line for line in lines if line.startswith("R:")), "")
+
+        out_lines: List[str] = []
+        if "C" in components:
+            out_lines.append(c_line if c_line else "C: (none)")
+        if "R" in components:
+            out_lines.append(r_line if r_line else "R: (none)")
+        if "J" in components:
+            out_lines.append(f"J: {final_json}")
+        if out_lines:
+            return "\n".join(out_lines)
+        return f"J: {final_json}"
+
     if not use_rationale and not use_candidates:
         return f"J: {final_json}"
     rationale = (rationale_text or "").strip()
@@ -2039,9 +2127,14 @@ def build_items_from_rationale_jsonl(
     strict_audio_missing: bool = False,
     train_candidates_only: bool = False,
     train_json_only: bool = False,
+    train_target_components: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     fallback_text_items: List[Dict[str, Any]] = []
+    explicit_components: Optional[str] = None
+    if train_target_components is not None and str(train_target_components).strip():
+        explicit_components = normalize_target_components_or_raise(train_target_components)
+
     if not os.path.exists(jsonl_path):
         logger.warning("JSONL file not found: %s", jsonl_path)
         return items
@@ -2103,6 +2196,7 @@ def build_items_from_rationale_jsonl(
                     final_json,
                     use_rationale=(not train_candidates_only and not train_json_only),
                     use_candidates=(not train_json_only),
+                    target_components=explicit_components,
                 )
 
                 # Prioritize explicit transcript fields
@@ -2144,6 +2238,7 @@ def build_items_from_rationale_jsonl(
                     final_json,
                     use_rationale=(not train_candidates_only and not train_json_only),
                     use_candidates=(not train_json_only),
+                    target_components=explicit_components,
                 )
             
             # Common file resolution
@@ -2168,11 +2263,21 @@ def build_items_from_rationale_jsonl(
                 "target_obj": target_obj,
                 "prompt_text": user_text.strip() if user_text else "",
                 "task_mode": (
-                    "json_only"
-                    if train_json_only
-                    else ("candidates" if train_candidates_only else "cot")
+                    (
+                        "json_only"
+                        if explicit_components == "J"
+                        else ("candidates" if explicit_components == "CJ" else "cot")
+                    )
+                    if explicit_components is not None
+                    else (
+                        "json_only"
+                        if train_json_only
+                        else ("candidates" if train_candidates_only else "cot")
+                    )
                 ),
             }
+            if explicit_components is not None:
+                base_item["target_components"] = explicit_components
             text_only_item = {**base_item, "audio_path": None}
             fallback_text_items.append(text_only_item)
 
@@ -3634,6 +3739,17 @@ def main():
         help="Also export label-only predictions and metrics after inference.",
     )
     parser.add_argument(
+        "--train_target_components",
+        "--train-target-components",
+        type=str,
+        default="",
+        help=(
+            "Train/eval target components as combination of C,R,J "
+            "(examples: CRJ, CJ, J, RJ). "
+            "When set, this overrides --train_candidates_only/--train_json_only."
+        ),
+    )
+    parser.add_argument(
         "--train_candidates_only",
         "--train-candidates-only",
         "--no_r_train",
@@ -3641,7 +3757,7 @@ def main():
         dest="train_candidates_only",
         action="store_true",
         default=False,
-        help="Use C+J targets/prompts (no R) for train/eval splits. Default: disabled.",
+        help="Legacy option: Use C+J targets/prompts (no R) for train/eval splits.",
     )
     parser.add_argument(
         "--train_with_rationale",
@@ -3658,7 +3774,7 @@ def main():
         dest="train_json_only",
         action="store_true",
         default=False,
-        help="Use J-only targets/prompts (no C/R) for train/eval splits.",
+        help="Legacy option: Use J-only targets/prompts (no C/R) for train/eval splits.",
     )
     parser.add_argument("--add_text_only", action="store_true", help="Also add text-only samples.")
     parser.add_argument(
@@ -3697,6 +3813,14 @@ def main():
         strict_determinism=not bool(args.allow_nondeterministic),
         deterministic_warn_only=bool(args.deterministic_warn_only),
     )
+    explicit_components = str(args.train_target_components or "").strip()
+    if explicit_components:
+        selected_train_components = normalize_target_components_or_raise(explicit_components)
+    else:
+        selected_train_components = default_target_components_from_legacy_flags(
+            train_candidates_only=bool(args.train_candidates_only),
+            train_json_only=bool(args.train_json_only),
+        )
 
     if not (0.0 <= args.train_id_sample_ratio <= 1.0):
         raise ValueError("--train_id_sample_ratio must be between 0.0 and 1.0")
@@ -3757,13 +3881,15 @@ def main():
         if args.text_only:
             logger.info("text_only=True: all splits will use text-only items.")
         logger.info(
-            "Train/eval target mode: %s",
-            (
-                "J only (no C/R)"
-                if args.train_json_only
-                else ("C+J (no R)" if args.train_candidates_only else "C/R/J")
-            ),
+            "Train/eval target mode: %s (%s)",
+            selected_train_components,
+            describe_target_components(selected_train_components),
         )
+        if explicit_components:
+            logger.info(
+                "Using explicit --train_target_components=%s (legacy mode flags are ignored).",
+                selected_train_components,
+            )
 
     if rank == 0:
         logger.info("Using test_file: %s", args.test_file)
@@ -3793,6 +3919,7 @@ def main():
         strict_audio_missing=args.strict_audio_missing,
         train_candidates_only=args.train_candidates_only,
         train_json_only=args.train_json_only,
+        train_target_components=(selected_train_components if explicit_components else None),
     )
     train_items, train_sample_stats = sample_train_items_by_slurp_id(
         train_items,
@@ -3825,6 +3952,7 @@ def main():
         strict_audio_missing=args.strict_audio_missing,
         train_candidates_only=args.train_candidates_only,
         train_json_only=args.train_json_only,
+        train_target_components=(selected_train_components if explicit_components else None),
     )
 
     if rank == 0:
