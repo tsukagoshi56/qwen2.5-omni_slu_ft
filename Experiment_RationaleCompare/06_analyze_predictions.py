@@ -196,6 +196,118 @@ def _parse_j_line(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _normalize_intent_label(text: str) -> str:
+    s = str(text or "").strip().lower()
+    if not s:
+        return ""
+    s = s.strip("`\"'[](){}")
+    s = s.replace("-", "_")
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
+def _extract_c_block(text: str) -> Tuple[bool, str]:
+    raw = str(text or "")
+    if not raw.strip():
+        return False, ""
+
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*[cC]\s*[:：]\s*(.*)$", line)
+        if not m:
+            continue
+        chunk = [m.group(1).strip()]
+        for j in range(i + 1, len(lines)):
+            nxt = lines[j].strip()
+            if not nxt:
+                if chunk:
+                    break
+                continue
+            if re.match(r"^\s*[cCrRjJ]\s*[:：]", nxt):
+                break
+            chunk.append(nxt)
+        return True, " ".join(x for x in chunk if x).strip()
+
+    if re.search(r"\bintent\s*candidates?\b", raw, flags=re.IGNORECASE):
+        return True, raw.strip()
+    return False, ""
+
+
+def _extract_intent_candidates_from_c_block(c_block: str) -> List[str]:
+    text = str(c_block or "")
+    if not text:
+        return []
+
+    text = re.split(r"\n\s*[rRjJ]\s*[:：]", text, maxsplit=1)[0]
+    text = re.split(r";\s*slot\s*candidates?\s*[:：]", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    text = re.split(r"\bslot\s*candidates?\s*[:：]", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    text = re.sub(
+        r"^\s*(?:intent\s*candidates?|intent\s*candidate|intents?)\s*[:：\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    candidates: List[str] = []
+
+    def _push(item: str) -> None:
+        norm = _normalize_intent_label(item)
+        if "_" not in norm:
+            return
+        if norm not in candidates:
+            candidates.append(norm)
+
+    for piece in re.split(r"[|,;\n]+", text):
+        p = re.sub(r"^\s*\d+\s*[\).:\-]?\s*", "", piece.strip())
+        p = p.strip("`\"'")
+        if not p:
+            continue
+        _push(p)
+
+    if candidates:
+        return candidates
+
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+", text):
+        _push(token)
+    return candidates
+
+
+def _extract_c_intent_candidates_from_text(text: str) -> Tuple[bool, List[str]]:
+    has_c, c_block = _extract_c_block(text)
+    if not has_c:
+        return False, []
+    return True, _extract_intent_candidates_from_c_block(c_block)
+
+
+def _extract_c_intent_candidates_from_row(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    text_keys = (
+        "raw_output",
+        "prediction",
+        "pred_text",
+        "model_output",
+        "output",
+        "response",
+        "assistant",
+        "assistant_text",
+        "generated_text",
+    )
+    best_has_c = False
+    best_candidates: List[str] = []
+    for key in text_keys:
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        has_c, candidates = _extract_c_intent_candidates_from_text(value)
+        if not has_c:
+            continue
+        if (not best_has_c) or (len(candidates) > len(best_candidates)):
+            best_has_c = True
+            best_candidates = candidates
+    return best_has_c, best_candidates
+
+
 def _extract_pred_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "scenario": str(row.get("scenario", "")).strip(),
@@ -401,6 +513,8 @@ class ModelResult:
     intent_pairs: List[Tuple[str, str]] = field(default_factory=list)
     wer_list: List[Optional[float]] = field(default_factory=list)  # per-sample WER
     matched: List[Tuple[Dict, Dict]] = field(default_factory=list)
+    c_present_list: List[bool] = field(default_factory=list)
+    c_hit_list: List[bool] = field(default_factory=list)
     error_breakdown: Dict[str, int] = field(default_factory=dict)
 
 
@@ -421,25 +535,52 @@ def _auto_detect_gold_path(prediction_path: str) -> Optional[str]:
     return None
 
 
-def match_predictions_with_gold(
+def _match_rows_with_gold(
     pred_rows: List[Dict[str, Any]],
     gold_map: Dict[str, Dict[str, Any]],
     key_field: str = "file",
-) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    matched = []; not_found = 0
+) -> Tuple[List[Tuple[Dict[str, Any], Dict[str, Any]]], int]:
+    matched_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    not_found = 0
     for row in pred_rows:
         key = row.get(key_field)
         if key is None:
             key = row.get("slurp_id") or row.get("id")
         key = str(key).strip() if key else ""
         if not key:
-            not_found += 1; continue
+            not_found += 1
+            continue
         gold = gold_map.get(key)
         if gold is None:
             gold = gold_map.get(os.path.basename(key))
         if gold is None:
-            not_found += 1; continue
-        matched.append((_extract_pred_from_row(row), gold))
+            not_found += 1
+            continue
+        matched_rows.append((row, gold))
+    return matched_rows, not_found
+
+
+def _match_rows_embedded_gold(
+    pred_rows: List[Dict[str, Any]],
+) -> Tuple[List[Tuple[Dict[str, Any], Dict[str, Any]]], int]:
+    matched_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    no_gold = 0
+    for row in pred_rows:
+        gold = _extract_gold_from_row(row)
+        if gold is None or (not gold["scenario"] and not gold["action"]):
+            no_gold += 1
+            continue
+        matched_rows.append((row, gold))
+    return matched_rows, no_gold
+
+
+def match_predictions_with_gold(
+    pred_rows: List[Dict[str, Any]],
+    gold_map: Dict[str, Dict[str, Any]],
+    key_field: str = "file",
+) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    matched_rows, not_found = _match_rows_with_gold(pred_rows, gold_map, key_field=key_field)
+    matched = [(_extract_pred_from_row(row), gold) for row, gold in matched_rows]
     if not_found > 0:
         print(f"  [WARN] {not_found}/{len(pred_rows)} predictions not matched", file=sys.stderr)
     return matched
@@ -448,13 +589,8 @@ def match_predictions_with_gold(
 def match_predictions_embedded_gold(
     pred_rows: List[Dict[str, Any]],
 ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    matched = []; no_gold = 0
-    for row in pred_rows:
-        pred = _extract_pred_from_row(row)
-        gold = _extract_gold_from_row(row)
-        if gold is None or (not gold["scenario"] and not gold["action"]):
-            no_gold += 1; continue
-        matched.append((pred, gold))
+    matched_rows, no_gold = _match_rows_embedded_gold(pred_rows)
+    matched = [(_extract_pred_from_row(row), gold) for row, gold in matched_rows]
     if no_gold > 0:
         print(f"  [WARN] {no_gold}/{len(pred_rows)} rows had no embedded gold label", file=sys.stderr)
     return matched
@@ -499,13 +635,18 @@ def process_model(
         return ModelResult(name=model_name, path=prediction_path)
 
     if gold_map is not None:
-        matched = match_predictions_with_gold(pred_rows, gold_map, key_field=key_field)
+        matched_rows, not_found = _match_rows_with_gold(pred_rows, gold_map, key_field=key_field)
+        if not_found > 0:
+            print(f"  [WARN] {not_found}/{len(pred_rows)} predictions not matched", file=sys.stderr)
     else:
-        matched = match_predictions_embedded_gold(pred_rows)
+        matched_rows, no_gold = _match_rows_embedded_gold(pred_rows)
+        if no_gold > 0:
+            print(f"  [WARN] {no_gold}/{len(pred_rows)} rows had no embedded gold label", file=sys.stderr)
 
-    r = ModelResult(name=model_name, path=prediction_path, n_matched=len(matched), matched=matched)
+    r = ModelResult(name=model_name, path=prediction_path, n_matched=len(matched_rows))
 
-    for pred, gold in matched:
+    for row, gold in matched_rows:
+        pred = _extract_pred_from_row(row)
         ps, pa = pred["scenario"], pred["action"]
         gs, ga = gold["scenario"], gold["action"]
         r.scenario_metric.add(gs, ps)
@@ -514,6 +655,13 @@ def process_model(
         r.entity_metric.add(gold["entities"], pred["entities"])
         r.intent_pairs.append((f"{gs}_{ga}", f"{ps}_{pa}"))
         r.wer_list.append(gold.get("wer"))
+        r.matched.append((pred, gold))
+
+        has_c, candidates = _extract_c_intent_candidates_from_row(row)
+        gold_intent_norm = _normalize_intent_label(f"{gs}_{ga}")
+        c_hit = bool(has_c and gold_intent_norm and (gold_intent_norm in set(candidates)))
+        r.c_present_list.append(bool(has_c))
+        r.c_hit_list.append(c_hit)
 
     sp, sr, sf = r.scenario_metric.overall()
     ap, ar, af = r.action_metric.overall()
@@ -562,8 +710,53 @@ def _f4(v: float) -> str:
     return f"{v:.4f}"
 
 
+def _f4_opt(v: Optional[float]) -> str:
+    return f"{v:.4f}" if v is not None else "-"
+
+
 def _pct(n: int, total: int) -> str:
     return f"{100*n/total:.1f}%" if total > 0 else "-"
+
+
+def _ratio_text(num: int, den: int) -> str:
+    if den <= 0:
+        return "-"
+    return f"{num}/{den} ({num/den:.4f})"
+
+
+def _compute_candidate_stats_for_indices(
+    intent_pairs: List[Tuple[str, str]],
+    c_present_list: List[bool],
+    c_hit_list: List[bool],
+    indices: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    if indices is None:
+        n_cmp = min(len(intent_pairs), len(c_present_list), len(c_hit_list))
+        idxs = list(range(n_cmp))
+    else:
+        idxs = [i for i in indices if i < len(intent_pairs) and i < len(c_present_list) and i < len(c_hit_list)]
+
+    c_present_n = 0
+    c_hit_n = 0
+    c_hit_correct_n = 0
+    for i in idxs:
+        if not c_present_list[i]:
+            continue
+        c_present_n += 1
+        if not c_hit_list[i]:
+            continue
+        c_hit_n += 1
+        gi, pi = intent_pairs[i]
+        if gi == pi:
+            c_hit_correct_n += 1
+
+    return {
+        "c_present_n": c_present_n,
+        "c_hit_n": c_hit_n,
+        "c_hit_rate": (c_hit_n / c_present_n) if c_present_n > 0 else None,
+        "c_hit_correct_n": c_hit_correct_n,
+        "c_correct_given_hit": (c_hit_correct_n / c_hit_n) if c_hit_n > 0 else None,
+    }
 
 
 # ============================================================================
@@ -574,6 +767,10 @@ def print_overall_comparison(models: List[ModelResult]):
     print_section("A. Overall Metrics 比較")
     names = [m.name for m in models]
     headers = ["Metric"] + names
+    c_stats = [
+        _compute_candidate_stats_for_indices(m.intent_pairs, m.c_present_list, m.c_hit_list)
+        for m in models
+    ]
     rows = [
         ["Matched samples"] + [str(m.n_matched) for m in models],
         ["Scenario Acc"]    + [_f4(m.scenario_acc) for m in models],
@@ -585,6 +782,9 @@ def print_overall_comparison(models: List[ModelResult]):
         ["Entity Prec"]     + [_f4(m.entity_p) for m in models],
         ["Entity Recall"]   + [_f4(m.entity_r) for m in models],
         ["Entity F1"]       + [_f4(m.entity_f1) for m in models],
+        ["C present (count)"] + [str(cs["c_present_n"]) for cs in c_stats],
+        ["Gold intent in C"] + [_ratio_text(cs["c_hit_n"], cs["c_present_n"]) for cs in c_stats],
+        ["IntentAcc | Gold-in-C"] + [_ratio_text(cs["c_hit_correct_n"], cs["c_hit_n"]) for cs in c_stats],
     ]
     print_table(headers, rows)
 
@@ -842,14 +1042,17 @@ def _compute_bin_metrics(
     intent_pairs: List[Tuple[str, str]],
     matched: List[Tuple[Dict, Dict]],
     wer_list: List[Optional[float]],
+    c_present_list: Optional[List[bool]],
+    c_hit_list: Optional[List[bool]],
     lo: float, hi: float,
 ) -> Dict[str, Any]:
-    """指定 WER 範囲のサンプルだけで Scenario Acc / Action Acc / Intent Acc / SLU-F1 を算出。"""
+    """指定 WER 範囲のサンプルだけで主要メトリクスと C 候補分析を算出。"""
     scenario_m = FMeasureAccumulator()
     action_m = FMeasureAccumulator()
     intent_m = FMeasureAccumulator()
     entity_m = SpanFMeasureAccumulator()
     n = 0
+    idxs_in_bin: List[int] = []
     for i, w in enumerate(wer_list):
         if w is None:
             continue
@@ -864,13 +1067,25 @@ def _compute_bin_metrics(
         pred, gold = matched[i]
         entity_m.add(gold["entities"], pred["entities"])
         n += 1
+        idxs_in_bin.append(i)
     _, _, ef = entity_m.overall()
+    c_stats = _compute_candidate_stats_for_indices(
+        intent_pairs,
+        c_present_list or [],
+        c_hit_list or [],
+        idxs_in_bin,
+    )
     return {
         "n": n,
         "scenario_acc": scenario_m.accuracy if n > 0 else 0.0,
         "action_acc": action_m.accuracy if n > 0 else 0.0,
         "intent_acc": intent_m.accuracy if n > 0 else 0.0,
         "slu_f1": ef,
+        "c_present_n": c_stats["c_present_n"],
+        "c_hit_n": c_stats["c_hit_n"],
+        "c_hit_rate": c_stats["c_hit_rate"],
+        "c_hit_correct_n": c_stats["c_hit_correct_n"],
+        "c_correct_given_hit": c_stats["c_correct_given_hit"],
     }
 
 
@@ -887,16 +1102,33 @@ def print_wer_analysis_comparison(models: List[ModelResult]):
         return
 
     names = [m.name for m in models]
-    # Build header: 4 metrics per model
+    # Build header: 6 metrics per model
     sub_cols = []
     for n in names:
-        sub_cols.extend([f"{n} ScenAcc", f"{n} ActAcc", f"{n} IntAcc", f"{n} SLU-F1"])
+        sub_cols.extend([
+            f"{n} ScenAcc",
+            f"{n} ActAcc",
+            f"{n} IntAcc",
+            f"{n} SLU-F1",
+            f"{n} GoldInC",
+            f"{n} IntAcc|GoldInC",
+        ])
     headers = ["WER range", "N"] + sub_cols
 
     rows = []
     for lo, hi, label in WER_BINS:
-        bins_data = [_compute_bin_metrics(m.intent_pairs, m.matched, m.wer_list, lo, hi)
-                     for m in models]
+        bins_data = [
+            _compute_bin_metrics(
+                m.intent_pairs,
+                m.matched,
+                m.wer_list,
+                m.c_present_list,
+                m.c_hit_list,
+                lo,
+                hi,
+            )
+            for m in models
+        ]
         n_samples = max(d["n"] for d in bins_data) if bins_data else 0
         if n_samples == 0:
             continue
@@ -906,15 +1138,20 @@ def print_wer_analysis_comparison(models: List[ModelResult]):
             row.append(_f4(d["action_acc"]))
             row.append(_f4(d["intent_acc"]))
             row.append(_f4(d["slu_f1"]))
+            row.append(_f4_opt(d["c_hit_rate"]))
+            row.append(_f4_opt(d["c_correct_given_hit"]))
         rows.append(row)
 
     # ALL row
     row_all: List[Any] = ["ALL", max(m.n_matched for m in models)]
     for m in models:
+        c_stats = _compute_candidate_stats_for_indices(m.intent_pairs, m.c_present_list, m.c_hit_list)
         row_all.append(_f4(m.scenario_acc))
         row_all.append(_f4(m.action_acc))
         row_all.append(_f4(m.intent_acc))
         row_all.append(_f4(m.entity_f1))
+        row_all.append(_f4_opt(c_stats["c_hit_rate"]))
+        row_all.append(_f4_opt(c_stats["c_correct_given_hit"]))
     rows.append(row_all)
 
     print_table(headers, rows)
@@ -1050,6 +1287,12 @@ def main():
         print(f"\nProcessing: {name}  ({path})")
         r = process_model(path, name, gold_map, args.key)
         print(f"  Matched: {r.n_matched}  IntentAcc={_f4(r.intent_acc)}  EntityF1={_f4(r.entity_f1)}")
+        c_stats = _compute_candidate_stats_for_indices(r.intent_pairs, r.c_present_list, r.c_hit_list)
+        print(
+            f"  C present={c_stats['c_present_n']}  "
+            f"Gold-in-C={_ratio_text(c_stats['c_hit_n'], c_stats['c_present_n'])}  "
+            f"IntentAcc|Gold-in-C={_ratio_text(c_stats['c_hit_correct_n'], c_stats['c_hit_n'])}"
+        )
         models.append(r)
 
     if not models or all(m.n_matched == 0 for m in models):
@@ -1130,26 +1373,44 @@ def main():
     # ================================================================
     # Summary JSON
     # ================================================================
-    summary = {
-        "models": [
-            {
-                "name": m.name, "path": m.path, "n_matched": m.n_matched,
-                "scenario_acc": m.scenario_acc, "action_acc": m.action_acc,
-                "intent_acc": m.intent_acc,
-                "entity_f1": m.entity_f1, "entity_p": m.entity_p, "entity_r": m.entity_r,
-                "error_breakdown": m.error_breakdown,
-            }
-            for m in models
-        ],
-    }
+    summary_models: List[Dict[str, Any]] = []
+    for m in models:
+        c_stats = _compute_candidate_stats_for_indices(m.intent_pairs, m.c_present_list, m.c_hit_list)
+        summary_models.append({
+            "name": m.name,
+            "path": m.path,
+            "n_matched": m.n_matched,
+            "scenario_acc": m.scenario_acc,
+            "action_acc": m.action_acc,
+            "intent_acc": m.intent_acc,
+            "entity_f1": m.entity_f1,
+            "entity_p": m.entity_p,
+            "entity_r": m.entity_r,
+            "error_breakdown": m.error_breakdown,
+            "c_present_n": c_stats["c_present_n"],
+            "c_hit_n": c_stats["c_hit_n"],
+            "c_hit_rate": c_stats["c_hit_rate"],
+            "c_hit_correct_n": c_stats["c_hit_correct_n"],
+            "c_correct_given_hit": c_stats["c_correct_given_hit"],
+        })
+    summary = {"models": summary_models}
     if args.output_json:
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
         print(f"\n  Summary JSON saved to: {args.output_json}")
 
     print_section("Summary")
-    headers = ["Model", "IntentAcc", "EntityF1"]
-    rows_t = [[m.name, _f4(m.intent_acc), _f4(m.entity_f1)] for m in models]
+    headers = ["Model", "IntentAcc", "EntityF1", "GoldInC", "IntentAcc|GoldInC"]
+    rows_t = []
+    for m in models:
+        c_stats = _compute_candidate_stats_for_indices(m.intent_pairs, m.c_present_list, m.c_hit_list)
+        rows_t.append([
+            m.name,
+            _f4(m.intent_acc),
+            _f4(m.entity_f1),
+            _f4_opt(c_stats["c_hit_rate"]),
+            _f4_opt(c_stats["c_correct_given_hit"]),
+        ])
     print_table(headers, rows_t)
     print()
 
