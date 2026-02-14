@@ -2404,9 +2404,13 @@ class SmartCollator:
     ignore_index: int = -100
     debug: bool = False
     _print_count: int = 0
+    _feature_mask_synth_warn_count: int = 0
+    _audio_fallback_warn_count: int = 0
 
     def __post_init__(self):
         self._print_count = 0
+        self._feature_mask_synth_warn_count = 0
+        self._audio_fallback_warn_count = 0
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0:
@@ -2464,18 +2468,21 @@ class SmartCollator:
                 print(f"[DEBUG Visualizer] Target:\n{item['target']}")
                 self._print_count += 1
 
-            inputs = self.processor(
-                text=full_text,
-                audio=[audio],
-                sampling_rate=sr,
-                return_tensors="pt",
-            )
-            prompt_inputs = self.processor(
-                text=text_input,
-                audio=[audio],
-                sampling_rate=sr,
-                return_tensors="pt",
-            )
+            try:
+                inputs = self.processor(
+                    text=full_text,
+                    audio=[audio],
+                    sampling_rate=sr,
+                    return_tensors="pt",
+                )
+                prompt_inputs = self.processor(
+                    text=text_input,
+                    audio=[audio],
+                    sampling_rate=sr,
+                    return_tensors="pt",
+                )
+            except Exception:
+                continue
             prompt_ids = prompt_inputs.get("input_ids")
             if prompt_ids is None:
                 tok_prompt = tokenizer(text_input, return_tensors="pt")
@@ -2509,10 +2516,29 @@ class SmartCollator:
             if f_mask is not None:
                 while f_mask.dim() > 1:
                     f_mask = f_mask.squeeze(0)
-                feature_mask_list.append(f_mask)
+            inferred_tlen = int(max(feat.shape)) if feat.dim() >= 2 else int(feat.shape[0])
+            if f_mask is None or int(f_mask.shape[0]) != inferred_tlen:
+                if self._feature_mask_synth_warn_count < 20:
+                    logger.warning(
+                        "Synthesizing feature mask for sample id=%s (mask_missing_or_mismatch).",
+                        item.get("id"),
+                    )
+                    self._feature_mask_synth_warn_count += 1
+                f_mask = torch.ones(inferred_tlen, dtype=torch.long, device=feat.device)
+            else:
+                f_mask = f_mask.to(device=feat.device, dtype=torch.long)
+            feature_mask_list.append(f_mask)
 
         if not input_ids_list:
-            raise RuntimeError("Audio collator produced an empty batch after filtering.")
+            if self._audio_fallback_warn_count < 20:
+                batch_ids = [str(x.get("id", "")) for x in batch[:8]]
+                logger.warning(
+                    "All audio samples in a batch were skipped; fallback to text-only. ids(head)=%s",
+                    batch_ids,
+                )
+                self._audio_fallback_warn_count += 1
+            text_fallback_batch = [{**item, "audio_path": None} for item in batch]
+            return self._collate_text(text_fallback_batch)
 
         batch_out = {
             "input_ids": pad_sequence(
@@ -2537,10 +2563,9 @@ class SmartCollator:
             ),
             "task_ids": torch.tensor(task_ids, dtype=torch.long),
         }
-        if feature_mask_list:
-            fmask = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
-            batch_out["feature_attention_mask"] = fmask
-            batch_out["input_features_mask"] = fmask
+        fmask = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
+        batch_out["feature_attention_mask"] = fmask
+        batch_out["input_features_mask"] = fmask
         return batch_out
 
     def _collate_text(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -3172,13 +3197,15 @@ class InferenceCollator:
         if not texts:
             return {}
 
-        net_inputs = self.processor(
-            text=texts,
-            audio=audios if is_audio_batch else None,
-            sampling_rate=sr,
-            padding=True,
-            return_tensors="pt",
-        )
+        processor_kwargs: Dict[str, Any] = {
+            "text": texts,
+            "sampling_rate": sr,
+            "padding": True,
+            "return_tensors": "pt",
+        }
+        if is_audio_batch:
+            processor_kwargs["audio"] = audios
+        net_inputs = self.processor(**processor_kwargs)
         net_inputs = {k: v for k, v in net_inputs.items() if torch.is_tensor(v)}
         if "input_ids" not in net_inputs:
             tok = tokenizer(texts, padding=True, return_tensors="pt")
@@ -3362,8 +3389,6 @@ def run_distributed_inference(
                         max_new_tokens=max_new_tokens,
                     )
                 )
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             except Exception as exc:
                 logger.error("Rank %d failed on audio batch %d: %s", rank, i, exc)
 
@@ -3394,8 +3419,6 @@ def run_distributed_inference(
                         max_new_tokens=max_new_tokens,
                     )
                 )
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             except Exception as exc:
                 logger.error("Rank %d failed on text batch %d: %s", rank, i, exc)
 
