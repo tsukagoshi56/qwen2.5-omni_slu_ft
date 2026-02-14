@@ -51,6 +51,14 @@ Examples:
       --feature-source intent_generation \
       --intent-max-new-tokens 256
 
+    # Debug: show which generated token region was used for intent feature pooling
+    python 08_visualize_model_features.py \
+      --model_name_or_path outputs/qwen_rationale_label_ft \
+      --pipeline sft \
+      --feature-source intent_generation \
+      --debug-intent-focus \
+      --debug-intent-focus-limit 10
+
     # Multi-GPU extraction with torchrun
     torchrun --nproc_per_node 2 08_visualize_model_features.py \
       --model_name_or_path outputs/qwen_rationale_label_ft \
@@ -552,6 +560,109 @@ def _select_generated_intent_token_indices(
     if offsets:
         return [max(0, len(offsets) - 1)], "fallback_last"
     return [], "empty_generated"
+
+
+def _merge_spans(spans: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    cleaned: List[Tuple[int, int]] = []
+    for a, b in spans:
+        x = int(min(a, b))
+        y = int(max(a, b))
+        if y <= x:
+            continue
+        cleaned.append((x, y))
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda p: p[0])
+    merged: List[Tuple[int, int]] = [cleaned[0]]
+    for a, b in cleaned[1:]:
+        la, lb = merged[-1]
+        if a <= lb:
+            merged[-1] = (la, max(lb, b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _build_highlight_preview(
+    text: str,
+    spans: Sequence[Tuple[int, int]],
+    context_chars: int = 80,
+) -> str:
+    t = str(text or "")
+    if not t:
+        return ""
+    merged = _merge_spans(spans)
+    if not merged:
+        head = min(len(t), max(80, int(context_chars) * 2))
+        out = t[:head]
+        if head < len(t):
+            out += "..."
+        return out
+
+    context = max(0, int(context_chars))
+    left = max(0, merged[0][0] - context)
+    right = min(len(t), merged[-1][1] + context)
+
+    parts: List[str] = []
+    pos = left
+    for a, b in merged:
+        s = max(left, a)
+        e = min(right, b)
+        if e <= s:
+            continue
+        if s > pos:
+            parts.append(t[pos:s])
+        parts.append("[[")
+        parts.append(t[s:e])
+        parts.append("]]")
+        pos = e
+    if pos < right:
+        parts.append(t[pos:right])
+    out = "".join(parts)
+    if left > 0:
+        out = "..." + out
+    if right < len(t):
+        out += "..."
+    return out
+
+
+def _build_intent_focus_debug_payload(
+    tokenizer: Any,
+    generated_ids: Sequence[int],
+    selected_local: Sequence[int],
+    selected_global: Sequence[int],
+    context_chars: int = 80,
+    max_token_dump: int = 64,
+) -> Dict[str, Any]:
+    output_text, offsets = _decode_text_and_offsets(tokenizer, generated_ids)
+    sel = sorted(set(int(i) for i in selected_local if 0 <= int(i) < len(offsets)))
+    ranges = [offsets[i] for i in sel]
+    preview = _build_highlight_preview(output_text, ranges, context_chars=context_chars)
+
+    token_dump: List[Dict[str, Any]] = []
+    token_cap = max(0, int(max_token_dump))
+    for j, i in enumerate(sel[:token_cap]):
+        tid = int(generated_ids[i])
+        piece = _decode_text_from_token_ids(tokenizer, [tid])
+        gidx = int(selected_global[j]) if j < len(selected_global) else None
+        token_dump.append({
+            "local_index": int(i),
+            "global_index": gidx,
+            "token_id": tid,
+            "piece": piece,
+        })
+
+    payload: Dict[str, Any] = {
+        "generated_text": output_text,
+        "focus_preview": preview,
+        "selected_local_indices": [int(i) for i in sel],
+        "selected_global_indices": [int(i) for i in selected_global],
+        "selected_char_ranges": [[int(a), int(b)] for a, b in ranges],
+        "selected_tokens": token_dump,
+        "selected_token_count": int(len(sel)),
+        "selected_token_dump_truncated": bool(len(sel) > token_cap),
+    }
+    return payload
 
 
 def _pool_hidden_at_indices(hidden: torch.Tensor, token_indices: Sequence[int]) -> np.ndarray:
@@ -1299,6 +1410,10 @@ def extract_features_from_model(
 
     features: List[np.ndarray] = []
     rows: List[Dict[str, Any]] = []
+    debug_intent_focus_enabled = bool(args.debug_intent_focus) and str(args.feature_source) == "intent_generation"
+    debug_intent_focus_limit = max(1, int(args.debug_intent_focus_limit))
+    debug_intent_focus_context = max(0, int(args.debug_intent_focus_context_chars))
+    debug_intent_focus_count = 0
 
     batch_iter = tqdm(
         loader,
@@ -1336,6 +1451,7 @@ def extract_features_from_model(
             intent_lookup_label_source = "n/a"
             intent_lookup_scenario = ""
             intent_lookup_action = ""
+            intent_debug_payload: Optional[Dict[str, Any]] = None
             if args.feature_source == "intent_generation":
                 gen_kwargs: Dict[str, Any] = dict(one)
                 gen_kwargs["max_new_tokens"] = max(1, int(args.intent_max_new_tokens))
@@ -1396,6 +1512,37 @@ def extract_features_from_model(
                     )
                     intent_token_count = int(len(selected_local))
                     selected_global = [prompt_len + int(i) for i in selected_local]
+                    if debug_intent_focus_enabled and debug_intent_focus_count < debug_intent_focus_limit:
+                        intent_debug_payload = _build_intent_focus_debug_payload(
+                            tokenizer=tokenizer,
+                            generated_ids=generated_ids,
+                            selected_local=selected_local,
+                            selected_global=selected_global,
+                            context_chars=debug_intent_focus_context,
+                        )
+                        intent_debug_payload.update({
+                            "debug_status": "ok",
+                            "span_source": str(span_source),
+                            "lookup_label_source": str(intent_lookup_label_source),
+                            "lookup_scenario": str(intent_lookup_scenario),
+                            "lookup_action": str(intent_lookup_action),
+                            "gold_scenario": str(scenario),
+                            "gold_action": str(action),
+                            "gold_intent": str(intent),
+                        })
+                        debug_intent_focus_count += 1
+                        if show_progress:
+                            preview_obj = {
+                                "id": str(item.get("id", "")),
+                                "file": str(item.get("file", "")),
+                                "slurp_id": str(item.get("slurp_id", "")),
+                                "gold_intent": str(intent),
+                                "lookup": f"{intent_lookup_scenario}_{intent_lookup_action}" if intent_lookup_scenario and intent_lookup_action else "",
+                                "span_source": str(span_source),
+                                "token_count": int(intent_debug_payload.get("selected_token_count", 0)),
+                                "focus_preview": str(intent_debug_payload.get("focus_preview", "")),
+                            }
+                            print("[intent-focus-debug] " + json.dumps(preview_obj, ensure_ascii=False))
 
                     full_inputs: Dict[str, Any] = dict(one)
                     full_inputs["input_ids"] = sequences.to(device)
@@ -1414,6 +1561,36 @@ def extract_features_from_model(
                     vec = _pool_hidden_at_indices(hidden, selected_global)
                 else:
                     # If no new token is generated, fallback to prompt representation.
+                    if debug_intent_focus_enabled and debug_intent_focus_count < debug_intent_focus_limit:
+                        intent_debug_payload = {
+                            "debug_status": "no_new_token_generated",
+                            "span_source": "prompt_fallback_no_generation",
+                            "lookup_label_source": str(intent_lookup_label_source),
+                            "lookup_scenario": str(intent_lookup_scenario),
+                            "lookup_action": str(intent_lookup_action),
+                            "gold_scenario": str(scenario),
+                            "gold_action": str(action),
+                            "gold_intent": str(intent),
+                            "generated_text": "",
+                            "focus_preview": "",
+                            "selected_local_indices": [],
+                            "selected_global_indices": [],
+                            "selected_char_ranges": [],
+                            "selected_tokens": [],
+                            "selected_token_count": 0,
+                            "selected_token_dump_truncated": False,
+                        }
+                        debug_intent_focus_count += 1
+                        if show_progress:
+                            preview_obj = {
+                                "id": str(item.get("id", "")),
+                                "file": str(item.get("file", "")),
+                                "slurp_id": str(item.get("slurp_id", "")),
+                                "gold_intent": str(intent),
+                                "span_source": "prompt_fallback_no_generation",
+                                "note": "no token generated; used prompt pooling fallback",
+                            }
+                            print("[intent-focus-debug] " + json.dumps(preview_obj, ensure_ascii=False))
                     kwargs = dict(one)
                     kwargs["output_hidden_states"] = True
                     kwargs["return_dict"] = True
@@ -1433,7 +1610,7 @@ def extract_features_from_model(
             if args.l2_normalize:
                 vec = _l2_normalize_rows(vec.reshape(1, -1))[0]
 
-            rows.append({
+            row_obj = {
                 "_global_index": int(item.get("_global_index")) if item.get("_global_index") is not None else None,
                 "id": str(item.get("id", "")),
                 "slurp_id": str(item.get("slurp_id", "")),
@@ -1451,7 +1628,10 @@ def extract_features_from_model(
                 "intent_lookup_action": intent_lookup_action,
                 "intent_span_source": span_source,
                 "intent_token_count": int(intent_token_count),
-            })
+            }
+            if intent_debug_payload is not None:
+                row_obj["intent_debug"] = intent_debug_payload
+            rows.append(row_obj)
             features.append(vec.astype(np.float32))
         if hasattr(batch_iter, "set_postfix"):
             batch_iter.set_postfix(extracted=len(features), refresh=False)
@@ -1657,6 +1837,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--intent-max-new-tokens", type=int, default=256,
                         help="feature-source=intent_generation 時の生成長上限")
+    parser.add_argument(
+        "--debug-intent-focus",
+        action="store_true",
+        help="feature-source=intent_generation 時に、特徴量抽出で着目した生成トークン周辺を表示・保存する",
+    )
+    parser.add_argument(
+        "--debug-intent-focus-limit",
+        type=int,
+        default=20,
+        help="intent focus デバッグを何サンプル分まで出力するか (default: 20)",
+    )
+    parser.add_argument(
+        "--debug-intent-focus-context-chars",
+        type=int,
+        default=80,
+        help="intent focus プレビューの前後文脈文字数 (default: 80)",
+    )
     parser.add_argument("--l2-normalize", action="store_true", help="L2 normalize each feature vector.")
     parser.add_argument("--embeddings", type=str, default="pca,tsne,umap",
                         help="2D embeddings to compute (comma): pca,tsne,umap")
@@ -1718,8 +1915,14 @@ def main() -> None:
             args.task_mode = "json_only"
         if int(args.intent_max_new_tokens) <= 0:
             raise SystemExit("ERROR: --intent-max-new-tokens must be > 0.")
+        if int(args.debug_intent_focus_limit) <= 0:
+            raise SystemExit("ERROR: --debug-intent-focus-limit must be > 0.")
+        if int(args.debug_intent_focus_context_chars) < 0:
+            raise SystemExit("ERROR: --debug-intent-focus-context-chars must be >= 0.")
         if float(args.heatmap_gamma) <= 0:
             raise SystemExit("ERROR: --heatmap-gamma must be > 0.")
+        if args.debug_intent_focus and args.feature_source != "intent_generation" and _is_main_process():
+            print("WARNING: --debug-intent-focus is effective only with --feature-source intent_generation.", file=sys.stderr)
         if args.pipeline == "multitask" and _is_main_process():
             print(f"Multitask task_mode: {args.task_mode}")
         if args.all_intents:
@@ -2014,6 +2217,32 @@ def main() -> None:
             pca_explained_ratio=explained_ratio,
             projection_indices=viz_indices,
         )
+        intent_focus_debug_path: Optional[str] = None
+        intent_focus_debug_rows: List[Dict[str, Any]] = []
+        if bool(args.debug_intent_focus):
+            for row in rows:
+                dbg = row.get("intent_debug")
+                if not isinstance(dbg, dict):
+                    continue
+                intent_focus_debug_rows.append({
+                    "id": str(row.get("id", "")),
+                    "slurp_id": str(row.get("slurp_id", "")),
+                    "file": str(row.get("file", "")),
+                    "intent": str(row.get("intent", "")),
+                    "intent_span_source": str(row.get("intent_span_source", "")),
+                    "intent_token_count": int(row.get("intent_token_count", 0)),
+                    "intent_lookup_label_source": str(row.get("intent_lookup_label_source", "")),
+                    "intent_lookup_scenario": str(row.get("intent_lookup_scenario", "")),
+                    "intent_lookup_action": str(row.get("intent_lookup_action", "")),
+                    "intent_debug": dbg,
+                })
+            if intent_focus_debug_rows:
+                intent_focus_debug_path = os.path.join(out_dir, "intent_focus_debug.jsonl")
+                _write_jsonl(intent_focus_debug_path, intent_focus_debug_rows)
+                print(
+                    f"Saved intent focus debug: rows={len(intent_focus_debug_rows)} "
+                    f"path={intent_focus_debug_path}"
+                )
 
         config = {
             "model_name_or_path": args.model_name_or_path,
@@ -2026,6 +2255,11 @@ def main() -> None:
             "layer_index": int(args.layer_index),
             "feature_source": str(args.feature_source),
             "intent_max_new_tokens": int(args.intent_max_new_tokens),
+            "debug_intent_focus": bool(args.debug_intent_focus),
+            "debug_intent_focus_limit": int(args.debug_intent_focus_limit),
+            "debug_intent_focus_context_chars": int(args.debug_intent_focus_context_chars),
+            "debug_intent_focus_rows": int(len(intent_focus_debug_rows)),
+            "debug_intent_focus_file": intent_focus_debug_path,
             "label_source": "gold",
             "l2_normalize": bool(effective_l2_normalize),
             "min_intent_samples": int(args.min_intent_samples),
@@ -2148,6 +2382,8 @@ def main() -> None:
         print(f"Saved analysis dir: {out_dir}")
         print(f"- {os.path.join(out_dir, 'features.npz')}")
         print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
+        if intent_focus_debug_path:
+            print(f"- {intent_focus_debug_path}")
         print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
         print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
         print(f"- {os.path.join(out_dir, 'intent_mean_distance_ranking.csv')}")
