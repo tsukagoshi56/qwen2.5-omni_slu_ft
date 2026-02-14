@@ -44,6 +44,10 @@ try:
     from transformers import AudioFlamingo3ForConditionalGeneration
 except Exception:  # pragma: no cover
     AudioFlamingo3ForConditionalGeneration = None
+try:
+    from transformers import AutoModelForImageTextToText
+except Exception:  # pragma: no cover
+    AutoModelForImageTextToText = None
 from common import build_db_definitions, load_metadata
 
 try:
@@ -209,8 +213,16 @@ def load_audio_model_from_pretrained(
             cls_forward = getattr(type(model), "forward", None)
         except Exception:
             return False
+        if cls_forward is None:
+            return True
         base_forward = getattr(torch.nn.Module, "forward", None)
-        return cls_forward is base_forward
+        if cls_forward is base_forward:
+            return True
+        fwd_name = getattr(cls_forward, "__name__", "")
+        fwd_qualname = getattr(cls_forward, "__qualname__", "")
+        if fwd_name == "_forward_unimplemented" or "_forward_unimplemented" in fwd_qualname:
+            return True
+        return False
 
     def _optional_transformers_class(*names: str) -> Optional[Any]:
         for name in names:
@@ -243,6 +255,8 @@ def load_audio_model_from_pretrained(
         is_qwen_omni = "omni" in model_name_lc
         if is_qwen_omni:
             qwen_omni_cls = _optional_transformers_class(
+                "Qwen2_5OmniThinkerForConditionalGeneration",
+                "Qwen2_5OmniThinkerForCausalLM",
                 "Qwen2_5OmniForConditionalGeneration",
                 "Qwen2_5OmniForCausalLM",
                 "Qwen2OmniForConditionalGeneration",
@@ -261,6 +275,12 @@ def load_audio_model_from_pretrained(
                 Qwen2AudioForConditionalGeneration,
                 seen_loader_ids,
             )
+        _append_attempt(
+            qwen_attempts,
+            "AutoModelForImageTextToText",
+            AutoModelForImageTextToText,
+            seen_loader_ids,
+        )
         _append_attempt(qwen_attempts, "AutoModelForCausalLM", AutoModelForCausalLM, seen_loader_ids)
         _append_attempt(qwen_attempts, "AutoModel", AutoModel, seen_loader_ids)
 
