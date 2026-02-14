@@ -373,35 +373,130 @@ def _generate_sequences_with_retry(model: Any, kwargs: Dict[str, Any], max_retry
     raise RuntimeError("generate() retry limit exceeded while dropping unsupported kwargs.")
 
 
+def _get_dict_value_ci(obj: Dict[str, Any], *names: str) -> Any:
+    if not isinstance(obj, dict):
+        return None
+    for name in names:
+        if name in obj:
+            return obj[name]
+    lowered: Dict[str, Any] = {}
+    for k, v in obj.items():
+        lowered[str(k).strip().lower()] = v
+    for name in names:
+        key = str(name).strip().lower()
+        if key in lowered:
+            return lowered[key]
+    return None
+
+
+def _clean_json_text(text: str) -> str:
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    match = re.search(r"```json\s*(.*?)\s*```", t, re.DOTALL | re.IGNORECASE)
+    if match:
+        return str(match.group(1)).strip()
+    match = re.search(r"```\s*(.*?)\s*```", t, re.DOTALL)
+    if match:
+        return str(match.group(1)).strip()
+    return t
+
+
+def _extract_labeled_tail(text: str, labels: Sequence[str]) -> str:
+    t = str(text or "")
+    if not t:
+        return ""
+    for label in labels:
+        pattern = rf"(?is)(?:^|\n)\s*{re.escape(str(label))}\s*[:：]\s*(.+)$"
+        m = re.search(pattern, t)
+        if m:
+            return str(m.group(1)).strip()
+    return ""
+
+
+def _parse_first_json_dict(text: str) -> Optional[Dict[str, Any]]:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return None
+    decoder = json.JSONDecoder()
+    for probe in (_clean_json_text(candidate), candidate):
+        probe = str(probe or "").strip()
+        if not probe:
+            continue
+        normalized_probe = probe.replace("{{", "{").replace("}}", "}")
+        for target in (probe, normalized_probe):
+            try:
+                obj = json.loads(target)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+            for m in re.finditer(r"\{", target):
+                start = int(m.start())
+                try:
+                    obj, _ = decoder.raw_decode(target[start:])
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    return obj
+    return None
+
+
+def _unwrap_label_wrappers(obj: Dict[str, Any]) -> Dict[str, Any]:
+    parsed = obj
+    for key in ("final", "Final", "j", "J", "output", "prediction", "result"):
+        wrapped = _get_dict_value_ci(parsed, key)
+        if isinstance(wrapped, dict):
+            parsed = wrapped
+    return parsed
+
+
+def _is_error_label_pair(scenario: str, action: str) -> bool:
+    s = str(scenario or "").strip().lower()
+    a = str(action or "").strip().lower()
+    return s == "error" and a == "error"
+
+
+def _is_valid_label_pair(scenario: str, action: str) -> bool:
+    s = str(scenario or "").strip().lower()
+    a = str(action or "").strip().lower()
+    if not s or not a:
+        return False
+    if _is_error_label_pair(s, a):
+        return False
+    return True
+
+
 def _extract_label_from_json_obj(obj: Dict[str, Any]) -> Tuple[str, str]:
-    scenario = str(obj.get("scenario", obj.get("Scenario", "")) or "").strip().lower()
-    action = str(obj.get("action", obj.get("Action", "")) or "").strip().lower()
+    if not isinstance(obj, dict):
+        return "", ""
+    parsed = _unwrap_label_wrappers(obj)
+    scenario = str(_get_dict_value_ci(parsed, "scenario", "state") or "").strip().lower()
+    action = str(_get_dict_value_ci(parsed, "action") or "").strip().lower()
     if not scenario and not action:
-        intent = str(obj.get("intent", obj.get("Intent", "")) or "").strip().lower()
+        intent = str(_get_dict_value_ci(parsed, "intent") or "").strip().lower()
         if "_" in intent:
             scenario, action = intent.split("_", 1)
+        elif intent:
+            action = intent
     return scenario, action
 
 
 def _parse_label_from_target_text(target_text: str) -> Tuple[str, str]:
     text = str(target_text or "")
-    for line in reversed(text.splitlines()):
-        s = line.strip()
-        if not s.startswith("J:"):
-            continue
-        payload = s[2:].strip()
-        try:
-            obj = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            return _extract_label_from_json_obj(obj)
-    try:
-        obj = json.loads(text.strip())
-    except json.JSONDecodeError:
+    if not text.strip():
         return "", ""
-    if isinstance(obj, dict):
-        return _extract_label_from_json_obj(obj)
+    probes: List[str] = []
+    j_tail = _extract_labeled_tail(text, ["J", "SLU", "FINAL", "Final", "Output"])
+    if j_tail:
+        probes.append(j_tail)
+    probes.append(text)
+    for probe in probes:
+        parsed = _parse_first_json_dict(probe)
+        if isinstance(parsed, dict):
+            s, a = _extract_label_from_json_obj(parsed)
+            if _is_valid_label_pair(s, a):
+                return s, a
     return "", ""
 
 
@@ -541,56 +636,61 @@ def _find_json_key_value_span(text: str, key: str, value: str) -> Optional[Tuple
     return int(match.start(1)), int(match.end(1))
 
 
+def _select_token_indices_from_spans(
+    offsets: Sequence[Tuple[int, int]],
+    spans: Sequence[Tuple[int, int]],
+) -> List[int]:
+    selected: List[int] = []
+    for a, b in spans:
+        selected.extend([i for i, (s, e) in enumerate(offsets) if e > a and s < b and e > s])
+    return sorted(set(selected))
+
+
 def _select_generated_intent_token_indices(
     tokenizer: Any,
     generated_ids: Sequence[int],
     intent_label: str,
     scenario: str = "",
     action: str = "",
-) -> Tuple[List[int], str]:
+) -> Tuple[List[int], str, List[int], List[int]]:
     output_text, offsets = _decode_text_and_offsets(tokenizer, generated_ids)
     candidate_idxs = [i for i, (s, e) in enumerate(offsets) if e > s]
 
-    spans: List[Tuple[int, int]] = []
-    span_source = ""
+    scenario_spans: List[Tuple[int, int]] = []
+    action_spans: List[Tuple[int, int]] = []
 
     s_span = _find_json_key_value_span(output_text, "scenario", scenario)
-    a_span = _find_json_key_value_span(output_text, "action", action)
+    if s_span is None:
+        s_span = _find_json_key_value_span(output_text, "state", scenario)
     if s_span is not None:
-        spans.append(s_span)
+        scenario_spans.append(s_span)
+    a_span = _find_json_key_value_span(output_text, "action", action)
     if a_span is not None:
-        spans.append(a_span)
-    if spans:
-        span_source = "scenario_action_keys"
-    else:
-        span = _find_span_case_insensitive(output_text, intent_label)
-        if span is not None:
-            spans = [span]
-            span_source = "intent_label"
-        else:
-            span = _find_j_line_span(output_text)
-            if span is not None:
-                spans = [span]
-                span_source = "j_line"
+        action_spans.append(a_span)
 
-    if not spans:
-        if candidate_idxs:
-            return candidate_idxs, "full_generated"
-        if offsets:
-            return [max(0, len(offsets) - 1)], "fallback_last"
-        return [], "empty_generated"
+    scenario_selected = _select_token_indices_from_spans(offsets, scenario_spans)
+    action_selected = _select_token_indices_from_spans(offsets, action_spans)
+    if scenario_selected or action_selected:
+        selected = sorted(set(scenario_selected + action_selected))
+        return selected, "scenario_action_keys", scenario_selected, action_selected
 
-    selected: List[int] = []
-    for a, b in spans:
-        selected.extend([i for i, (s, e) in enumerate(offsets) if e > a and s < b and e > s])
-    selected = sorted(set(selected))
-    if selected:
-        return selected, span_source
+    span = _find_span_case_insensitive(output_text, intent_label)
+    if span is not None:
+        selected = _select_token_indices_from_spans(offsets, [span])
+        if selected:
+            return selected, "intent_label", [], []
+
+    span = _find_j_line_span(output_text)
+    if span is not None:
+        selected = _select_token_indices_from_spans(offsets, [span])
+        if selected:
+            return selected, "j_line", [], []
+
     if candidate_idxs:
-        return candidate_idxs, "full_generated"
+        return candidate_idxs, "full_generated", [], []
     if offsets:
-        return [max(0, len(offsets) - 1)], "fallback_last"
-    return [], "empty_generated"
+        return [max(0, len(offsets) - 1)], "fallback_last", [], []
+    return [], "empty_generated", [], []
 
 
 def _merge_spans(spans: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
@@ -662,6 +762,8 @@ def _build_intent_focus_debug_payload(
     generated_ids: Sequence[int],
     selected_local: Sequence[int],
     selected_global: Sequence[int],
+    scenario_local: Optional[Sequence[int]] = None,
+    action_local: Optional[Sequence[int]] = None,
     context_chars: int = 80,
     max_token_dump: int = 64,
 ) -> Dict[str, Any]:
@@ -671,6 +773,14 @@ def _build_intent_focus_debug_payload(
     preview = _build_highlight_preview(output_text, ranges, context_chars=context_chars)
     selected_segments = [output_text[a:b] for a, b in ranges if 0 <= a < b <= len(output_text)]
     selected_text = " | ".join(seg for seg in selected_segments if seg)
+    scenario_sel = sorted(set(int(i) for i in (scenario_local or []) if 0 <= int(i) < len(offsets)))
+    action_sel = sorted(set(int(i) for i in (action_local or []) if 0 <= int(i) < len(offsets)))
+    scenario_ranges = [offsets[i] for i in scenario_sel]
+    action_ranges = [offsets[i] for i in action_sel]
+    scenario_segments = [output_text[a:b] for a, b in scenario_ranges if 0 <= a < b <= len(output_text)]
+    action_segments = [output_text[a:b] for a, b in action_ranges if 0 <= a < b <= len(output_text)]
+    scenario_text = " | ".join(seg for seg in scenario_segments if seg)
+    action_text = " | ".join(seg for seg in action_segments if seg)
 
     token_dump: List[Dict[str, Any]] = []
     token_cap = max(0, int(max_token_dump))
@@ -696,6 +806,12 @@ def _build_intent_focus_debug_payload(
         "selected_tokens": token_dump,
         "selected_token_count": int(len(sel)),
         "selected_token_dump_truncated": bool(len(sel) > token_cap),
+        "selected_scenario_local_indices": [int(i) for i in scenario_sel],
+        "selected_action_local_indices": [int(i) for i in action_sel],
+        "selected_scenario_char_ranges": [[int(a), int(b)] for a, b in scenario_ranges],
+        "selected_action_char_ranges": [[int(a), int(b)] for a, b in action_ranges],
+        "selected_scenario_text": scenario_text,
+        "selected_action_text": action_text,
     }
     return payload
 
@@ -712,6 +828,25 @@ def _pool_hidden_at_indices(hidden: torch.Tensor, token_indices: Sequence[int]) 
             idx = torch.tensor([hidden.shape[1] - 1], device=hidden.device, dtype=torch.long)
     vec = hidden[0, idx].mean(dim=0)
     return vec.detach().float().cpu().numpy()
+
+
+def _pool_intent_from_components(
+    hidden: torch.Tensor,
+    selected_global: Sequence[int],
+    scenario_global: Sequence[int],
+    action_global: Sequence[int],
+) -> Tuple[np.ndarray, str]:
+    has_s = bool(scenario_global)
+    has_a = bool(action_global)
+    if has_s and has_a:
+        scenario_vec = _pool_hidden_at_indices(hidden, scenario_global)
+        action_vec = _pool_hidden_at_indices(hidden, action_global)
+        return ((scenario_vec + action_vec) * 0.5).astype(np.float32), "scenario_action_mean"
+    if has_s:
+        return _pool_hidden_at_indices(hidden, scenario_global).astype(np.float32), "scenario_only"
+    if has_a:
+        return _pool_hidden_at_indices(hidden, action_global).astype(np.float32), "action_only"
+    return _pool_hidden_at_indices(hidden, selected_global).astype(np.float32), "token_span_mean"
 
 
 def pool_feature(
@@ -1487,6 +1622,7 @@ def extract_features_from_model(
             one = _filter_inputs_by_forward_signature(model, one)
 
             span_source = "prompt_pool"
+            intent_component_pooling = "prompt_pool"
             intent_token_count = 0
             intent_lookup_label_source = "n/a"
             intent_lookup_scenario = ""
@@ -1522,20 +1658,24 @@ def extract_features_from_model(
                             pred = parse_fn(generated_text)
                             if isinstance(pred, dict):
                                 ps, pa = _extract_label_from_json_obj(pred)
-                                if ps and pa:
+                                if _is_valid_label_pair(ps, pa):
                                     lookup_scenario, lookup_action = ps, pa
                                     intent_lookup_label_source = "predicted"
                         except Exception:
                             pass
-                    if not lookup_scenario or not lookup_action:
+                    if not _is_valid_label_pair(lookup_scenario, lookup_action):
+                        lookup_scenario = ""
+                        lookup_action = ""
                         ps, pa = _parse_label_from_target_text(generated_text)
-                        if ps and pa:
+                        if _is_valid_label_pair(ps, pa):
                             lookup_scenario, lookup_action = ps, pa
-                            intent_lookup_label_source = "predicted"
-                    if (not lookup_scenario or not lookup_action) and scenario and action:
+                            intent_lookup_label_source = "predicted_fallback_parser"
+                    if (not _is_valid_label_pair(lookup_scenario, lookup_action)) and scenario and action:
                         lookup_scenario, lookup_action = scenario, action
                         intent_lookup_label_source = "gold_fallback"
-                    if not lookup_scenario or not lookup_action:
+                    if not _is_valid_label_pair(lookup_scenario, lookup_action):
+                        lookup_scenario = ""
+                        lookup_action = ""
                         intent_lookup_label_source = "none"
                     intent_lookup_scenario = lookup_scenario
                     intent_lookup_action = lookup_action
@@ -1543,7 +1683,7 @@ def extract_features_from_model(
                         f"{lookup_scenario}_{lookup_action}" if lookup_scenario and lookup_action else ""
                     )
 
-                    selected_local, span_source = _select_generated_intent_token_indices(
+                    selected_local, span_source, scenario_local, action_local = _select_generated_intent_token_indices(
                         tokenizer=tokenizer,
                         generated_ids=generated_ids,
                         intent_label=lookup_intent_label,
@@ -1552,12 +1692,16 @@ def extract_features_from_model(
                     )
                     intent_token_count = int(len(selected_local))
                     selected_global = [prompt_len + int(i) for i in selected_local]
+                    scenario_global = [prompt_len + int(i) for i in scenario_local]
+                    action_global = [prompt_len + int(i) for i in action_local]
                     if debug_intent_focus_enabled and debug_intent_focus_count < debug_intent_focus_limit:
                         intent_debug_payload = _build_intent_focus_debug_payload(
                             tokenizer=tokenizer,
                             generated_ids=generated_ids,
                             selected_local=selected_local,
                             selected_global=selected_global,
+                            scenario_local=scenario_local,
+                            action_local=action_local,
                             context_chars=debug_intent_focus_context,
                         )
                         intent_debug_payload.update({
@@ -1575,8 +1719,15 @@ def extract_features_from_model(
                             if intent_lookup_scenario and intent_lookup_action
                             else (str(intent) if str(intent) else "__unknown__")
                         )
+                        scenario_text = str(intent_debug_payload.get("selected_scenario_text", "") or "")
+                        action_text = str(intent_debug_payload.get("selected_action_text", "") or "")
                         selected_text = str(intent_debug_payload.get("selected_text", "") or "")
-                        if selected_text:
+                        if scenario_text and action_text:
+                            intent_debug_payload["focus_statement"] = (
+                                f"Intent: {focus_intent} のうち scenario(state)='{scenario_text}' と action='{action_text}' "
+                                "の区間ベクトルを平均して Intent ベクトルを抽出"
+                            )
+                        elif selected_text:
                             intent_debug_payload["focus_statement"] = (
                                 f"Intent: {focus_intent} の区間 '{selected_text}' のベクトルを平均抽出"
                             )
@@ -1596,6 +1747,8 @@ def extract_features_from_model(
                                 "span_source": str(span_source),
                                 "token_count": int(intent_debug_payload.get("selected_token_count", 0)),
                                 "selected_text": str(intent_debug_payload.get("selected_text", "")),
+                                "selected_scenario_text": str(intent_debug_payload.get("selected_scenario_text", "")),
+                                "selected_action_text": str(intent_debug_payload.get("selected_action_text", "")),
                                 "focus_preview": str(intent_debug_payload.get("focus_preview", "")),
                             }
                             print("[intent-focus-debug-detail] " + json.dumps(preview_obj, ensure_ascii=False))
@@ -1614,7 +1767,14 @@ def extract_features_from_model(
                     kwargs["use_cache"] = False
                     outputs = _forward_with_retry(model, kwargs)
                     hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
-                    vec = _pool_hidden_at_indices(hidden, selected_global)
+                    vec, intent_component_pooling = _pool_intent_from_components(
+                        hidden=hidden,
+                        selected_global=selected_global,
+                        scenario_global=scenario_global,
+                        action_global=action_global,
+                    )
+                    if intent_debug_payload is not None:
+                        intent_debug_payload["component_pooling"] = str(intent_component_pooling)
                 else:
                     # If no new token is generated, fallback to prompt representation.
                     if debug_intent_focus_enabled and debug_intent_focus_count < debug_intent_focus_limit:
@@ -1637,6 +1797,13 @@ def extract_features_from_model(
                             "selected_tokens": [],
                             "selected_token_count": 0,
                             "selected_token_dump_truncated": False,
+                            "selected_scenario_local_indices": [],
+                            "selected_action_local_indices": [],
+                            "selected_scenario_char_ranges": [],
+                            "selected_action_char_ranges": [],
+                            "selected_scenario_text": "",
+                            "selected_action_text": "",
+                            "component_pooling": "prompt_pool_fallback_no_generation",
                             "focus_statement": (
                                 f"Intent: {intent if intent else '__unknown__'} は生成トークンが無いため、"
                                 "プロンプト表現へフォールバックしてベクトルを抽出"
@@ -1662,6 +1829,7 @@ def extract_features_from_model(
                     hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
                     vec = pool_feature(hidden, one.get("attention_mask"), args.pooling)
                     span_source = "prompt_fallback_no_generation"
+                    intent_component_pooling = "prompt_pool_fallback_no_generation"
             else:
                 kwargs = dict(one)
                 kwargs["output_hidden_states"] = True
@@ -1670,6 +1838,7 @@ def extract_features_from_model(
                 outputs = _forward_with_retry(model, kwargs)
                 hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
                 vec = pool_feature(hidden, one.get("attention_mask"), args.pooling)
+                intent_component_pooling = "prompt_pool"
             if args.l2_normalize:
                 vec = _l2_normalize_rows(vec.reshape(1, -1))[0]
 
@@ -1690,6 +1859,7 @@ def extract_features_from_model(
                 "intent_lookup_scenario": intent_lookup_scenario,
                 "intent_lookup_action": intent_lookup_action,
                 "intent_span_source": span_source,
+                "intent_component_pooling": intent_component_pooling,
                 "intent_token_count": int(intent_token_count),
                 "target_components": str(item.get("target_components", "")),
             }
