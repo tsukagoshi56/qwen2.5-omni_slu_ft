@@ -2490,10 +2490,12 @@ class SmartCollator:
     debug: bool = False
     _print_count: int = 0
     _audio_fallback_warn_count: int = 0
+    _feature_mask_synth_warn_count: int = 0
 
     def __post_init__(self):
         self._print_count = 0
         self._audio_fallback_warn_count = 0
+        self._feature_mask_synth_warn_count = 0
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         if len(batch) == 0:
@@ -2554,22 +2556,37 @@ class SmartCollator:
                 self._print_count += 1
 
             try:
-                inputs = _call_processor_with_audio_or_raise(
-                    self.processor,
+                # Prefer the legacy signature first because it was stable for Flamingo training.
+                inputs = self.processor(
                     text=full_text,
-                    audio=audio,
+                    audio=[audio],
                     sampling_rate=sr,
-                    padding=False,
+                    return_tensors="pt",
                 )
-                prompt_inputs = _call_processor_with_audio_or_raise(
-                    self.processor,
+                prompt_inputs = self.processor(
                     text=text_input,
-                    audio=audio,
+                    audio=[audio],
                     sampling_rate=sr,
-                    padding=False,
+                    return_tensors="pt",
                 )
             except Exception:
-                continue
+                try:
+                    inputs = _call_processor_with_audio_or_raise(
+                        self.processor,
+                        text=full_text,
+                        audio=audio,
+                        sampling_rate=sr,
+                        padding=False,
+                    )
+                    prompt_inputs = _call_processor_with_audio_or_raise(
+                        self.processor,
+                        text=text_input,
+                        audio=audio,
+                        sampling_rate=sr,
+                        padding=False,
+                    )
+                except Exception:
+                    continue
             prompt_len = prompt_inputs["input_ids"].shape[1]
 
             ids = inputs["input_ids"][0]
@@ -2589,10 +2606,24 @@ class SmartCollator:
                 f_mask = inputs["input_features_mask"]
             elif "feature_attention_mask" in inputs:
                 f_mask = inputs["feature_attention_mask"]
+
             if f_mask is not None:
                 while f_mask.dim() > 1:
                     f_mask = f_mask.squeeze(0)
-                feature_mask_list.append(f_mask)
+            # Always keep feature masks aligned to features count.
+            # Processor outputs can be mixed (some samples return a mask, some don't).
+            inferred_tlen = int(max(feat.shape)) if feat.dim() >= 2 else int(feat.shape[0])
+            if f_mask is None or int(f_mask.shape[0]) != inferred_tlen:
+                if self._feature_mask_synth_warn_count < 20:
+                    logger.warning(
+                        "Synthesizing feature mask for sample id=%s (mask_missing_or_mismatch).",
+                        item.get("id"),
+                    )
+                    self._feature_mask_synth_warn_count += 1
+                f_mask = torch.ones(inferred_tlen, dtype=torch.long, device=feat.device)
+            else:
+                f_mask = f_mask.to(device=feat.device, dtype=torch.long)
+            feature_mask_list.append(f_mask)
 
         if not input_ids_list:
             # Keep training alive when every audio sample in this batch fails decoding/processor parsing.
@@ -2607,14 +2638,7 @@ class SmartCollator:
             text_fallback_batch = [{**item, "audio_path": None} for item in batch]
             return self._collate_text(text_fallback_batch)
 
-        if feature_mask_list:
-            feature_attention_mask = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
-        else:
-            feature_attention_mask = pad_sequence(
-                [torch.ones(feat.shape[0], dtype=torch.long) for feat in input_features_list],
-                batch_first=True,
-                padding_value=0,
-            )
+        feature_attention_mask = pad_sequence(feature_mask_list, batch_first=True, padding_value=0)
 
         return {
             "input_ids": pad_sequence(
