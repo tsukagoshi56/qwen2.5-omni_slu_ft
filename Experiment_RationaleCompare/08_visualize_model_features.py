@@ -70,6 +70,24 @@ Examples:
       --model_name_or_path outputs/qwen_rationale_label_ft \
       --pipeline sft \
       --task-mode cot
+
+    # Attention Density Analysis (multitask: cot vs label)
+    python 08_visualize_model_features.py \
+      --multitask \
+      --model_name_or_path outputs/qwen_rationale_label_ft_multitask \
+      --attention-density-analysis \
+      --attention-density-only \
+      --density-task-a cot \
+      --density-task-b label
+
+    # Attention Density Analysis (sft: CRJ vs J)
+    python 08_visualize_model_features.py \
+      --sft \
+      --model_name_or_path outputs/qwen_rationale_label_ft \
+      --attention-density-analysis \
+      --attention-density-only \
+      --density-components-a CRJ \
+      --density-components-b J
 """
 
 import argparse
@@ -1005,6 +1023,539 @@ def _pairwise_euclidean(x: np.ndarray) -> np.ndarray:
     return np.linalg.norm(diff, axis=2).astype(np.float32)
 
 
+def _pairwise_cosine_similarity(x: np.ndarray) -> np.ndarray:
+    if x.shape[0] == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    x_norm = _l2_normalize_rows(x.astype(np.float32, copy=False))
+    sim = np.matmul(x_norm, x_norm.T).astype(np.float32)
+    np.clip(sim, -1.0, 1.0, out=sim)
+    return sim
+
+
+def _pairwise_cosine_distance(x: np.ndarray) -> np.ndarray:
+    sim = _pairwise_cosine_similarity(x)
+    dist = (1.0 - sim).astype(np.float32)
+    if dist.size > 0:
+        np.fill_diagonal(dist, 0.0)
+    return dist
+
+
+def _collect_valid_intents(
+    intents: Sequence[str],
+    min_intent_samples: int,
+    include_unknown: bool,
+) -> Tuple[Counter, List[str]]:
+    counts = Counter(intents)
+    valid_intents = [
+        intent
+        for intent, c in counts.items()
+        if (include_unknown or intent != "__unknown__") and c >= int(max(1, min_intent_samples))
+    ]
+    valid_intents.sort(key=lambda x: (-counts[x], x))
+    return counts, valid_intents
+
+
+def _sample_indices_for_metric(
+    labels: np.ndarray,
+    max_samples: int,
+    random_state: int,
+) -> Tuple[np.ndarray, bool]:
+    n = int(labels.shape[0])
+    cap = int(max_samples)
+    if cap <= 0 or n <= cap:
+        return np.arange(n, dtype=np.int64), False
+
+    rng = np.random.default_rng(int(random_state))
+    unique = np.unique(labels)
+    n_classes = int(unique.shape[0])
+    if n_classes <= 0:
+        return np.arange(0, dtype=np.int64), False
+
+    selected = np.zeros(n, dtype=bool)
+    picks: List[int] = []
+
+    if n_classes >= cap:
+        chosen_classes = rng.choice(unique, size=cap, replace=False)
+        for cls in chosen_classes.tolist():
+            idxs = np.where(labels == cls)[0]
+            if idxs.size == 0:
+                continue
+            pick = int(rng.choice(idxs))
+            picks.append(pick)
+        out = np.asarray(sorted(set(picks)), dtype=np.int64)
+        return out, True
+
+    for cls in unique.tolist():
+        idxs = np.where(labels == cls)[0]
+        if idxs.size == 0:
+            continue
+        pick = int(rng.choice(idxs))
+        if not selected[pick]:
+            selected[pick] = True
+            picks.append(pick)
+
+    remaining = cap - len(picks)
+    if remaining > 0:
+        pool = np.where(~selected)[0]
+        if pool.size > 0:
+            extra = rng.choice(pool, size=min(remaining, int(pool.size)), replace=False)
+            for x in extra.tolist():
+                selected[int(x)] = True
+            picks.extend(int(x) for x in extra.tolist())
+
+    out = np.asarray(sorted(set(picks)), dtype=np.int64)
+    return out, True
+
+
+def _silhouette_from_distance_matrix(
+    dist: np.ndarray,
+    labels: np.ndarray,
+) -> Optional[float]:
+    n = int(labels.shape[0])
+    if n <= 1:
+        return None
+    unique = np.unique(labels)
+    if unique.size <= 1:
+        return None
+
+    class_indices: Dict[int, np.ndarray] = {}
+    for cls in unique.tolist():
+        class_indices[int(cls)] = np.where(labels == cls)[0]
+
+    vals: List[float] = []
+    for i in range(n):
+        cls = int(labels[i])
+        same = class_indices.get(cls, np.asarray([], dtype=np.int64))
+        if same.size <= 1:
+            vals.append(0.0)
+            continue
+
+        a = float((dist[i, same].sum()) / float(max(1, int(same.size) - 1)))
+        b = float("inf")
+        for other_cls, idxs in class_indices.items():
+            if other_cls == cls or idxs.size == 0:
+                continue
+            mean_d = float(np.mean(dist[i, idxs]))
+            if mean_d < b:
+                b = mean_d
+
+        if not np.isfinite(b):
+            vals.append(0.0)
+            continue
+        denom = max(a, b)
+        if denom <= 1e-12:
+            vals.append(0.0)
+            continue
+        vals.append(float((b - a) / denom))
+
+    if not vals:
+        return None
+    return float(np.mean(np.asarray(vals, dtype=np.float64)))
+
+
+def _compute_silhouette_score(
+    features: np.ndarray,
+    labels: np.ndarray,
+    metric: str,
+    max_samples: int,
+    random_state: int,
+) -> Dict[str, Any]:
+    metric_name = str(metric).strip().lower()
+    if metric_name not in {"euclidean", "cosine"}:
+        raise ValueError(f"Unsupported silhouette metric: {metric}")
+
+    n_total = int(features.shape[0])
+    if n_total <= 1:
+        return {
+            "score": None,
+            "metric": metric_name,
+            "num_samples_total": n_total,
+            "num_samples_used": n_total,
+            "sampled": False,
+            "num_classes_used": int(np.unique(labels).shape[0]),
+            "reason": "not_enough_samples",
+        }
+
+    idx, sampled = _sample_indices_for_metric(
+        labels=labels,
+        max_samples=int(max_samples),
+        random_state=int(random_state),
+    )
+    if idx.size == 0:
+        return {
+            "score": None,
+            "metric": metric_name,
+            "num_samples_total": n_total,
+            "num_samples_used": 0,
+            "sampled": bool(sampled),
+            "num_classes_used": 0,
+            "reason": "empty_subset",
+        }
+
+    x = np.asarray(features[idx], dtype=np.float32)
+    y = np.asarray(labels[idx], dtype=np.int64)
+    n_classes = int(np.unique(y).shape[0])
+    if n_classes <= 1:
+        return {
+            "score": None,
+            "metric": metric_name,
+            "num_samples_total": n_total,
+            "num_samples_used": int(x.shape[0]),
+            "sampled": bool(sampled),
+            "num_classes_used": n_classes,
+            "reason": "single_class_subset",
+        }
+
+    if metric_name == "euclidean":
+        dist = _pairwise_euclidean(x)
+    else:
+        dist = _pairwise_cosine_distance(x)
+
+    score = _silhouette_from_distance_matrix(dist, y)
+    return {
+        "score": float(score) if score is not None else None,
+        "metric": metric_name,
+        "num_samples_total": n_total,
+        "num_samples_used": int(x.shape[0]),
+        "sampled": bool(sampled),
+        "num_classes_used": n_classes,
+        "reason": "ok" if score is not None else "undefined",
+    }
+
+
+def _compute_fisher_ratio(
+    features: np.ndarray,
+    labels: np.ndarray,
+) -> Dict[str, Any]:
+    if features.ndim != 2 or features.shape[0] == 0:
+        return {
+            "fisher_ratio": None,
+            "between_scatter": None,
+            "within_scatter": None,
+            "reason": "empty_features",
+        }
+    unique = np.unique(labels)
+    if unique.size <= 1:
+        return {
+            "fisher_ratio": None,
+            "between_scatter": None,
+            "within_scatter": None,
+            "reason": "single_class",
+        }
+
+    x = np.asarray(features, dtype=np.float64)
+    mu = x.mean(axis=0)
+    between = 0.0
+    within = 0.0
+    for cls in unique.tolist():
+        idx = np.where(labels == cls)[0]
+        if idx.size == 0:
+            continue
+        x_c = x[idx]
+        mu_c = x_c.mean(axis=0)
+        between += float(idx.size) * float(np.sum((mu_c - mu) ** 2))
+        within += float(np.sum((x_c - mu_c) ** 2))
+
+    ratio = (between / within) if within > 1e-12 else None
+    return {
+        "fisher_ratio": float(ratio) if ratio is not None else None,
+        "between_scatter": float(between),
+        "within_scatter": float(within),
+        "reason": "ok" if ratio is not None else "within_scatter_zero",
+    }
+
+
+def compute_spherical_geometry_stats(
+    raw_features: np.ndarray,
+    intents: Sequence[str],
+    min_intent_samples: int,
+    include_unknown: bool,
+    silhouette_max_samples: int,
+    random_state: int,
+) -> Dict[str, Any]:
+    counts, valid_intents = _collect_valid_intents(
+        intents=intents,
+        min_intent_samples=min_intent_samples,
+        include_unknown=include_unknown,
+    )
+
+    if not valid_intents:
+        return {
+            "valid_intents": [],
+            "counts": counts,
+            "intent_rows": [],
+            "centroid_cosine_similarity_matrix": np.zeros((0, 0), dtype=np.float32),
+            "centroid_cosine_distance_matrix": np.zeros((0, 0), dtype=np.float32),
+            "summary": {
+                "num_samples_total": int(len(intents)),
+                "num_samples_used": 0,
+                "num_intents_total": int(len(counts)),
+                "num_intents_used": 0,
+                "silhouette_cosine": None,
+                "class_center_mean_cosine_similarity": None,
+                "class_center_mean_cosine_distance": None,
+                "class_center_nearest_mean_cosine_similarity": None,
+                "class_center_nearest_mean_cosine_distance": None,
+                "class_intra_mean_cosine_similarity": None,
+                "class_intra_mean_cosine_distance": None,
+                "class_intra_minus_nearest_center_cosine_similarity_mean": None,
+                "reason": "no_valid_intents",
+            },
+        }
+
+    intents_arr = np.asarray(intents, dtype=object)
+    mask = np.isin(intents_arr, np.asarray(valid_intents, dtype=object))
+    x = np.asarray(raw_features[mask], dtype=np.float32)
+    y = intents_arr[mask]
+    x_norm = _l2_normalize_rows(x)
+    label_to_index = {intent: i for i, intent in enumerate(valid_intents)}
+
+    centroids: List[np.ndarray] = []
+    rows: List[Dict[str, Any]] = []
+    for intent in valid_intents:
+        idx = np.where(y == intent)[0]
+        vecs = x_norm[idx]
+        c = vecs.mean(axis=0)
+        c = _l2_normalize_rows(c.reshape(1, -1))[0]
+        centroids.append(c)
+
+    centroid_arr = np.vstack(centroids).astype(np.float32)
+    centroid_sim = _pairwise_cosine_similarity(centroid_arr)
+    centroid_dist = (1.0 - centroid_sim).astype(np.float32)
+    if centroid_dist.size > 0:
+        np.fill_diagonal(centroid_dist, 0.0)
+
+    for i, intent in enumerate(valid_intents):
+        idx = np.where(y == intent)[0]
+        vecs = x_norm[idx]
+        if vecs.shape[0] >= 2:
+            pair_sim = _pairwise_cosine_similarity(vecs)
+            upper = pair_sim[np.triu_indices(vecs.shape[0], k=1)]
+            intra_sim = float(np.mean(upper)) if upper.size > 0 else None
+            intra_dist = float(np.mean(1.0 - upper)) if upper.size > 0 else None
+        else:
+            intra_sim = None
+            intra_dist = None
+
+        if len(valid_intents) > 1:
+            other_sim = np.delete(centroid_sim[i], i)
+            near_sim = float(np.max(other_sim)) if other_sim.size > 0 else None
+            near_dist = float(1.0 - near_sim) if near_sim is not None else None
+        else:
+            near_sim = None
+            near_dist = None
+
+        gap = (intra_sim - near_sim) if (intra_sim is not None and near_sim is not None) else None
+        rows.append(
+            {
+                "intent": intent,
+                "count": int(counts[intent]),
+                "intra_mean_cosine_similarity": intra_sim,
+                "intra_mean_cosine_distance": intra_dist,
+                "nearest_centroid_cosine_similarity": near_sim,
+                "nearest_centroid_cosine_distance": near_dist,
+                "intra_minus_nearest_cosine_similarity": gap,
+            }
+        )
+
+    silhouette = _compute_silhouette_score(
+        features=x_norm,
+        labels=np.asarray([label_to_index[str(z)] for z in y.tolist()], dtype=np.int64),
+        metric="cosine",
+        max_samples=int(silhouette_max_samples),
+        random_state=int(random_state),
+    )
+
+    if len(valid_intents) > 1:
+        upper_sim = centroid_sim[np.triu_indices(len(valid_intents), k=1)]
+        mean_inter_sim = float(np.mean(upper_sim)) if upper_sim.size > 0 else None
+        mean_inter_dist = float(np.mean(1.0 - upper_sim)) if upper_sim.size > 0 else None
+        near_vals = [r["nearest_centroid_cosine_similarity"] for r in rows if r["nearest_centroid_cosine_similarity"] is not None]
+        near_mean_sim = float(np.mean(np.asarray(near_vals, dtype=np.float64))) if near_vals else None
+        near_mean_dist = float(1.0 - near_mean_sim) if near_mean_sim is not None else None
+    else:
+        mean_inter_sim = None
+        mean_inter_dist = None
+        near_mean_sim = None
+        near_mean_dist = None
+
+    intra_vals = [r["intra_mean_cosine_similarity"] for r in rows if r["intra_mean_cosine_similarity"] is not None]
+    intra_mean_sim = float(np.mean(np.asarray(intra_vals, dtype=np.float64))) if intra_vals else None
+    intra_mean_dist = float(1.0 - intra_mean_sim) if intra_mean_sim is not None else None
+    gap_vals = [r["intra_minus_nearest_cosine_similarity"] for r in rows if r["intra_minus_nearest_cosine_similarity"] is not None]
+    gap_mean = float(np.mean(np.asarray(gap_vals, dtype=np.float64))) if gap_vals else None
+
+    summary = {
+        "num_samples_total": int(len(intents)),
+        "num_samples_used": int(x_norm.shape[0]),
+        "num_intents_total": int(len(counts)),
+        "num_intents_used": int(len(valid_intents)),
+        "silhouette_cosine": silhouette.get("score"),
+        "silhouette_cosine_num_samples_used": int(silhouette.get("num_samples_used", 0)),
+        "silhouette_cosine_sampled": bool(silhouette.get("sampled", False)),
+        "class_center_mean_cosine_similarity": mean_inter_sim,
+        "class_center_mean_cosine_distance": mean_inter_dist,
+        "class_center_nearest_mean_cosine_similarity": near_mean_sim,
+        "class_center_nearest_mean_cosine_distance": near_mean_dist,
+        "class_intra_mean_cosine_similarity": intra_mean_sim,
+        "class_intra_mean_cosine_distance": intra_mean_dist,
+        "class_intra_minus_nearest_center_cosine_similarity_mean": gap_mean,
+        "reason": "ok",
+    }
+
+    return {
+        "valid_intents": valid_intents,
+        "counts": counts,
+        "intent_rows": rows,
+        "centroid_cosine_similarity_matrix": centroid_sim,
+        "centroid_cosine_distance_matrix": centroid_dist,
+        "summary": summary,
+    }
+
+
+def compute_euclidean_boundary_stats(
+    raw_features: np.ndarray,
+    intents: Sequence[str],
+    min_intent_samples: int,
+    include_unknown: bool,
+    silhouette_max_samples: int,
+    random_state: int,
+) -> Dict[str, Any]:
+    counts, valid_intents = _collect_valid_intents(
+        intents=intents,
+        min_intent_samples=min_intent_samples,
+        include_unknown=include_unknown,
+    )
+
+    if not valid_intents:
+        return {
+            "valid_intents": [],
+            "counts": counts,
+            "intent_rows": [],
+            "summary": {
+                "num_samples_total": int(len(intents)),
+                "num_samples_used": 0,
+                "num_intents_total": int(len(counts)),
+                "num_intents_used": 0,
+                "silhouette_euclidean": None,
+                "fisher_ratio": None,
+                "classifier_margin_type": "nearest_centroid",
+                "margin_mean": None,
+                "margin_median": None,
+                "margin_p10": None,
+                "margin_p90": None,
+                "margin_positive_ratio": None,
+                "normalized_margin_mean": None,
+                "normalized_margin_median": None,
+                "reason": "no_valid_intents",
+            },
+        }
+
+    intents_arr = np.asarray(intents, dtype=object)
+    mask = np.isin(intents_arr, np.asarray(valid_intents, dtype=object))
+    x = np.asarray(raw_features[mask], dtype=np.float32)
+    y = intents_arr[mask]
+    label_index = np.asarray([valid_intents.index(str(z)) for z in y.tolist()], dtype=np.int64)
+
+    centroids = []
+    for intent in valid_intents:
+        idx = np.where(y == intent)[0]
+        centroids.append(np.mean(x[idx], axis=0))
+    centroid_arr = np.vstack(centroids).astype(np.float32)
+
+    margin_all: List[float] = []
+    nmargin_all: List[float] = []
+    rows: List[Dict[str, Any]] = []
+    eps = 1e-12
+
+    for i, intent in enumerate(valid_intents):
+        idx = np.where(label_index == i)[0]
+        vecs = x[idx]
+        own_c = centroid_arr[i]
+        own_d = np.linalg.norm(vecs - own_c.reshape(1, -1), axis=1).astype(np.float64)
+
+        if len(valid_intents) > 1:
+            other_idx = [j for j in range(len(valid_intents)) if j != i]
+            other_c = centroid_arr[np.asarray(other_idx, dtype=np.int64)]
+            other_d = np.linalg.norm(
+                vecs[:, None, :] - other_c[None, :, :],
+                axis=2,
+            ).astype(np.float64)
+            nearest_other = other_d.min(axis=1)
+            margin = nearest_other - own_d
+            norm_margin = margin / np.clip(nearest_other + own_d, eps, None)
+            margin_all.extend(margin.tolist())
+            nmargin_all.extend(norm_margin.tolist())
+            mean_nearest_other = float(np.mean(nearest_other)) if nearest_other.size > 0 else None
+            margin_mean = float(np.mean(margin)) if margin.size > 0 else None
+            margin_median = float(np.median(margin)) if margin.size > 0 else None
+            margin_pos = float(np.mean(margin > 0.0)) if margin.size > 0 else None
+            nmargin_mean = float(np.mean(norm_margin)) if norm_margin.size > 0 else None
+        else:
+            nearest_other = np.asarray([], dtype=np.float64)
+            margin = np.asarray([], dtype=np.float64)
+            norm_margin = np.asarray([], dtype=np.float64)
+            mean_nearest_other = None
+            margin_mean = None
+            margin_median = None
+            margin_pos = None
+            nmargin_mean = None
+
+        rows.append(
+            {
+                "intent": intent,
+                "count": int(counts[intent]),
+                "mean_own_centroid_distance": float(np.mean(own_d)) if own_d.size > 0 else None,
+                "mean_nearest_other_centroid_distance": mean_nearest_other,
+                "mean_margin": margin_mean,
+                "median_margin": margin_median,
+                "margin_positive_ratio": margin_pos,
+                "mean_normalized_margin": nmargin_mean,
+            }
+        )
+
+    silhouette = _compute_silhouette_score(
+        features=x,
+        labels=label_index,
+        metric="euclidean",
+        max_samples=int(silhouette_max_samples),
+        random_state=int(random_state),
+    )
+    fisher = _compute_fisher_ratio(x, label_index)
+
+    margin_arr = np.asarray(margin_all, dtype=np.float64) if margin_all else np.asarray([], dtype=np.float64)
+    nmargin_arr = np.asarray(nmargin_all, dtype=np.float64) if nmargin_all else np.asarray([], dtype=np.float64)
+
+    summary = {
+        "num_samples_total": int(len(intents)),
+        "num_samples_used": int(x.shape[0]),
+        "num_intents_total": int(len(counts)),
+        "num_intents_used": int(len(valid_intents)),
+        "silhouette_euclidean": silhouette.get("score"),
+        "silhouette_euclidean_num_samples_used": int(silhouette.get("num_samples_used", 0)),
+        "silhouette_euclidean_sampled": bool(silhouette.get("sampled", False)),
+        "fisher_ratio": fisher.get("fisher_ratio"),
+        "fisher_between_scatter": fisher.get("between_scatter"),
+        "fisher_within_scatter": fisher.get("within_scatter"),
+        "classifier_margin_type": "nearest_centroid",
+        "margin_mean": float(np.mean(margin_arr)) if margin_arr.size > 0 else None,
+        "margin_median": float(np.median(margin_arr)) if margin_arr.size > 0 else None,
+        "margin_p10": float(np.percentile(margin_arr, 10)) if margin_arr.size > 0 else None,
+        "margin_p90": float(np.percentile(margin_arr, 90)) if margin_arr.size > 0 else None,
+        "margin_positive_ratio": float(np.mean(margin_arr > 0.0)) if margin_arr.size > 0 else None,
+        "normalized_margin_mean": float(np.mean(nmargin_arr)) if nmargin_arr.size > 0 else None,
+        "normalized_margin_median": float(np.median(nmargin_arr)) if nmargin_arr.size > 0 else None,
+        "reason": "ok",
+    }
+
+    return {
+        "valid_intents": valid_intents,
+        "counts": counts,
+        "intent_rows": rows,
+        "summary": summary,
+    }
+
+
 def compute_intent_distance_stats(
     features: np.ndarray,
     intents: Sequence[str],
@@ -1259,6 +1810,59 @@ def save_intent_stats_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def save_spherical_intent_stats_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    fieldnames = [
+        "intent",
+        "count",
+        "intra_mean_cosine_similarity",
+        "intra_mean_cosine_distance",
+        "nearest_centroid_cosine_similarity",
+        "nearest_centroid_cosine_distance",
+        "intra_minus_nearest_cosine_similarity",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def save_euclidean_margin_stats_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    fieldnames = [
+        "intent",
+        "count",
+        "mean_own_centroid_distance",
+        "mean_nearest_other_centroid_distance",
+        "mean_margin",
+        "median_margin",
+        "margin_positive_ratio",
+        "mean_normalized_margin",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def save_centroid_cosine_csv(
+    path: str,
+    valid_intents: Sequence[str],
+    sim: np.ndarray,
+    dist: np.ndarray,
+) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["intent_a", "intent_b", "cosine_similarity", "cosine_distance"])
+        for i, a in enumerate(valid_intents):
+            for j in range(i + 1, len(valid_intents)):
+                b = valid_intents[j]
+                writer.writerow([a, b, float(sim[i, j]), float(dist[i, j])])
 
 
 def save_centroid_distance_csv(
@@ -1576,7 +2180,7 @@ def extract_features_from_model(
     dataset = pipeline_mod.MixedDataset(items)
     loader = DataLoader(
         dataset,
-        batch_size=max(1, int(args.batch_size)),
+        batch_size=1,
         shuffle=False,
         drop_last=False,
         num_workers=max(0, int(args.num_workers)),
@@ -1839,8 +2443,6 @@ def extract_features_from_model(
                 hidden = _get_hidden_from_outputs(outputs, layer_index=args.layer_index)
                 vec = pool_feature(hidden, one.get("attention_mask"), args.pooling)
                 intent_component_pooling = "prompt_pool"
-            if args.l2_normalize:
-                vec = _l2_normalize_rows(vec.reshape(1, -1))[0]
 
             row_obj = {
                 "_global_index": int(item.get("_global_index")) if item.get("_global_index") is not None else None,
@@ -1876,9 +2478,710 @@ def extract_features_from_model(
     return np.vstack(features).astype(np.float32), rows
 
 
+def _clone_args_with_overrides(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    data = dict(vars(args))
+    data.update(overrides)
+    return argparse.Namespace(**data)
+
+
+def _sample_key_from_record(item: Dict[str, Any], fallback_index: int) -> str:
+    sid = str(item.get("id", "") or item.get("slurp_id", "")).strip()
+    file_name = str(item.get("file", "")).strip()
+    if sid and file_name:
+        return f"id={sid}|file={file_name}"
+    if sid:
+        return f"id={sid}"
+    if file_name:
+        return f"file={file_name}"
+    return f"row={int(fallback_index)}"
+
+
+def _resolve_default_sft_density_components(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "target_components", "") or "").strip()
+    if explicit:
+        return normalize_target_components_or_raise(explicit)
+    mode = str(getattr(args, "task_mode", "cot") or "cot").strip().lower()
+    if mode == "json_only":
+        return "J"
+    if mode == "candidates":
+        return "CJ"
+    return "CRJ"
+
+
+def _normalize_multitask_density_mode(multitask_mod: Any, mode: str) -> str:
+    text = str(mode or "").strip().lower()
+    normalize_fn = getattr(multitask_mod, "normalize_task_mode", None)
+    if callable(normalize_fn):
+        try:
+            return str(normalize_fn(text))
+        except Exception:
+            pass
+    if text in {"cot", "label", "candidates"}:
+        return text
+    if text in {"cand", "candidate"}:
+        return "candidates"
+    return "cot"
+
+
+def _build_attention_density_item_sets(
+    args: argparse.Namespace,
+    sft_mod: Any,
+    multitask_mod: Any,
+) -> Dict[str, Any]:
+    if args.pipeline == "multitask":
+        task_a = _normalize_multitask_density_mode(multitask_mod, str(args.density_task_a or "cot"))
+        task_b = _normalize_multitask_density_mode(multitask_mod, str(args.density_task_b or "label"))
+        a_args = _clone_args_with_overrides(args, task_mode=task_a)
+        b_args = _clone_args_with_overrides(args, task_mode=task_b)
+        pipeline_mod_a, items_a_raw = build_items(a_args, sft_mod, multitask_mod)
+        pipeline_mod_b, items_b_raw = build_items(b_args, sft_mod, multitask_mod)
+        pipeline_mod = pipeline_mod_a if pipeline_mod_a is not None else pipeline_mod_b
+        label_a = f"task:{task_a}"
+        label_b = f"task:{task_b}"
+    else:
+        default_a = _resolve_default_sft_density_components(args)
+        comp_a_raw = str(args.density_components_a or default_a)
+        comp_b_raw = str(args.density_components_b or "J")
+        comp_a = normalize_target_components_or_raise(comp_a_raw)
+        comp_b = normalize_target_components_or_raise(comp_b_raw)
+        a_args = _clone_args_with_overrides(args, target_components=comp_a, task_mode="cot")
+        b_args = _clone_args_with_overrides(args, target_components=comp_b, task_mode="cot")
+        pipeline_mod_a, items_a_raw = build_items(a_args, sft_mod, multitask_mod)
+        pipeline_mod_b, items_b_raw = build_items(b_args, sft_mod, multitask_mod)
+        pipeline_mod = pipeline_mod_a if pipeline_mod_a is not None else pipeline_mod_b
+        label_a = f"components:{comp_a}"
+        label_b = f"components:{comp_b}"
+
+    keyed_a: Dict[str, Dict[str, Any]] = {}
+    for i, item in enumerate(items_a_raw):
+        if not isinstance(item, dict):
+            continue
+        key = _sample_key_from_record(item, i)
+        if key in keyed_a:
+            continue
+        obj = dict(item)
+        obj["_density_sample_key"] = key
+        keyed_a[key] = obj
+
+    keyed_b: Dict[str, Dict[str, Any]] = {}
+    for i, item in enumerate(items_b_raw):
+        if not isinstance(item, dict):
+            continue
+        key = _sample_key_from_record(item, i)
+        if key in keyed_b:
+            continue
+        obj = dict(item)
+        obj["_density_sample_key"] = key
+        keyed_b[key] = obj
+
+    common_keys = [k for k in keyed_a.keys() if k in keyed_b]
+    items_a = [keyed_a[k] for k in common_keys]
+    items_b = [keyed_b[k] for k in common_keys]
+
+    return {
+        "pipeline_mod": pipeline_mod,
+        "items_a": items_a,
+        "items_b": items_b,
+        "label_a": label_a,
+        "label_b": label_b,
+        "common_keys": common_keys,
+        "raw_count_a": int(len(items_a_raw)),
+        "raw_count_b": int(len(items_b_raw)),
+    }
+
+
+def _extract_attentions_from_outputs(outputs: Any) -> Optional[Sequence[torch.Tensor]]:
+    att = getattr(outputs, "attentions", None)
+    if isinstance(att, (list, tuple)) and att:
+        return att
+    if isinstance(outputs, dict):
+        att2 = outputs.get("attentions")
+        if isinstance(att2, (list, tuple)) and att2:
+            return att2
+    if isinstance(outputs, (list, tuple)):
+        for part in outputs:
+            if isinstance(part, (list, tuple)) and part and torch.is_tensor(part[0]):
+                return part
+    return None
+
+
+def _compute_input_attention_density(
+    attentions: Sequence[torch.Tensor],
+    prompt_token_count: int,
+) -> Optional[Dict[str, Any]]:
+    prompt_n = int(prompt_token_count)
+    if prompt_n <= 0:
+        return None
+
+    density_by_layer: List[float] = []
+    share_by_layer: List[float] = []
+    key_token_count = None
+    input_token_count_used = None
+
+    for att in attentions:
+        if not torch.is_tensor(att) or att.dim() != 4:
+            continue
+        if int(att.shape[0]) <= 0 or int(att.shape[1]) <= 0 or int(att.shape[-1]) <= 0 or int(att.shape[-2]) <= 0:
+            continue
+        q_idx = int(att.shape[-2]) - 1
+        key_len = int(att.shape[-1])
+        in_count = min(prompt_n, key_len)
+        if in_count <= 0:
+            continue
+
+        input_att = att[0, :, q_idx, :in_count]
+        input_share = input_att.sum(dim=-1)
+        density = input_share / float(in_count)
+
+        share_by_layer.append(float(input_share.detach().float().mean().item()))
+        density_by_layer.append(float(density.detach().float().mean().item()))
+        key_token_count = key_len
+        input_token_count_used = in_count
+
+    if not density_by_layer or key_token_count is None or input_token_count_used is None:
+        return None
+
+    density_mean = float(np.mean(np.asarray(density_by_layer, dtype=np.float64)))
+    share_mean = float(np.mean(np.asarray(share_by_layer, dtype=np.float64)))
+    density_last = float(density_by_layer[-1])
+    share_last = float(share_by_layer[-1])
+    uniform_density = 1.0 / float(max(1, key_token_count))
+    density_over_uniform = density_mean / uniform_density if uniform_density > 0 else None
+
+    return {
+        "input_attention_density": density_mean,
+        "input_attention_density_last_layer": density_last,
+        "input_attention_share": share_mean,
+        "input_attention_share_last_layer": share_last,
+        "uniform_density": float(uniform_density),
+        "density_over_uniform": float(density_over_uniform) if density_over_uniform is not None else None,
+        "layer_count": int(len(density_by_layer)),
+        "key_token_count": int(key_token_count),
+        "input_token_count_used": int(input_token_count_used),
+    }
+
+
+def _collect_attention_density_rows(
+    args: argparse.Namespace,
+    pipeline_mod: Any,
+    processor: Any,
+    model: Any,
+    tokenizer: Any,
+    device: torch.device,
+    items: List[Dict[str, Any]],
+    mode_label: str,
+    mode_slot: str,
+    gold_intent_by_slurp_id: Optional[Dict[str, Tuple[str, str, str]]] = None,
+    gold_intent_by_file: Optional[Dict[str, Tuple[str, str, str]]] = None,
+    show_progress: bool = True,
+) -> List[Dict[str, Any]]:
+    if args.pipeline == "sft":
+        audio_input_mode = pipeline_mod._infer_audio_input_mode(
+            args.model_name_or_path,
+            processor=processor,
+            tokenizer=tokenizer,
+        )
+        collator = pipeline_mod.InferenceCollator(
+            processor,
+            audio_input_mode=audio_input_mode,
+        )
+    else:
+        collator = pipeline_mod.InferenceCollator(
+            processor,
+            per_sample=True,
+        )
+
+    dataset = pipeline_mod.MixedDataset(items)
+    loader = DataLoader(
+        dataset,
+        batch_size=max(1, int(args.batch_size)),
+        shuffle=False,
+        drop_last=False,
+        num_workers=max(0, int(args.num_workers)),
+        collate_fn=collator,
+    )
+
+    rows: List[Dict[str, Any]] = []
+    warned_no_attention = False
+    progress = tqdm(
+        loader,
+        total=len(loader),
+        desc=f"Density [{mode_slot}]",
+        unit="batch",
+        dynamic_ncols=True,
+        disable=not bool(show_progress),
+    )
+    for batch in progress:
+        unpacked = _unpack_batch(batch)
+        if not unpacked:
+            continue
+        for item, net_inputs in unpacked:
+            one = {k: v.to(device) for k, v in net_inputs.items() if torch.is_tensor(v)}
+            if "input_ids" not in one:
+                continue
+            if "attention_mask" not in one:
+                one["attention_mask"] = torch.ones_like(one["input_ids"], dtype=torch.long)
+            if hasattr(pipeline_mod, "_ensure_feature_masks_for_generation"):
+                one = pipeline_mod._ensure_feature_masks_for_generation(one)
+            one = _cast_floating_tensors_to_model_dtype(one, model)
+            one = _filter_inputs_by_forward_signature(model, one)
+
+            prompt_len = int(one["input_ids"].shape[1])
+            if prompt_len <= 0:
+                continue
+
+            gen_kwargs: Dict[str, Any] = dict(one)
+            gen_kwargs["max_new_tokens"] = max(1, int(args.density_max_new_tokens))
+            gen_kwargs["do_sample"] = False
+            if tokenizer.pad_token_id is not None:
+                gen_kwargs["pad_token_id"] = int(tokenizer.pad_token_id)
+            elif tokenizer.eos_token_id is not None:
+                gen_kwargs["pad_token_id"] = int(tokenizer.eos_token_id)
+            if tokenizer.eos_token_id is not None:
+                gen_kwargs["eos_token_id"] = int(tokenizer.eos_token_id)
+
+            sequences = _generate_sequences_with_retry(model, gen_kwargs)
+            if sequences.dim() == 1:
+                sequences = sequences.unsqueeze(0)
+            if int(sequences.shape[0]) != 1:
+                sequences = sequences[:1]
+            seq_len = int(sequences.shape[1])
+            if seq_len <= 0:
+                continue
+            generated_token_count = max(0, seq_len - prompt_len)
+
+            full_inputs: Dict[str, Any] = dict(one)
+            full_inputs["input_ids"] = sequences.to(device)
+            full_inputs["attention_mask"] = torch.ones_like(full_inputs["input_ids"], dtype=torch.long)
+            if hasattr(pipeline_mod, "_ensure_feature_masks_for_generation"):
+                full_inputs = pipeline_mod._ensure_feature_masks_for_generation(full_inputs)
+            full_inputs = _cast_floating_tensors_to_model_dtype(full_inputs, model)
+            full_inputs = _filter_inputs_by_forward_signature(model, full_inputs)
+
+            kwargs: Dict[str, Any] = dict(full_inputs)
+            kwargs["output_attentions"] = True
+            kwargs["return_dict"] = True
+            kwargs["use_cache"] = False
+            outputs = _forward_with_retry(model, kwargs)
+            attentions = _extract_attentions_from_outputs(outputs)
+            if not attentions:
+                if not warned_no_attention and show_progress:
+                    print("WARNING: attention outputs are not available; density rows will be skipped.", file=sys.stderr)
+                    warned_no_attention = True
+                continue
+
+            density_obj = _compute_input_attention_density(attentions, prompt_token_count=prompt_len)
+            if not density_obj:
+                continue
+
+            scenario, action, intent = infer_intent_from_item(
+                item,
+                gold_intent_by_slurp_id=gold_intent_by_slurp_id,
+                gold_intent_by_file=gold_intent_by_file,
+                use_pred_label_fallback=False,
+            )
+
+            rows.append({
+                "mode_slot": str(mode_slot),
+                "mode_label": str(mode_label),
+                "sample_key": str(item.get("_density_sample_key", "")),
+                "id": str(item.get("id", "")),
+                "slurp_id": str(item.get("slurp_id", "")),
+                "file": str(item.get("file", "")),
+                "scenario": str(scenario),
+                "action": str(action),
+                "intent": str(intent),
+                "target_components": str(item.get("target_components", "")),
+                "prompt_token_count": int(prompt_len),
+                "sequence_token_count": int(seq_len),
+                "generated_token_count": int(generated_token_count),
+                "input_token_count_used": int(density_obj["input_token_count_used"]),
+                "key_token_count": int(density_obj["key_token_count"]),
+                "layer_count": int(density_obj["layer_count"]),
+                "input_attention_share": float(density_obj["input_attention_share"]),
+                "input_attention_share_last_layer": float(density_obj["input_attention_share_last_layer"]),
+                "input_attention_density": float(density_obj["input_attention_density"]),
+                "input_attention_density_last_layer": float(density_obj["input_attention_density_last_layer"]),
+                "uniform_density": float(density_obj["uniform_density"]),
+                "density_over_uniform": (
+                    float(density_obj["density_over_uniform"])
+                    if density_obj.get("density_over_uniform") is not None
+                    else None
+                ),
+            })
+    return rows
+
+
+def _paired_sign_flip_test(
+    diffs: np.ndarray,
+    n_iter: int = 4000,
+    seed: int = 42,
+) -> Dict[str, float]:
+    if diffs.size == 0:
+        return {"p_two_sided": float("nan"), "p_one_sided_lower": float("nan"), "p_one_sided_upper": float("nan")}
+
+    obs = float(np.mean(diffs))
+    rng = np.random.default_rng(int(seed))
+    sims: List[float] = []
+    remaining = int(max(1, n_iter))
+    n = int(diffs.shape[0])
+    chunk = min(512, remaining)
+    while remaining > 0:
+        now = min(chunk, remaining)
+        signs = rng.choice(np.asarray([-1.0, 1.0], dtype=np.float64), size=(now, n), replace=True)
+        vals = np.mean(signs * diffs.reshape(1, -1), axis=1)
+        sims.extend(float(x) for x in vals.tolist())
+        remaining -= now
+    sim_arr = np.asarray(sims, dtype=np.float64)
+
+    p_two = float((np.sum(np.abs(sim_arr) >= abs(obs)) + 1) / (len(sim_arr) + 1))
+    p_lower = float((np.sum(sim_arr <= obs) + 1) / (len(sim_arr) + 1))
+    p_upper = float((np.sum(sim_arr >= obs) + 1) / (len(sim_arr) + 1))
+    return {
+        "p_two_sided": p_two,
+        "p_one_sided_lower": p_lower,
+        "p_one_sided_upper": p_upper,
+    }
+
+
+def _build_attention_density_pairs(
+    rows_a: Sequence[Dict[str, Any]],
+    rows_b: Sequence[Dict[str, Any]],
+    ratio_threshold: float,
+) -> List[Dict[str, Any]]:
+    by_key_a = {str(r.get("sample_key", "")): r for r in rows_a if isinstance(r, dict) and str(r.get("sample_key", ""))}
+    by_key_b = {str(r.get("sample_key", "")): r for r in rows_b if isinstance(r, dict) and str(r.get("sample_key", ""))}
+    keys = [k for k in by_key_a.keys() if k in by_key_b]
+
+    pairs: List[Dict[str, Any]] = []
+    eps = 1e-12
+    for key in keys:
+        ra = by_key_a[key]
+        rb = by_key_b[key]
+        da = float(ra.get("input_attention_density", 0.0))
+        db = float(rb.get("input_attention_density", 0.0))
+        ratio = da / max(db, eps)
+        pairs.append({
+            "sample_key": key,
+            "id": str(ra.get("id", "") or rb.get("id", "")),
+            "slurp_id": str(ra.get("slurp_id", "") or rb.get("slurp_id", "")),
+            "file": str(ra.get("file", "") or rb.get("file", "")),
+            "intent": str(ra.get("intent", "") or rb.get("intent", "")),
+            "density_a": da,
+            "density_b": db,
+            "density_diff_a_minus_b": float(da - db),
+            "density_ratio_a_over_b": float(ratio),
+            "a_le_ratio_threshold_b": int(bool(da <= float(ratio_threshold) * db)),
+        })
+    return pairs
+
+
+def _summarize_attention_density_pairs(
+    pairs: Sequence[Dict[str, Any]],
+    task_a_label: str,
+    task_b_label: str,
+    ratio_threshold: float,
+    pvalue_iters: int,
+    random_state: int,
+) -> Dict[str, Any]:
+    if not pairs:
+        return {
+            "task_a_label": str(task_a_label),
+            "task_b_label": str(task_b_label),
+            "num_pairs": 0,
+        }
+
+    density_a = np.asarray([float(r.get("density_a", 0.0)) for r in pairs], dtype=np.float64)
+    density_b = np.asarray([float(r.get("density_b", 0.0)) for r in pairs], dtype=np.float64)
+    eps = 1e-12
+    ratio = density_a / np.clip(density_b, eps, None)
+    diff = density_a - density_b
+    signflip = _paired_sign_flip_test(diff, n_iter=int(pvalue_iters), seed=int(random_state))
+
+    return {
+        "task_a_label": str(task_a_label),
+        "task_b_label": str(task_b_label),
+        "num_pairs": int(len(pairs)),
+        "density_a_mean": float(np.mean(density_a)),
+        "density_a_median": float(np.median(density_a)),
+        "density_b_mean": float(np.mean(density_b)),
+        "density_b_median": float(np.median(density_b)),
+        "density_diff_mean_a_minus_b": float(np.mean(diff)),
+        "density_diff_median_a_minus_b": float(np.median(diff)),
+        "density_ratio_mean_a_over_b": float(np.mean(ratio)),
+        "density_ratio_median_a_over_b": float(np.median(ratio)),
+        "density_ratio_p10_a_over_b": float(np.percentile(ratio, 10)),
+        "density_ratio_p90_a_over_b": float(np.percentile(ratio, 90)),
+        "fraction_a_lower_than_b": float(np.mean(density_a < density_b)),
+        "fraction_a_le_ratio_threshold_b": float(np.mean(density_a <= float(ratio_threshold) * density_b)),
+        "ratio_threshold": float(ratio_threshold),
+        "signflip_p_two_sided": float(signflip["p_two_sided"]),
+        "signflip_p_one_sided_a_lower": float(signflip["p_one_sided_lower"]),
+        "signflip_p_one_sided_a_higher": float(signflip["p_one_sided_upper"]),
+    }
+
+
+def _save_rows_csv(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    _ensure_dir(os.path.dirname(path) or ".")
+    if not rows:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("")
+        return
+    fieldnames = list(rows[0].keys())
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _plot_attention_density_pair_scatter(
+    pairs: Sequence[Dict[str, Any]],
+    out_path: str,
+    task_a_label: str,
+    task_b_label: str,
+    ratio_threshold: float,
+) -> None:
+    if not pairs:
+        return
+    x = np.asarray([float(r.get("density_b", 0.0)) for r in pairs], dtype=np.float64)
+    y = np.asarray([float(r.get("density_a", 0.0)) for r in pairs], dtype=np.float64)
+    if x.size == 0 or y.size == 0:
+        return
+
+    _ensure_dir(os.path.dirname(out_path) or ".")
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+    ax.scatter(x, y, s=20, alpha=0.7, edgecolors="none")
+
+    positive = np.concatenate([x[x > 0], y[y > 0]])
+    if positive.size > 0:
+        lo = float(np.min(positive))
+        hi = float(np.max(positive))
+        lo = max(lo * 0.8, 1e-12)
+        hi = max(hi * 1.2, lo * 10.0)
+    else:
+        lo, hi = 1e-12, 1.0
+
+    line_x = np.geomspace(lo, hi, num=128)
+    ax.plot(line_x, line_x, linestyle="--", linewidth=1.2, label="y=x")
+    ax.plot(line_x, float(ratio_threshold) * line_x, linestyle="--", linewidth=1.2,
+            label=f"y={float(ratio_threshold):.3g}x")
+
+    if np.all(x > 0) and np.all(y > 0):
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+
+    ax.set_xlabel(f"D_input ({task_b_label})")
+    ax.set_ylabel(f"D_input ({task_a_label})")
+    ax.set_title("Attention Density Pair Scatter (Final Token)")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, linestyle=":", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
+def _plot_attention_density_boxplot(
+    pairs: Sequence[Dict[str, Any]],
+    out_path: str,
+    task_a_label: str,
+    task_b_label: str,
+) -> None:
+    if not pairs:
+        return
+    a = np.asarray([float(r.get("density_a", 0.0)) for r in pairs], dtype=np.float64)
+    b = np.asarray([float(r.get("density_b", 0.0)) for r in pairs], dtype=np.float64)
+    if a.size == 0 or b.size == 0:
+        return
+
+    _ensure_dir(os.path.dirname(out_path) or ".")
+    fig, ax = plt.subplots(figsize=(6.5, 5.2))
+    ax.boxplot([a, b], labels=[task_a_label, task_b_label], showfliers=False)
+    if np.all(a > 0) and np.all(b > 0):
+        ax.set_yscale("log")
+    ax.set_ylabel("D_input")
+    ax.set_title("Attention Density Distribution")
+    ax.grid(True, axis="y", linestyle=":", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
+def _plot_attention_density_ratio_hist(
+    pairs: Sequence[Dict[str, Any]],
+    out_path: str,
+    ratio_threshold: float,
+) -> None:
+    if not pairs:
+        return
+    ratio = np.asarray([float(r.get("density_ratio_a_over_b", 0.0)) for r in pairs], dtype=np.float64)
+    ratio = ratio[np.isfinite(ratio) & (ratio > 0)]
+    if ratio.size == 0:
+        return
+
+    log_ratio = np.log10(ratio)
+    th = max(float(ratio_threshold), 1e-12)
+    _ensure_dir(os.path.dirname(out_path) or ".")
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    ax.hist(log_ratio, bins=40, alpha=0.8)
+    ax.axvline(np.log10(th), color="red", linestyle="--", linewidth=1.2, label=f"log10({th:.3g})")
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, label="log10(1)")
+    ax.set_xlabel("log10( D_input(A) / D_input(B) )")
+    ax.set_ylabel("Count")
+    ax.set_title("Attention Density Ratio Histogram")
+    ax.grid(True, axis="y", linestyle=":", alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
+def run_attention_density_analysis(
+    args: argparse.Namespace,
+    out_dir: str,
+    show_progress: bool = True,
+) -> Dict[str, Any]:
+    if not args.model_name_or_path:
+        raise SystemExit("ERROR: attention-density analysis requires --model_name_or_path.")
+
+    sft_mod = _load_module_from_path("_sft_mod_density", SFT_PATH)
+    multitask_mod = _load_module_from_path("_mt_mod_density", MULTITASK_PATH)
+    built = _build_attention_density_item_sets(args, sft_mod, multitask_mod)
+
+    pipeline_mod = built["pipeline_mod"]
+    items_a = built["items_a"]
+    items_b = built["items_b"]
+    task_a_label = built["label_a"]
+    task_b_label = built["label_b"]
+    if not items_a or not items_b:
+        raise RuntimeError(
+            f"No paired items for attention-density analysis. raw_a={built['raw_count_a']} raw_b={built['raw_count_b']}"
+        )
+
+    device = torch.device(args.device)
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    processor = pipeline_mod.AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    processor, tokenizer = pipeline_mod.ensure_processor_tokenizer_or_raise(processor, args.model_name_or_path)
+    model = pipeline_mod.load_audio_model_from_pretrained(
+        args.model_name_or_path,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    ).to(device)
+    if hasattr(pipeline_mod, "attach_tokenizer_to_model_for_compat"):
+        pipeline_mod.attach_tokenizer_to_model_for_compat(model, tokenizer)
+    model.eval()
+
+    gold_by_sid, gold_by_file = load_gold_intent_maps_from_test_jsonl(args.test_file)
+
+    rows_a = _collect_attention_density_rows(
+        args=args,
+        pipeline_mod=pipeline_mod,
+        processor=processor,
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        items=items_a,
+        mode_label=task_a_label,
+        mode_slot="A",
+        gold_intent_by_slurp_id=gold_by_sid,
+        gold_intent_by_file=gold_by_file,
+        show_progress=bool(show_progress),
+    )
+    rows_b = _collect_attention_density_rows(
+        args=args,
+        pipeline_mod=pipeline_mod,
+        processor=processor,
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        items=items_b,
+        mode_label=task_b_label,
+        mode_slot="B",
+        gold_intent_by_slurp_id=gold_by_sid,
+        gold_intent_by_file=gold_by_file,
+        show_progress=bool(show_progress),
+    )
+
+    pairs = _build_attention_density_pairs(
+        rows_a=rows_a,
+        rows_b=rows_b,
+        ratio_threshold=float(args.density_ratio_threshold),
+    )
+    if not pairs:
+        raise RuntimeError(
+            "No paired rows produced in attention-density analysis. "
+            "Check model support for output_attentions and sample alignment."
+        )
+    summary = _summarize_attention_density_pairs(
+        pairs=pairs,
+        task_a_label=task_a_label,
+        task_b_label=task_b_label,
+        ratio_threshold=float(args.density_ratio_threshold),
+        pvalue_iters=int(args.density_pvalue_iters),
+        random_state=int(args.random_state),
+    )
+    summary.update({
+        "pipeline": str(args.pipeline),
+        "raw_items_a": int(built["raw_count_a"]),
+        "raw_items_b": int(built["raw_count_b"]),
+        "paired_candidate_keys": int(len(built["common_keys"])),
+        "paired_rows_a": int(len(rows_a)),
+        "paired_rows_b": int(len(rows_b)),
+        "density_max_new_tokens": int(args.density_max_new_tokens),
+    })
+
+    _ensure_dir(out_dir)
+    tag_a = _sanitize_name(str(task_a_label))
+    tag_b = _sanitize_name(str(task_b_label))
+    rows_a_path = os.path.join(out_dir, f"attention_density_rows_A_{tag_a}.jsonl")
+    rows_b_path = os.path.join(out_dir, f"attention_density_rows_B_{tag_b}.jsonl")
+    pairs_csv_path = os.path.join(out_dir, f"attention_density_pairs_A_{tag_a}__B_{tag_b}.csv")
+    summary_path = os.path.join(out_dir, f"attention_density_summary_A_{tag_a}__B_{tag_b}.json")
+    scatter_path = os.path.join(out_dir, f"attention_density_scatter_A_{tag_a}__B_{tag_b}.png")
+    boxplot_path = os.path.join(out_dir, f"attention_density_box_A_{tag_a}__B_{tag_b}.png")
+    ratio_hist_path = os.path.join(out_dir, f"attention_density_ratio_hist_A_{tag_a}__B_{tag_b}.png")
+
+    _write_jsonl(rows_a_path, rows_a)
+    _write_jsonl(rows_b_path, rows_b)
+    _save_rows_csv(pairs_csv_path, pairs)
+    _write_json(summary_path, summary)
+    _plot_attention_density_pair_scatter(
+        pairs=pairs,
+        out_path=scatter_path,
+        task_a_label=task_a_label,
+        task_b_label=task_b_label,
+        ratio_threshold=float(args.density_ratio_threshold),
+    )
+    _plot_attention_density_boxplot(
+        pairs=pairs,
+        out_path=boxplot_path,
+        task_a_label=task_a_label,
+        task_b_label=task_b_label,
+    )
+    _plot_attention_density_ratio_hist(
+        pairs=pairs,
+        out_path=ratio_hist_path,
+        ratio_threshold=float(args.density_ratio_threshold),
+    )
+
+    return {
+        "summary": summary,
+        "paths": [
+            rows_a_path,
+            rows_b_path,
+            pairs_csv_path,
+            summary_path,
+            scatter_path,
+            boxplot_path,
+            ratio_hist_path,
+        ],
+    }
+
+
 def save_feature_artifacts(
     out_dir: str,
     features: np.ndarray,
+    raw_features: Optional[np.ndarray],
     rows: List[Dict[str, Any]],
     projections: Dict[str, np.ndarray],
     pca_explained_ratio: Tuple[float, float],
@@ -1895,6 +3198,8 @@ def save_feature_artifacts(
         "ids": ids,
         "files": files,
     }
+    if raw_features is not None:
+        payload["raw_features"] = np.asarray(raw_features, dtype=np.float32)
     pca_proj = projections.get("pca")
     if pca_proj is not None:
         # backward compatible key
@@ -1913,7 +3218,7 @@ def save_feature_artifacts(
     _write_jsonl(os.path.join(out_dir, "metadata.jsonl"), rows)
 
 
-def load_feature_artifacts(reuse_dir: str) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+def load_feature_artifacts(reuse_dir: str) -> Tuple[np.ndarray, List[Dict[str, Any]], Optional[np.ndarray]]:
     npz_path = os.path.join(reuse_dir, "features.npz")
     meta_path = os.path.join(reuse_dir, "metadata.jsonl")
     if not os.path.exists(npz_path):
@@ -1922,11 +3227,29 @@ def load_feature_artifacts(reuse_dir: str) -> Tuple[np.ndarray, List[Dict[str, A
     if "features" not in data:
         raise RuntimeError(f"'features' key not found in {npz_path}")
     features = np.asarray(data["features"], dtype=np.float32)
+    raw_features: Optional[np.ndarray] = None
+    if "raw_features" in data:
+        cand = np.asarray(data["raw_features"], dtype=np.float32)
+        if cand.ndim == 1:
+            cand = cand.reshape(1, -1)
+        if cand.ndim == 2:
+            raw_features = cand
+
     rows = _read_jsonl(meta_path)
     if rows and len(rows) != int(features.shape[0]):
         n = min(len(rows), int(features.shape[0]))
         rows = rows[:n]
         features = features[:n]
+        if raw_features is not None:
+            raw_features = raw_features[:n]
+
+    if raw_features is not None and int(raw_features.shape[0]) != int(features.shape[0]):
+        n = min(int(raw_features.shape[0]), int(features.shape[0]))
+        features = features[:n]
+        raw_features = raw_features[:n]
+        if rows:
+            rows = rows[:n]
+
     if not rows:
         intents = data["intents"] if "intents" in data else np.asarray(["__unknown__"] * features.shape[0], dtype=object)
         ids = data["ids"] if "ids" in data else np.asarray([""] * features.shape[0], dtype=object)
@@ -1944,7 +3267,7 @@ def load_feature_artifacts(reuse_dir: str) -> Tuple[np.ndarray, List[Dict[str, A
                 "input_type": "",
                 "audio_path": "",
             })
-    return features, rows
+    return features, rows, raw_features
 
 
 def _dist_is_initialized() -> bool:
@@ -2116,6 +3439,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-dir", type=str, default=os.path.join(SCRIPT_DIR, "analysis"))
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--min-intent-samples", type=int, default=5)
+    parser.add_argument(
+        "--silhouette-max-samples",
+        type=int,
+        default=4000,
+        help="Silhouette計算時のサンプル上限（大規模時はクラス層化サンプリング）",
+    )
     parser.add_argument("--top-intents", type=int, default=20,
                         help="Scatter/heatmapで表示するIntent数。0以下で全Intentを表示")
     parser.add_argument("--all-intents", action="store_true",
@@ -2137,6 +3466,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-audio-search-paths", action="store_true")
     parser.add_argument("--audio-search-print-limit", type=int, default=20)
     parser.add_argument("--strict-audio-missing", action="store_true")
+    parser.add_argument(
+        "--attention-density-analysis",
+        action="store_true",
+        help=(
+            "Run A/B attention-density comparison at final token. "
+            "D_input = (sum attention on input tokens) / (# input tokens)."
+        ),
+    )
+    parser.add_argument(
+        "--attention-density-only",
+        action="store_true",
+        help="Run only attention-density analysis and skip feature-map extraction.",
+    )
+    parser.add_argument(
+        "--density-task-a",
+        type=str,
+        default="cot",
+        help="multitask用: 比較Aのtask-mode (default: cot)",
+    )
+    parser.add_argument(
+        "--density-task-b",
+        type=str,
+        default="label",
+        help="multitask用: 比較Bのtask-mode (default: label)",
+    )
+    parser.add_argument(
+        "--density-components-a",
+        type=str,
+        default=None,
+        help="sft用: 比較Aのtarget-components (例: CRJ/CJ/RJ/J)。未指定時は実行条件から推定",
+    )
+    parser.add_argument(
+        "--density-components-b",
+        type=str,
+        default="J",
+        help="sft用: 比較Bのtarget-components (default: J)",
+    )
+    parser.add_argument(
+        "--density-max-new-tokens",
+        type=int,
+        default=128,
+        help="attention-density解析時の生成長上限",
+    )
+    parser.add_argument(
+        "--density-pvalue-iters",
+        type=int,
+        default=4000,
+        help="paired sign-flip test の反復回数",
+    )
+    parser.add_argument(
+        "--density-ratio-threshold",
+        type=float,
+        default=0.1,
+        help="A/B 比率の閾値（例: 0.1 は B の1/10）",
+    )
     return parser.parse_args()
 
 
@@ -2203,24 +3587,75 @@ def main() -> None:
             args.top_intents = 0
             if _is_main_process():
                 print("All-intents mode: min_intent_samples=1, top_intents=0")
+        if args.attention_density_only:
+            args.attention_density_analysis = True
+        if int(args.density_max_new_tokens) <= 0:
+            raise SystemExit("ERROR: --density-max-new-tokens must be > 0.")
+        if int(args.density_pvalue_iters) <= 0:
+            raise SystemExit("ERROR: --density-pvalue-iters must be > 0.")
+        if float(args.density_ratio_threshold) <= 0:
+            raise SystemExit("ERROR: --density-ratio-threshold must be > 0.")
+        if int(args.silhouette_max_samples) <= 1:
+            raise SystemExit("ERROR: --silhouette-max-samples must be > 1.")
+        if args.attention_density_analysis and dist_enabled:
+            raise SystemExit("ERROR: attention-density analysis is currently available only in single-process execution.")
+        if args.attention_density_analysis and not args.model_name_or_path:
+            raise SystemExit("ERROR: attention-density analysis requires --model_name_or_path.")
+        if args.pipeline == "sft":
+            if args.density_components_a is not None and str(args.density_components_a).strip():
+                args.density_components_a = normalize_target_components_or_raise(args.density_components_a)
+            if args.density_components_b is not None and str(args.density_components_b).strip():
+                args.density_components_b = normalize_target_components_or_raise(args.density_components_b)
 
         args.device = choose_device(args.device, local_rank=local_rank)
         effective_l2_normalize = bool(args.l2_normalize)
+        planned_out_dir = build_output_dir(args)
+
+        attention_density_result: Optional[Dict[str, Any]] = None
+        if args.attention_density_analysis and _is_main_process():
+            print("Running attention density analysis...")
+            attention_density_result = run_attention_density_analysis(
+                args=args,
+                out_dir=planned_out_dir,
+                show_progress=True,
+            )
+            print("Saved attention density analysis:")
+            for p in attention_density_result.get("paths", []):
+                print(f"- {p}")
+            print("Attention density summary:")
+            print(json.dumps(attention_density_result.get("summary", {}), ensure_ascii=False, indent=2))
+            if args.attention_density_only:
+                return
 
         features: np.ndarray
+        raw_features: np.ndarray
+        raw_feature_source: str = "unknown"
         rows: List[Dict[str, Any]]
         out_dir: Optional[str] = None
 
         if args.reuse_dir:
             if not _is_main_process():
                 return
-            out_dir = build_output_dir(args)
-            features, rows = load_feature_artifacts(out_dir)
+            out_dir = planned_out_dir
+            features, rows, raw_features_opt = load_feature_artifacts(out_dir)
             print(f"Loaded cached features: {features.shape} from {out_dir}")
             saved_l2_flag = _load_saved_run_l2_flag(out_dir)
             if saved_l2_flag is not None:
                 effective_l2_normalize = bool(saved_l2_flag)
                 print(f"Using saved l2_normalize from config: {effective_l2_normalize}")
+            if raw_features_opt is not None:
+                raw_features = np.asarray(raw_features_opt, dtype=np.float32)
+                raw_feature_source = "cache_raw_features"
+                print(f"Loaded raw features from cache: {raw_features.shape}")
+            else:
+                raw_features = np.asarray(features, dtype=np.float32)
+                raw_feature_source = "cache_features_fallback"
+                if effective_l2_normalize:
+                    print(
+                        "WARNING: raw_features are not stored in cache; "
+                        "Euclidean boundary metrics are computed from cached features as-is.",
+                        file=sys.stderr,
+                    )
         else:
             sft_mod = _load_module_from_path("_sft_mod", SFT_PATH)
             multitask_mod = _load_module_from_path("_mt_mod", MULTITASK_PATH)
@@ -2303,13 +3738,15 @@ def main() -> None:
             else:
                 features, rows = local_features, local_rows
 
-            out_dir = build_output_dir(args)
+            raw_features = np.asarray(features, dtype=np.float32)
+            raw_feature_source = "newly_extracted"
+            out_dir = planned_out_dir
 
         if not _is_main_process():
             return
 
         if out_dir is None:
-            out_dir = build_output_dir(args)
+            out_dir = planned_out_dir
 
         cleaned_rows: List[Dict[str, Any]] = []
         for row in rows:
@@ -2326,6 +3763,18 @@ def main() -> None:
             n = min(len(rows), int(features.shape[0]))
             rows = rows[:n]
             features = features[:n]
+            raw_features = raw_features[:n]
+        if int(raw_features.shape[0]) != len(rows):
+            n = min(int(raw_features.shape[0]), len(rows), int(features.shape[0]))
+            rows = rows[:n]
+            features = features[:n]
+            raw_features = raw_features[:n]
+        if int(raw_features.shape[0]) == 0:
+            raise RuntimeError("No raw features available after alignment.")
+        if effective_l2_normalize:
+            features = _l2_normalize_rows(np.asarray(raw_features, dtype=np.float32))
+        else:
+            features = np.asarray(raw_features, dtype=np.float32).copy()
 
         unknown_n = sum(1 for r in rows if r.get("intent", "__unknown__") == "__unknown__")
         resolved_n = len(rows) - unknown_n
@@ -2340,6 +3789,22 @@ def main() -> None:
             intents=intents,
             min_intent_samples=max(1, int(args.min_intent_samples)),
             include_unknown=bool(args.include_unknown_intent),
+        )
+        spherical_stats = compute_spherical_geometry_stats(
+            raw_features=raw_features,
+            intents=intents,
+            min_intent_samples=max(1, int(args.min_intent_samples)),
+            include_unknown=bool(args.include_unknown_intent),
+            silhouette_max_samples=int(args.silhouette_max_samples),
+            random_state=int(args.random_state),
+        )
+        boundary_stats = compute_euclidean_boundary_stats(
+            raw_features=raw_features,
+            intents=intents,
+            min_intent_samples=max(1, int(args.min_intent_samples)),
+            include_unknown=bool(args.include_unknown_intent),
+            silhouette_max_samples=int(args.silhouette_max_samples),
+            random_state=int(args.random_state),
         )
         mean_rows = build_intent_mean_distance_rows(
             valid_intents=stats["valid_intents"],
@@ -2485,6 +3950,7 @@ def main() -> None:
         save_feature_artifacts(
             out_dir=out_dir,
             features=features,
+            raw_features=raw_features,
             rows=rows,
             projections=projections,
             pca_explained_ratio=explained_ratio,
@@ -2537,6 +4003,7 @@ def main() -> None:
             "label_source": "gold",
             "l2_normalize": bool(effective_l2_normalize),
             "min_intent_samples": int(args.min_intent_samples),
+            "silhouette_max_samples": int(args.silhouette_max_samples),
             "top_intents": int(args.top_intents),
             "all_intents": bool(args.all_intents),
             "include_unknown_intent": bool(args.include_unknown_intent),
@@ -2549,6 +4016,9 @@ def main() -> None:
             "local_rank": int(local_rank),
             "num_samples": int(features.shape[0]),
             "feature_dim": int(features.shape[1]),
+            "raw_feature_dim": int(raw_features.shape[1]),
+            "raw_features_saved": True,
+            "raw_feature_source": raw_feature_source,
             "num_unique_intents": len(counts),
             "num_intents_sampled_by_rank_step": len(sampled_order),
             "visualization_filtered_by_rank_step": bool(use_rank_filtered_viz),
@@ -2572,14 +4042,49 @@ def main() -> None:
             "umap_min_dist": float(args.umap_min_dist),
             "umap_metric": str(args.umap_metric),
             "pca_explained_var_ratio": [float(explained_ratio[0]), float(explained_ratio[1])],
+            "attention_density_analysis": bool(args.attention_density_analysis),
+            "density_task_a": str(args.density_task_a),
+            "density_task_b": str(args.density_task_b),
+            "density_components_a": str(args.density_components_a) if args.density_components_a is not None else None,
+            "density_components_b": str(args.density_components_b) if args.density_components_b is not None else None,
+            "density_max_new_tokens": int(args.density_max_new_tokens),
+            "density_pvalue_iters": int(args.density_pvalue_iters),
+            "density_ratio_threshold": float(args.density_ratio_threshold),
         }
+        if attention_density_result is not None:
+            config["attention_density_summary"] = attention_density_result.get("summary", {})
+            config["attention_density_paths"] = attention_density_result.get("paths", [])
         _write_json(os.path.join(out_dir, "config.json"), config)
         _write_json(os.path.join(out_dir, "summary.json"), stats["summary"])
+        _write_json(os.path.join(out_dir, "spherical_geometry_summary.json"), spherical_stats["summary"])
+        _write_json(os.path.join(out_dir, "euclidean_boundary_summary.json"), boundary_stats["summary"])
+        _write_json(
+            os.path.join(out_dir, "summary_additional_metrics.json"),
+            {
+                "euclidean_centroid": stats["summary"],
+                "spherical_geometry": spherical_stats["summary"],
+                "euclidean_boundary": boundary_stats["summary"],
+            },
+        )
         save_intent_stats_csv(os.path.join(out_dir, "intent_stats.csv"), stats["intent_rows"])
+        save_spherical_intent_stats_csv(
+            os.path.join(out_dir, "spherical_intent_stats.csv"),
+            spherical_stats["intent_rows"],
+        )
+        save_euclidean_margin_stats_csv(
+            os.path.join(out_dir, "euclidean_margin_stats.csv"),
+            boundary_stats["intent_rows"],
+        )
         save_centroid_distance_csv(
             os.path.join(out_dir, "centroid_distances.csv"),
             stats["valid_intents"],
             stats["distance_matrix"],
+        )
+        save_centroid_cosine_csv(
+            os.path.join(out_dir, "centroid_cosine_pairs.csv"),
+            spherical_stats["valid_intents"],
+            spherical_stats["centroid_cosine_similarity_matrix"],
+            spherical_stats["centroid_cosine_distance_matrix"],
         )
         save_intent_mean_distance_csv(
             os.path.join(out_dir, "intent_mean_distance_ranking.csv"),
@@ -2658,8 +4163,15 @@ def main() -> None:
         print(f"- {os.path.join(out_dir, 'metadata.jsonl')}")
         if intent_focus_debug_path:
             print(f"- {intent_focus_debug_path}")
+        print(f"- {os.path.join(out_dir, 'summary.json')}")
+        print(f"- {os.path.join(out_dir, 'spherical_geometry_summary.json')}")
+        print(f"- {os.path.join(out_dir, 'euclidean_boundary_summary.json')}")
+        print(f"- {os.path.join(out_dir, 'summary_additional_metrics.json')}")
         print(f"- {os.path.join(out_dir, 'intent_stats.csv')}")
+        print(f"- {os.path.join(out_dir, 'spherical_intent_stats.csv')}")
+        print(f"- {os.path.join(out_dir, 'euclidean_margin_stats.csv')}")
         print(f"- {os.path.join(out_dir, 'centroid_distances.csv')}")
+        print(f"- {os.path.join(out_dir, 'centroid_cosine_pairs.csv')}")
         print(f"- {os.path.join(out_dir, 'intent_mean_distance_ranking.csv')}")
         print(f"- {os.path.join(out_dir, 'intent_mean_distance_rankstep.csv')}")
         print(f"- {os.path.join(out_dir, 'centroid_distance_rankstep_table.csv')}")
@@ -2671,8 +4183,12 @@ def main() -> None:
         if "umap" in projections:
             print(f"- {os.path.join(out_dir, 'umap_scatter_by_intent.png')}")
         print(f"- {os.path.join(out_dir, 'centroid_distance_heatmap.png')}")
-        print("Summary:")
+        print("Summary (Euclidean centroid distance):")
         print(json.dumps(stats["summary"], ensure_ascii=False, indent=2))
+        print("Summary (Spherical geometry / cosine):")
+        print(json.dumps(spherical_stats["summary"], ensure_ascii=False, indent=2))
+        print("Summary (Euclidean boundary margin):")
+        print(json.dumps(boundary_stats["summary"], ensure_ascii=False, indent=2))
     finally:
         finalize_distributed()
 
