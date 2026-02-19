@@ -283,12 +283,107 @@
   year={2024}
 }
 
+@inproceedings{hsieh-etal-2023-distilling,
+    title = "Distilling Step-by-Step! Outperforming Larger Language Models with Less Training Data and Smaller Model Sizes",
+    author = "Hsieh, Cheng-Yu  and
+      Li, Chun-Liang  and
+      Yeh, Chih-kuan  and
+      Nakhost, Hootan  and
+      Fujii, Yasuhisa  and
+      Ratner, Alex  and
+      Krishna, Ranjay  and
+      Lee, Chen-Yu  and
+      Pfister, Tomas",
+    editor = "Rogers, Anna  and
+      Boyd-Graber, Jordan  and
+      Okazaki, Naoaki",
+    booktitle = "Findings of the Association for Computational Linguistics: ACL 2023",
+    month = jul,
+    year = "2023",
+    address = "Toronto, Canada",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2023.findings-acl.507/",
+    doi = "10.18653/v1/2023.findings-acl.507",
+    pages = "8003--8017",
+    abstract = "Deploying large language models (LLMs) is challenging because they are memory inefficient and compute-intensive for practical applications. In reaction, researchers train smaller task-specific models by either finetuning with human labels or distilling using LLM-generated labels. However, finetuning and distillation require large amounts of training data to achieve comparable performance to LLMs. We introduce Distilling step-by-step, a new mechanism that (a) trains smaller models that outperform LLMs, and (b) achieves so by leveraging less training data needed by finetuning or distillation. Our method extracts LLM rationales as additional supervision for training small models within a multi-task framework. We present three findings across 4 NLP benchmarks: First, compared to both finetuning and distillation, our mechanism achieves better performance with much fewer labeled/unlabeled training examples. Second, compared to few-shot prompted LLMs, we achieve better performance using substantially smaller model sizes. Third, we reduce both the model size and the amount of data required to outperform LLMs; our finetuned 770M T5 model outperforms the few-shot prompted 540B PaLM model using only 80{\%} of available data on a benchmark, whereas standard finetuning the same T5 model struggles to match even by using 100{\%} of the dataset."
+}
+
+
+@inproceedings{chen-etal-2025-skip,
+    title = "Skip-Thinking: Chunk-wise Chain-of-Thought Distillation Enable Smaller Language Models to Reason Better and Faster",
+    author = "Chen, Xiaoshu  and
+      Zhou, Sihang  and
+      Liang, Ke  and
+      Sun, Xiaoyu  and
+      Liu, Xinwang",
+    editor = "Christodoulopoulos, Christos  and
+      Chakraborty, Tanmoy  and
+      Rose, Carolyn  and
+      Peng, Violet",
+    booktitle = "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2025",
+    address = "Suzhou, China",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.emnlp-main.610/",
+    doi = "10.18653/v1/2025.emnlp-main.610",
+    pages = "12142--12157",
+    ISBN = "979-8-89176-332-6",
+    abstract = "Chain-of-thought (CoT) distillation allows a large language model (LLM) to guide a small language model (SLM) in reasoning tasks. Existing methods train the SLM to learn the long rationale in one iteration, resulting in two issues: 1) Long rationales lead to a large token-level batch size during training, making gradients of core reasoning tokens (i.e., the token will directly affect the correctness of subsequent reasoning) over-smoothed as they contribute a tiny fraction of the rationale. As a result, the SLM converges to sharp minima where it fails to grasp the reasoning logic. 2) The response is slow, as the SLM must generate a long rationale before reaching the answer. Therefore, we propose chunk-wise training (CWT), which uses a heuristic search to divide the rationale into internal semantically coherent chunks and focuses SLM on learning from only one chunk per iteration. In this way, CWT naturally isolates non-reasoning chunks that do not involve the core reasoning token (e.g., summary and transitional chunks) from the SLM learning for reasoning chunks, making the fraction of the core reasoning token increase in the corresponding iteration. Based on CWT, skip-thinking training (STT) is proposed. STT makes the SLM automatically skip non-reasoning medium chunks to reach the answer, improving reasoning speed while maintaining accuracy. We validate our approach on a variety of SLMs and multiple reasoning tasks."
+}
+
+
 @article{chu2024qwen2audio,
   title={Qwen2-Audio Technical Report},
   author={Chu, Yunfei and Xu, Jin and Yang, Qian and Wei, Haojie and Wei, Xipin and Guo, Zhifang and Leng, Yichong and Lv, Yuanjun and He, Jinzheng and Lin, Junyang and Zhou, Chang and Zhou, Jingren},
   journal={arXiv preprint arXiv:2407.10759},
   year={2024}
 }
+@inproceedings{chen-etal-2025-unveiling-key,
+    title = "Unveiling the Key Factors for Distilling Chain-of-Thought Reasoning",
+    author = "Chen, Xinghao  and
+      Sun, Zhijing  and
+      Wenjin, Guo  and
+      Zhang, Miaoran  and
+      Chen, Yanjun  and
+      Sun, Yirong  and
+      Su, Hui  and
+      Pan, Yijie  and
+      Klakow, Dietrich  and
+      Li, Wenjie  and
+      Shen, Xiaoyu",
+    editor = "Che, Wanxiang  and
+      Nabende, Joyce  and
+      Shutova, Ekaterina  and
+      Pilehvar, Mohammad Taher",
+    booktitle = "Findings of the Association for Computational Linguistics: ACL 2025",
+    month = jul,
+    year = "2025",
+    address = "Vienna, Austria",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.findings-acl.782/",
+    doi = "10.18653/v1/2025.findings-acl.782",
+    pages = "15094--15119",
+    ISBN = "979-8-89176-256-5",
+    abstract = "Large Language Models (LLMs) excel in reasoning tasks through Chain-of-Thought (CoT) prompting. However, CoT prompting greatly increases computational demands, which has prompted growing interest in distilling CoT capabilities into Small Language Models (SLMs). This study systematically examines the factors influencing CoT distillation, including the choice of granularity, format and teacher model. Through experiments involving four teacher models and seven student models across seven mathematical and commonsense reasoning datasets, we uncover three key findings: (1) Unlike LLMs, SLMs exhibit a *non-monotonic* relationship with granularity, with stronger models benefiting from finer-grained reasoning and weaker models performing better with simpler CoT supervision; (2) CoT format significantly impacts LLMs but has *minimal* effect on SLMs, likely due to their reliance on supervised fine-tuning rather than pretraining preferences; (3) Stronger teacher models do *NOT* always produce better student models, as diversity and complexity in CoT supervision can outweigh accuracy alone. These findings emphasize the need to tailor CoT strategies to specific student model, offering actionable insights for optimizing CoT distillation in SLMs."
+}
+
+
+@inproceedings{li-etal-2025-small-models,
+  title     = {Small Models Struggle to Learn from Strong Reasoners},
+  author    = {Li, Yuetai and Yue, Xiang and Xu, Zhangchen and Jiang, Fengqing and Niu, Luyao and Lin, Bill Yuchen and Ramasubramanian, Bhaskar and Poovendran, Radha},
+  editor    = {Che, Wanxiang and Nabende, Joyce and Shutova, Ekaterina and Pilehvar, Mohammad Taher},
+  booktitle = {Findings of the Association for Computational Linguistics: ACL 2025},
+  month     = jul,
+  year      = {2025},
+  address   = {Vienna, Austria},
+  publisher = {Association for Computational Linguistics},
+  url       = {https://aclanthology.org/2025.findings-acl.1301/},
+  doi       = {10.18653/v1/2025.findings-acl.1301},
+  pages     = {25366--25394},
+  isbn      = {979-8-89176-256-5}
+}
+
 
 @misc{ghosh2025musicflamingoscalingmusic,
       title={Music Flamingo: Scaling Music Understanding in Audio Language Models}, 
