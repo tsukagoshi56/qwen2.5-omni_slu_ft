@@ -69,8 +69,13 @@
 
 % the abstract here must exactly match the abstract entered into the paper submission system
 \begin{abstract}
-Spoken language understanding (SLU) maps speech signals to structured semantic frames consisting of intents and slots. Recent Speech Large Language Models (SpeechLLMs) enable end-to-end SLU by directly processing acoustic inputs and generating structured outputs. Chain-of-Thought (CoT) reasoning has proven effective in text-based NLP, suggesting potential benefits for SLU. However, in moderate-scale models typically used for fine-tuning, such reasoning does not reliably emerge, limiting the effectiveness of naive CoT prompting.
-We distill structured reasoning from a large teacher model into SpeechLLMs through a multitask learning framework. We introduce a tripartite rationale design consisting of intent candidates, rejection rationale, and the final structured semantic output, and jointly optimize rationale generation and direct prediction under shared parameters. This multitask distillation injects structured reasoning into the model’s internal representations while preserving efficient inference. Experiments on SLURP across six architectures show consistent gains over direct fine-tuning and standalone CoT supervision. Representation analysis reveals enlarged inter-class margins, indicating that distilled reasoning serves as an effective training regularizer without requiring rationale generation at inference time.
+Spoken language understanding (SLU) maps speech signals to structured semantic representations, such as intent classification and slot filling. Recent Speech Large Language Models (SpeechLLMs) enable end-to-end SLU by directly processing acoustic inputs. Although SpeechLLMs are expected to reduce error propagation and improve inference efficiency, challenges remain in reliably disambiguating semantically similar alternatives.
+
+To address this challenge, we propose a structured reasoning distillation framework for SpeechLLM-based SLU. We treat SLU as a step-by-step decision process that selects candidate interpretations, rejects incorrect ones, and produces the final prediction. We generate supervision for this reasoning process using a large reasoning model and distill it into SpeechLLMs. Because compact models often exhibit unstable structured reasoning, we adopt multitask learning to jointly optimize reasoning and final prediction.
+
+The experimental results on SLURP, a spoken language understanding benchmark, across six architectures show consistent improvements over standard fine-tuning.
+
+
 \end{abstract}
 
 
