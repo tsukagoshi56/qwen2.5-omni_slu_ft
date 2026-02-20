@@ -235,6 +235,12 @@ The rejection rationale is defined as
 R = \bigoplus_{c \in \bar{C}_I} (c \Vert r(c; x)),
 \end{equation}
 where $\bigoplus$ denotes concatenation.
+Unlike affirmation-based reasoning, which merely describes
+properties of the correct intent, rejection explicitly requires
+the model to articulate why each competing hypothesis contradicts
+the utterance. This contrastive elimination forces the model to
+identify fine-grained distinctions among semantically adjacent
+intents, thereby sharpening inter-class decision boundaries.
 
 \textbf{Structured Label ($L$):}
 The final structured output is
