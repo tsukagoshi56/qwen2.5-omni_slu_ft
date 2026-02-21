@@ -8,7 +8,7 @@ import threading
 import time
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from tqdm import tqdm
@@ -30,15 +30,41 @@ from common import (
     build_db_definitions,
     label_from_record,
     load_metadata,
+    normalize_intent_label,
     read_jsonl,
     write_jsonl,
 )
 from prompts import render_oracle_prompt
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+try:
+    from train_qwen2_audio_slurp import build_massive_entities, load_speech_massive_split
+except Exception:
+    build_massive_entities = None
+    load_speech_massive_split = None
+
 
 _thread_local = threading.local()
 _error_lock = threading.Lock()
 _DEBUG = False
+ALL_SPEECH_MASSIVE_CONFIGS = [
+    "ar-SA",
+    "de-DE",
+    "es-ES",
+    "fr-FR",
+    "hu-HU",
+    "ko-KR",
+    "nl-NL",
+    "pl-PL",
+    "pt-PT",
+    "ru-RU",
+    "tr-TR",
+    "vi-VN",
+]
+ALL_SPEECH_MASSIVE_WITH_TRAIN = {"de-DE", "fr-FR"}
 
 
 def _canonicalize_model_name(model_name: str) -> str:
@@ -330,6 +356,330 @@ def _spawn_workers(num_workers: int, base_args: List[str]) -> List[subprocess.Po
     return procs
 
 
+def _safe_filename_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+
+
+def _append_suffix_to_path(path: str, suffix: str) -> str:
+    root, ext = os.path.splitext(str(path))
+    ext = ext or ".jsonl"
+    safe_suffix = _safe_filename_component(suffix)
+    return f"{root}.{safe_suffix}{ext}"
+
+
+def _error_text(exc: Exception, limit: int = 220) -> str:
+    text = " ".join(str(exc).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _looks_like_missing_cache(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    markers = [
+        "local_files_only=true",
+        "local files only",
+        "not found in local dataset",
+        "couldn't find",
+        "could not find",
+        "no such file",
+        "doesn't exist",
+        "does not exist",
+        "not found",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _is_massive_job_cached(
+    dataset_name: str,
+    dataset_config: str,
+    split: str,
+    cache_dir: Optional[str],
+) -> Tuple[bool, str]:
+    if load_speech_massive_split is None:
+        raise RuntimeError(
+            "Speech-MASSIVE support requires train_qwen2_audio_slurp.py "
+            "(load_speech_massive_split)."
+        )
+    try:
+        _ = load_speech_massive_split(
+            dataset_name=dataset_name,
+            dataset_config=dataset_config,
+            split=split,
+            cache_dir=cache_dir,
+        )
+        return True, ""
+    except Exception as exc:
+        if _looks_like_missing_cache(exc):
+            return False, _error_text(exc)
+        raise
+
+
+def _all_massive_jobs(args: argparse.Namespace) -> List[Tuple[str, str, str, str]]:
+    jobs: List[Tuple[str, str, str, str]] = []
+    for config in ALL_SPEECH_MASSIVE_CONFIGS:
+        splits = ["train_115"]
+        if config in ALL_SPEECH_MASSIVE_WITH_TRAIN:
+            splits.append("train")
+        splits.append("validation")
+        for split in splits:
+            suffix = f"speech_massive.{config}.{split}"
+            output_file = _append_suffix_to_path(args.output_file, suffix)
+            error_file = (
+                _append_suffix_to_path(args.error_file, suffix)
+                if str(args.error_file or "").strip()
+                else ""
+            )
+            jobs.append((config, split, output_file, error_file))
+    return jobs
+
+
+def _run_all_massive(args: argparse.Namespace) -> None:
+    if args.dataset != "speech_massive":
+        raise ValueError("--all is supported only with --dataset speech_massive.")
+    if args.merge_only:
+        raise ValueError("--all cannot be combined with --merge_only.")
+
+    script_path = os.path.abspath(__file__)
+    base_args = list(sys.argv[1:])
+    base_args = _strip_arg(base_args, "--all", has_value=False)
+    base_args = _strip_arg(base_args, "--massive_dataset_config", has_value=True)
+    base_args = _strip_arg(base_args, "--massive_split", has_value=True)
+    base_args = _strip_arg(base_args, "--output_file", has_value=True)
+    base_args = _strip_arg(base_args, "--error_file", has_value=True)
+
+    jobs = _all_massive_jobs(args)
+    print(f"[ALL] Running {len(jobs)} Speech-MASSIVE jobs sequentially.", flush=True)
+    failures: List[Tuple[str, str, int]] = []
+    skipped: List[Tuple[str, str, str]] = []
+    executed = 0
+
+    for idx, (config, split, output_file, error_file) in enumerate(jobs, start=1):
+        is_cached, reason = _is_massive_job_cached(
+            dataset_name=args.massive_dataset_name,
+            dataset_config=config,
+            split=split,
+            cache_dir=args.massive_cache_dir,
+        )
+        if not is_cached:
+            skipped.append((config, split, reason))
+            print(
+                f"[ALL][{idx}/{len(jobs)}][SKIP] config={config} split={split} "
+                f"(not in local cache: {reason})",
+                flush=True,
+            )
+            continue
+
+        cmd = [
+            sys.executable,
+            script_path,
+            *base_args,
+            "--massive_dataset_config",
+            config,
+            "--massive_split",
+            split,
+            "--output_file",
+            output_file,
+        ]
+        if error_file:
+            cmd.extend(["--error_file", error_file])
+
+        print(
+            f"[ALL][{idx}/{len(jobs)}] config={config} split={split} -> output={output_file}",
+            flush=True,
+        )
+        executed += 1
+        rc = subprocess.call(cmd, env=os.environ.copy())
+        if rc != 0:
+            failures.append((config, split, rc))
+            print(f"[ALL][WARN] failed: config={config} split={split} rc={rc}", flush=True)
+
+    print(
+        f"[ALL] summary: total={len(jobs)} executed={executed} skipped={len(skipped)} failed={len(failures)}",
+        flush=True,
+    )
+    if failures:
+        failure_text = ", ".join([f"{cfg}/{spl}(rc={rc})" for cfg, spl, rc in failures])
+        raise RuntimeError(f"--all finished with failures: {failure_text}")
+
+
+def _normalize_massive_scenario_action(scenario_value: Any, intent_value: Any) -> Tuple[str, str, str]:
+    scenario = str(scenario_value or "").strip()
+    intent = normalize_intent_label(str(intent_value or "").strip())
+    action = intent
+    scenario_norm = normalize_intent_label(scenario)
+    if scenario_norm and intent.startswith(f"{scenario_norm}_"):
+        action = intent[len(scenario_norm) + 1 :]
+    elif (not scenario_norm) and intent:
+        if "_" in intent:
+            scenario, action = intent.split("_", 1)
+    return scenario, action, intent
+
+
+def _unique_keep_order(values: Sequence[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _massive_entities_to_common(
+    tokens: Sequence[str],
+    labels: Sequence[str],
+    outside_label: str,
+) -> List[Dict[str, str]]:
+    if build_massive_entities is None:
+        raise RuntimeError(
+            "Speech-MASSIVE support requires train_qwen2_audio_slurp.py "
+            "(build_massive_entities/load_speech_massive_split)."
+        )
+    raw_entities = build_massive_entities(tokens, labels, outside_label)
+    entities: List[Dict[str, str]] = []
+    for ent in raw_entities:
+        if not isinstance(ent, dict):
+            continue
+        slot_type = ""
+        slot_value = ""
+        if "type" in ent:
+            slot_type = str(ent.get("type", "")).strip()
+            filler = ent.get("filler")
+            if filler is None:
+                filler = ent.get("filter")
+            if filler is None:
+                filler = ent.get("value")
+            slot_value = "" if filler is None else str(filler).strip()
+        else:
+            for key, value in ent.items():
+                slot_type = str(key).strip()
+                slot_value = "" if value is None else str(value).strip()
+                break
+        if not slot_type:
+            continue
+        entities.append({"type": slot_type, "filler": slot_value})
+    return entities
+
+
+def _normalize_speech_massive_record(
+    record: Dict[str, Any],
+    dataset_config: str,
+    split: str,
+    index: int,
+    transcript_field: str,
+    outside_label: str,
+) -> Dict[str, Any]:
+    transcript = str(
+        record.get(transcript_field)
+        or record.get("utt")
+        or record.get("text")
+        or ""
+    ).strip()
+    raw_scenario = record.get("scenario_str") or record.get("scenario") or ""
+    raw_intent = record.get("intent_str") or record.get("intent") or ""
+    scenario, action, intent = _normalize_massive_scenario_action(raw_scenario, raw_intent)
+    token_values = record.get("tokens") if isinstance(record.get("tokens"), list) else []
+    label_values = record.get("labels") if isinstance(record.get("labels"), list) else []
+    tokens = [str(tok or "").strip() for tok in token_values]
+    labels = [str(lbl) for lbl in label_values]
+    entities = _massive_entities_to_common(tokens, labels, outside_label) if (tokens and labels) else []
+
+    base_id = (
+        record.get("id")
+        or record.get("utt_id")
+        or record.get("audio_id")
+        or str(index)
+    )
+    slurp_id = f"massive-{dataset_config}-{base_id}"
+
+    return {
+        "slurp_id": slurp_id,
+        "sentence": transcript,
+        "text": transcript,
+        "scenario": scenario,
+        "action": action,
+        "intent": intent,
+        "entities": entities,
+        "tokens": [{"surface": tok} for tok in tokens],
+        "massive_tokens": tokens,
+        "massive_labels": labels,
+        "dataset": "speech_massive",
+        "dataset_config": dataset_config,
+        "dataset_split": split,
+    }
+
+
+def _load_speech_massive_items(
+    dataset_name: str,
+    dataset_configs: Sequence[str],
+    split: str,
+    cache_dir: Optional[str],
+    transcript_field: str,
+    outside_label: str,
+) -> List[Dict[str, Any]]:
+    if load_speech_massive_split is None:
+        raise RuntimeError(
+            "Speech-MASSIVE support requires train_qwen2_audio_slurp.py "
+            "(load_speech_massive_split)."
+        )
+    items: List[Dict[str, Any]] = []
+    for config in dataset_configs:
+        ds = load_speech_massive_split(
+            dataset_name=dataset_name,
+            dataset_config=config,
+            split=split,
+            cache_dir=cache_dir,
+        )
+        for idx, record in enumerate(ds):
+            if not isinstance(record, dict):
+                continue
+            items.append(
+                _normalize_speech_massive_record(
+                    record=record,
+                    dataset_config=config,
+                    split=split,
+                    index=idx,
+                    transcript_field=transcript_field,
+                    outside_label=outside_label,
+                )
+            )
+    return items
+
+
+def _build_metadata_from_items(items: Sequence[Dict[str, Any]]) -> Dict[str, List[str]]:
+    scenarios: List[str] = []
+    actions: List[str] = []
+    intents: List[str] = []
+    slot_types: List[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        scenario = str(item.get("scenario", "")).strip()
+        action = str(item.get("action", "")).strip()
+        if scenario:
+            scenarios.append(scenario)
+        if action:
+            actions.append(action)
+        if scenario or action:
+            intents.append(normalize_intent_label(f"{scenario}_{action}".strip("_")))
+        entities = item.get("entities", []) if isinstance(item.get("entities"), list) else []
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            slot_type = str(ent.get("type", "")).strip()
+            if slot_type:
+                slot_types.append(slot_type)
+    return {
+        "scenarios": _unique_keep_order(scenarios),
+        "actions": _unique_keep_order(actions),
+        "intents": _unique_keep_order(intents),
+        "slot_types": _unique_keep_order(slot_types),
+    }
+
+
 def _extract_asr_1best_text(record: Dict[str, Any]) -> str:
     hyps = record.get("asr_hypotheses")
     if not isinstance(hyps, list) or not hyps:
@@ -456,8 +806,23 @@ def _run_single(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Oracle CoT rationales (gold text + gold JSON).")
+    parser.add_argument("--dataset", type=str, choices=["slurp", "speech_massive"], default="slurp")
     parser.add_argument("--input_file", type=str, default="slurp/dataset/slurp/train.jsonl")
     parser.add_argument("--metadata_file", type=str, default="Experiment_3/slurp_metadata.json")
+    parser.add_argument("--massive_dataset_name", type=str, default="FBK-MT/Speech-MASSIVE")
+    parser.add_argument("--massive_dataset_config", type=str, default="it-IT")
+    parser.add_argument("--massive_split", type=str, default="train_115")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Run Speech-MASSIVE for all supported language/split combinations "
+            "sequentially. Output filenames are auto-suffixed with config/split."
+        ),
+    )
+    parser.add_argument("--massive_cache_dir", type=str, default=None)
+    parser.add_argument("--massive_transcript_field", type=str, default="utt")
+    parser.add_argument("--massive_outside_label", type=str, default="Other")
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/oracle_cot.jsonl")
     parser.add_argument("--model_name", "--model", dest="model_name", type=str, default="deepseek-r1")
     parser.add_argument("--max_tokens", type=int, default=4096)
@@ -493,6 +858,9 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
     args.model_name = _canonicalize_model_name(args.model_name)
+    if args.all:
+        _run_all_massive(args)
+        return
 
     global _DEBUG
     _DEBUG = args.debug
@@ -547,14 +915,28 @@ def main() -> None:
         _merge_worker_outputs(base_output_path, args.num_workers, cleanup=args.merge_cleanup)
         return
 
-    metadata = load_metadata(metadata_path)
+    if args.dataset == "speech_massive":
+        dataset_configs = [cfg.strip() for cfg in args.massive_dataset_config.split(",") if cfg.strip()]
+        if not dataset_configs:
+            raise ValueError("massive_dataset_config must contain at least one config (e.g., it-IT).")
+        items = _load_speech_massive_items(
+            dataset_name=args.massive_dataset_name,
+            dataset_configs=dataset_configs,
+            split=args.massive_split,
+            cache_dir=args.massive_cache_dir,
+            transcript_field=args.massive_transcript_field,
+            outside_label=args.massive_outside_label,
+        )
+        metadata = _build_metadata_from_items(items)
+    else:
+        metadata = load_metadata(metadata_path)
+        items = read_jsonl(input_path)
     db_definitions = build_db_definitions(metadata)
     intent_order = [
         _normalize_intent(str(x)) for x in metadata.get("intents", []) or [] if str(x).strip()
     ]
     slot_order = [str(x).strip() for x in metadata.get("slot_types", []) or [] if str(x).strip()]
 
-    items = read_jsonl(input_path)
     if args.smoke:
         args.limit = 100
     if args.limit:
