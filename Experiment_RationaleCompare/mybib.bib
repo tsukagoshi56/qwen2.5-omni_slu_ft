@@ -14,68 +14,70 @@
   year    = {2022},
   volume  = {27},
   pages   = {2305--2317},
-  doi     = {10.1007/s11036-021-01795-5},
-  note    = {Accepted: 01 December 2020; Published online: 23 July 2021}
+  doi     = {10.1007/s11036-021-01795-5}
 }
 
 @misc{shim2024chainofthoughtaugmentationlogitcontrast,
-      title={Chain-of-Thought Augmentation with Logit Contrast for Enhanced Reasoning in Language Models}, 
-      author={Jay Shim and Grant Kruttschnitt and Alyssa Ma and Daniel Kim and Benjamin Chek and Athul Anand and Kevin Zhu and Sean O'Brien},
-      year={2024},
-      eprint={2407.03600},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2407.03600}, 
+  title        = {Chain-of-Thought Augmentation with Logit Contrast for Enhanced Reasoning in Language Models},
+  author       = {Jay Shim and Grant Kruttschnitt and Alyssa Ma and Daniel Kim and Benjamin Chek and others},
+  year         = {2024},
+  eprint       = {2407.03600},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL},
+  url          = {https://arxiv.org/abs/2407.03600}
 }
 
-@article{verma2021counterfactual, title={Counterfactual explanations for machine learning: Challenges revisited}, author={Verma, Sahil and Dickerson, John and Hines, Keegan}, journal={arXiv preprint arXiv:2106.07756}, year={2021} }
+@article{ROUSSEEUW198753,
+  title   = {Silhouettes: A graphical aid to the interpretation and validation of cluster analysis},
+  journal = {Journal of Computational and Applied Mathematics},
+  volume  = {20},
+  pages   = {53--65},
+  year    = {1987},
+  doi     = {10.1016/0377-0427(87)90125-7},
+  author  = {Peter J. Rousseeuw}
+}
 
+@article{fisher1936use,
+  title     = {The use of multiple measurements in taxonomic problems},
+  author    = {Fisher, Ronald A},
+  journal   = {Annals of eugenics},
+  volume    = {7},
+  number    = {2},
+  pages     = {179--188},
+  year      = {1936},
+  publisher = {Wiley Online Library}
+}
+
+@article{verma2021counterfactual,
+  title   = {Counterfactual explanations for machine learning: Challenges revisited},
+  author  = {Verma, Sahil and Dickerson, John and Hines, Keegan},
+  journal = {arXiv preprint arXiv:2106.07756},
+  year    = {2021}
+}
 
 @inproceedings{chen-etal-2021-kace,
-    title = "{KACE}: Generating Knowledge Aware Contrastive Explanations for Natural Language Inference",
-    author = "Chen, Qianglong  and
-      Ji, Feng  and
-      Zeng, Xiangji  and
-      Li, Feng-Lin  and
-      Zhang, Ji  and
-      Chen, Haiqing  and
-      Zhang, Yin",
-    editor = "Zong, Chengqing  and
-      Xia, Fei  and
-      Li, Wenjie  and
-      Navigli, Roberto",
-    booktitle = "Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers)",
-    month = aug,
-    year = "2021",
-    address = "Online",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2021.acl-long.196/",
-    doi = "10.18653/v1/2021.acl-long.196",
-    pages = "2516--2527",
-    abstract = "In order to better understand the reason behind model behaviors (i.e., making predictions), most recent works have exploited generative models to provide complementary explanations. However, existing approaches in NLP mainly focus on ``WHY A'' rather than contrastive ``WHY A NOT B'', which is shown to be able to better distinguish confusing candidates and improve data efficiency in other research fields. In this paper, we focus on generating contrastive explanations with counterfactual examples in NLI and propose a novel \textbf{K}nowledge-\textbf{A}ware \textbf{C}ontrastive \textbf{E}xplanation generation framework (\textbf{KACE}).Specifically, we first identify rationales (i.e., key phrases) from input sentences, and use them as key perturbations for generating counterfactual examples. After obtaining qualified counterfactual examples, we take them along with original examples and external knowledge as input, and employ a knowledge-aware generative pre-trained language model to generate contrastive explanations. Experimental results show that contrastive explanations are beneficial to fit the scenarios by clarifying the difference between the predicted answer and other possible wrong ones. Moreover, we train an NLI model enhanced with contrastive explanations and achieves an accuracy of 91.9{\%} on SNLI, gaining improvements of 5.7{\%} against ETPA ({``}Explain-Then-Predict-Attention'') and 0.6{\%} against NILE ({``}WHY A'')."
+  title     = {{KACE}: Generating Knowledge Aware Contrastive Explanations for Natural Language Inference},
+  author    = {Chen, Qianglong and Ji, Feng and Zeng, Xiangji and Li, Feng-Lin and Zhang, Ji and others},
+  booktitle = {Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers)},
+  month     = aug,
+  year      = {2021},
+  address   = {Online},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2021.acl-long.196},
+  pages     = {2516--2527}
 }
 
 @inproceedings{bastianelli-etal-2020-slurp,
-    title = "{SLURP}: A Spoken Language Understanding Resource Package",
-    author = "Bastianelli, Emanuele  and
-      Vanzo, Andrea  and
-      Swietojanski, Pawel  and
-      Rieser, Verena",
-    editor = "Webber, Bonnie  and
-      Cohn, Trevor  and
-      He, Yulan  and
-      Liu, Yang",
-    booktitle = "Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)",
-    month = nov,
-    year = "2020",
-    address = "Online",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2020.emnlp-main.588/",
-    doi = "10.18653/v1/2020.emnlp-main.588",
-    pages = "7252--7262",
-    abstract = "Spoken Language Understanding infers semantic meaning directly from audio data, and thus promises to reduce error propagation and misunderstandings in end-user applications. However, publicly available SLU resources are limited. In this paper, we release SLURP, a new SLU package containing the following: (1) A new challenging dataset in English spanning 18 domains, which is substantially bigger and linguistically more diverse than existing datasets; (2) Competitive baselines based on state-of-the-art NLU and ASR systems; (3) A new transparent metric for entity labelling which enables a detailed error analysis for identifying potential areas of improvement. SLURP is available at \url{https://github.com/pswietojanski/slurp}."
+  title     = {{SLURP}: A Spoken Language Understanding Resource Package},
+  author    = {Bastianelli, Emanuele and Vanzo, Andrea and Swietojanski, Pawel and Rieser, Verena},
+  booktitle = {Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  month     = nov,
+  year      = {2020},
+  address   = {Online},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2020.emnlp-main.588},
+  pages     = {7252--7262}
 }
-
 
 @article{LinaresGarcia2022VIVA,
   author    = {Linares-Garcia, Daniel Antonio and Roofigari-Esfahan, Nazila and Pratt, Kristina and Jeon, Myounghoon},
@@ -84,59 +86,50 @@
   volume    = {143},
   pages     = {104554},
   year      = {2022},
-  issn      = {0926-5805},
-  doi       = {10.1016/j.autcon.2022.104554},
-  url       = {https://www.sciencedirect.com/science/article/pii/S0926580522004241},
-  keywords  = {Productivity, Voice-based, System development, Worker support, IoT, User study, CPS, Cyber-physical systems, Virtual agent, VIVA}
+  doi       = {10.1016/j.autcon.2022.104554}
 }
 
-
 @article{weld2022survey,
-  title={A survey of joint intent detection and slot filling models in natural language understanding},
-  author={Weld, Henry and Huang, Xiaoqi and Long, Siqu and Poon, Josiah and Han, Soyeon Caren},
-  journal={ACM Computing Surveys},
-  volume={55},
-  number={8},
-  pages={1--38},
-  year={2022},
-  publisher={ACM New York, NY}
+  title     = {A survey of joint intent detection and slot filling models in natural language understanding},
+  author    = {Weld, Henry and Huang, Xiaoqi and Long, Siqu and Poon, Josiah and Han, Soyeon Caren},
+  journal   = {ACM Computing Surveys},
+  volume    = {55},
+  number    = {8},
+  pages     = {1--38},
+  year      = {2022},
+  publisher = {ACM New York, NY}
 }
 
 @article{Atuhurra2024DomainAI,
-  title={Domain Adaptation in Intent Classification Systems: A Review},
-  author={Jesse Atuhurra and Hidetaka Kamigaito and Taro Watanabe and Eric Nichols},
-  journal={ArXiv},
-  year={2024},
-  volume={abs/2404.14415},
-  url={https://api.semanticscholar.org/CorpusID:269303013}
+  title   = {Domain Adaptation in Intent Classification Systems: A Review},
+  author  = {Jesse Atuhurra and Hidetaka Kamigaito and Taro Watanabe and Eric Nichols},
+  journal = {arXiv preprint arXiv:2404.14415},
+  year    = {2024}
 }
-
-
 
 @inproceedings{sun2024speech,
-  title={Speech-based slot filling using large language models},
-  author={Sun, Guangzhi and Feng, Shutong and Jiang, Dongcheng and Zhang, Chao and Gasic, Milica and Woodland, Phil},
-  booktitle={Findings of the Association for Computational Linguistics: ACL 2024},
-  pages={6351--6362},
-  year={2024}
+  title     = {Speech-based slot filling using large language models},
+  author    = {Sun, Guangzhi and Feng, Shutong and Jiang, Dongcheng and Zhang, Chao and Gasic, Milica and Woodland, Phil},
+  booktitle = {Findings of the Association for Computational Linguistics: ACL 2024},
+  pages     = {6351--6362},
+  year      = {2024}
 }
+
 @article{chu2024qwen2,
-  title={Qwen2-audio technical report},
-  author={Chu, Yunfei and Xu, Jin and Yang, Qian and Wei, Haojie and Wei, Xipin and Guo, Zhifang and Leng, Yichong and Lv, Yuanjun and He, Jinzheng and Lin, Junyang and others},
-  journal={arXiv preprint arXiv:2407.10759},
-  year={2024}
+  title   = {Qwen2-Audio Technical Report},
+  author  = {Chu, Yunfei and Xu, Jin and Yang, Qian and Wei, Haojie and Wei, Xipin and Guo, Zhifang and others},
+  journal = {arXiv preprint arXiv:2407.10759},
+  year    = {2024}
 }
 
 @inproceedings{li2024whisma,
-  title={Whisma: A speech-llm to perform zero-shot spoken language understanding},
-  author={Li, Mohan and Do, Cong-Thanh and Keizer, Simon and Farag, Youmna and Stoyanchev, Svetlana and Doddipatla, Rama},
-  booktitle={2024 IEEE Spoken Language Technology Workshop (SLT)},
-  pages={1115--1122},
-  year={2024},
-  organization={IEEE}
+  title        = {Whisma: A speech-llm to perform zero-shot spoken language understanding},
+  author       = {Li, Mohan and Do, Cong-Thanh and Keizer, Simon and Farag, Youmna and Stoyanchev, Svetlana and Doddipatla, Rama},
+  booktitle    = {2024 IEEE Spoken Language Technology Workshop (SLT)},
+  pages        = {1115--1122},
+  year         = {2024},
+  organization = {IEEE}
 }
-
-
 
 @inproceedings{AgrawalGanapathy2025SLUUnseenICL,
   author    = {Agrawal, N. and Ganapathy, S.},
@@ -157,11 +150,12 @@
   pages     = {1109--1113},
   doi       = {10.21437/Interspeech.2023-1799}
 }
+
 @article{rouditchenko2025omni,
-  title={Omni-r1: Do you really need audio to fine-tune your audio llm?},
-  author={Rouditchenko, Andrew and Bhati, Saurabhchand and Araujo, Edson and Thomas, Samuel and Kuehne, Hilde and Feris, Rogerio and Glass, James},
-  journal={arXiv preprint arXiv:2505.09439},
-  year={2025}
+  title   = {Omni-r1: Do you really need audio to fine-tune your audio llm?},
+  author  = {Rouditchenko, Andrew and Bhati, Saurabhchand and Araujo, Edson and Thomas, Samuel and Kuehne, Hilde and others},
+  journal = {arXiv preprint arXiv:2505.09439},
+  year    = {2025}
 }
 
 @inproceedings{LiKeizerDoddipatla2024PromptingWhisperQASLU,
@@ -172,31 +166,28 @@
   pages     = {1330--1334},
   doi       = {10.21437/Interspeech.2024-26}
 }
+
 @inproceedings{hacioglu2025speechllms,
-  title={SpeechLLMs for Large-scale Contextualized Zero-shot Slot Filling},
-  author={Hacioglu, Kadri and Manjunath, KE and Stolcke, Andreas},
-  booktitle={Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: Industry Track},
-  pages={703--715},
-  year={2025}
+  title     = {SpeechLLMs for Large-scale Contextualized Zero-shot Slot Filling},
+  author    = {Hacioglu, Kadri and Manjunath, KE and Stolcke, Andreas},
+  booktitle = {Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: Industry Track},
+  pages     = {703--715},
+  year      = {2025}
 }
 
 @article{Das2024SpeechVerseAL,
-  title={SpeechVerse: A Large-scale Generalizable Audio Language Model},
-  author={Nilaksh Das and Saket Dingliwal and S. Ronanki and Rohit Paturi and David Huang and Prashant Mathur and Jie Yuan and Dhanush Bekal and Xing Niu and Sai Muralidhar Jayanthi and Xilai Li and Karel Mundnich and Monica Sunkara and Sundararajan Srinivasan and Kyu J Han and Katrin Kirchhoff},
-  journal={ArXiv},
-  year={2024},
-  volume={abs/2405.08295},
-  url={https://api.semanticscholar.org/CorpusID:269761552}
-}
-@article{Fu2022ComplexityBasedPF,
-  title={Complexity-Based Prompting for Multi-Step Reasoning},
-  author={Yao Fu and Hao-Chun Peng and Ashish Sabharwal and Peter Clark and Tushar Khot},
-  journal={ArXiv},
-  year={2022},
-  volume={abs/2210.00720},
-  url={https://api.semanticscholar.org/CorpusID:252683303}
+  title   = {SpeechVerse: A Large-scale Generalizable Audio Language Model},
+  author  = {Nilaksh Das and Saket Dingliwal and S. Ronanki and Rohit Paturi and David Huang and others},
+  journal = {arXiv preprint arXiv:2405.08295},
+  year    = {2024}
 }
 
+@article{Fu2022ComplexityBasedPF,
+  title   = {Complexity-Based Prompting for Multi-Step Reasoning},
+  author  = {Yao Fu and Hao-Chun Peng and Ashish Sabharwal and Peter Clark and Tushar Khot},
+  journal = {arXiv preprint arXiv:2210.00720},
+  year    = {2022}
+}
 
 @inproceedings{HoSchmidYun2023ReasoningTeachers,
   author    = {Ho, Namgyu and Schmid, Laura and Yun, Se-Young},
@@ -209,64 +200,50 @@
   publisher = {Association for Computational Linguistics}
 }
 
-
-
 @inproceedings{magister-etal-2023-teaching,
-    title = "Teaching Small Language Models to Reason",
-    author = "Magister, Lucie Charlotte  and
-      Mallinson, Jonathan  and
-      Adamek, Jakub  and
-      Malmi, Eric  and
-      Severyn, Aliaksei",
-    editor = "Rogers, Anna  and
-      Boyd-Graber, Jordan  and
-      Okazaki, Naoaki",
-    booktitle = "Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 2: Short Papers)",
-    month = jul,
-    year = "2023",
-    address = "Toronto, Canada",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2023.acl-short.151/",
-    doi = "10.18653/v1/2023.acl-short.151",
-    pages = "1773--1781",
-    abstract = "Chain of thought prompting successfully improves the reasoning capabilities of large language models, achieving state of the art results on a range of datasets. However, these reasoning capabilities only appear to emerge in models with at least tens of billions of parameters. In this paper, we explore the transfer of such reasoning capabilities to smaller models via knowledge distillation, also investigating model and dataset size trade-off. Specifically, we finetune a student model on the chain of thought outputs generated by a larger teacher model. Our experiments show that the proposed method improves task performance across arithmetic, commonsense and symbolic reasoning datasets. For example, the accuracy of T5 XXL on GSM8K improves from 8.11{\%} to 21.99{\%} and 18.42{\%} when finetuned on PaLM 540B and GPT-3 175B generated chains of thought, respectively."
+  title     = {Teaching Small Language Models to Reason},
+  author    = {Magister, Lucie Charlotte and Mallinson, Jonathan and Adamek, Jakub and Malmi, Eric and Severyn, Aliaksei},
+  booktitle = {Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 2: Short Papers)},
+  month     = jul,
+  year      = {2023},
+  address   = {Toronto, Canada},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2023.acl-short.151},
+  pages     = {1773--1781}
 }
 
-
 @misc{zelikman2022starbootstrappingreasoningreasoning,
-      title={STaR: Bootstrapping Reasoning With Reasoning}, 
-      author={Eric Zelikman and Yuhuai Wu and Jesse Mu and Noah D. Goodman},
-      year={2022},
-      eprint={2203.14465},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2203.14465}, 
+  title        = {STaR: Bootstrapping Reasoning With Reasoning},
+  author       = {Eric Zelikman and Yuhuai Wu and Jesse Mu and Noah D. Goodman},
+  year         = {2022},
+  eprint       = {2203.14465},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG},
+  url          = {https://arxiv.org/abs/2203.14465}
 }
 
 @misc{hsieh2023distillingstepbystepoutperforminglarger,
-      title={Distilling Step-by-Step! Outperforming Larger Language Models with Less Training Data and Smaller Model Sizes}, 
-      author={Cheng-Yu Hsieh and Chun-Liang Li and Chih-Kuan Yeh and Hootan Nakhost and Yasuhisa Fujii and Alexander Ratner and Ranjay Krishna and Chen-Yu Lee and Tomas Pfister},
-      year={2023},
-      eprint={2305.02301},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2305.02301}, 
+  title        = {Distilling Step-by-Step! Outperforming Larger Language Models with Less Training Data and Smaller Model Sizes},
+  author       = {Cheng-Yu Hsieh and Chun-Liang Li and Chih-Kuan Yeh and Hootan Nakhost and Yasuhisa Fujii and others},
+  year         = {2023},
+  eprint       = {2305.02301},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL},
+  url          = {https://arxiv.org/abs/2305.02301}
 }
 
-
 @misc{seo2022integrationpretrainednetworkscontinuous,
-      title={Integration of Pre-trained Networks with Continuous Token Interface for End-to-End Spoken Language Understanding}, 
-      author={Seunghyun Seo and Donghyun Kwak and Bowon Lee},
-      year={2022},
-      eprint={2104.07253},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2104.07253}, 
+  title        = {Integration of Pre-trained Networks with Continuous Token Interface for End-to-End Spoken Language Understanding},
+  author       = {Seunghyun Seo and Donghyun Kwak and Bowon Lee},
+  year         = {2022},
+  eprint       = {2104.07253},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL},
+  url          = {https://arxiv.org/abs/2104.07253}
 }
 
 @inproceedings{Gong2023LTUAS,
-  author    = {Gong, Yuan and Liu, Alexander H. and Luo, Hongyin and 
-               Karlinsky, Leonid and Glass, James},
+  author    = {Gong, Yuan and Liu, Alexander H. and Luo, Hongyin and Karlinsky, Leonid and Glass, James},
   title     = {Joint Audio and Speech Understanding},
   booktitle = {Proceedings of the 2023 IEEE Automatic Speech Recognition and Understanding Workshop (ASRU)},
   year      = {2023},
@@ -276,287 +253,182 @@
   doi       = {10.1109/ASRU57964.2023.10389742}
 }
 
-
 @inproceedings{zhang-etal-2023-speechgpt,
-    title = "{S}peech{GPT}: Empowering Large Language Models with Intrinsic Cross-Modal Conversational Abilities",
-    author = "Zhang, Dong  and
-      Li, Shimin  and
-      Zhang, Xin  and
-      Zhan, Jun  and
-      Wang, Pengyu  and
-      Zhou, Yaqian  and
-      Qiu, Xipeng",
-    editor = "Bouamor, Houda  and
-      Pino, Juan  and
-      Bali, Kalika",
-    booktitle = "Findings of the Association for Computational Linguistics: EMNLP 2023",
-    month = dec,
-    year = "2023",
-    address = "Singapore",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2023.findings-emnlp.1055/",
-    doi = "10.18653/v1/2023.findings-emnlp.1055",
-    pages = "15757--15773",
-    abstract = "Multi-modal large language models are regarded as a crucial step towards Artificial General Intelligence (AGI) and have garnered significant interest with the emergence of ChatGPT. However, current speech-language models typically adopt the cascade paradigm, preventing inter-modal knowledge transfer. In this paper, we propose SpeechGPT, a large language model with intrinsic cross-modal conversational abilities, capable of perceiving and generating multi-modal content. With discrete speech representations, we construct SpeechInstruct, the first large-scale cross-modal speech instruction dataset. Additionally, we employ a three-stage training strategy that includes modality-adaptation pre-training, cross-modal instruction fine-tuning, and chain-of-modality instruction fine-tuning. The experimental results demonstrate that SpeechGPT has an impressive capacity to follow cross-modal human instructions and highlight the potential of handling multiple modalities with one model. Code and models are available in \url{https://github.com/0nutation/SpeechGPT}. Demos are shown in \url{https://0nutation.github.io/SpeechGPT.github.io/}."
+  title     = {{S}peech{GPT}: Empowering Large Language Models with Intrinsic Cross-Modal Conversational Abilities},
+  author    = {Zhang, Dong and Li, Shimin and Zhang, Xin and Zhan, Jun and Wang, Pengyu and others},
+  booktitle = {Findings of the Association for Computational Linguistics: EMNLP 2023},
+  month     = dec,
+  year      = {2023},
+  address   = {Singapore},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2023.findings-emnlp.1055},
+  pages     = {15757--15773}
 }
 
 @article{Lei2024SEAL,
-  author        = {Lei, Shuyu and Liu, Lingen and Yang, Jiaolong and Jiao, Yasen and 
-                   Yang, Yuxiang and Yang, Yushu and Guo, Xiang},
-  title         = {SEAL: Advancing Speech Language Models to be Few-Shot Learners},
-  journal       = {arXiv preprint arXiv:2407.14875},
-  year          = {2024},
-  doi           = {10.48550/arXiv.2407.14875},
-  url           = {https://arxiv.org/abs/2407.14875}
+  author  = {Lei, Shuyu and Liu, Lingen and Yang, Jiaolong and Jiao, Yasen and Yang, Yuxiang and others},
+  title   = {SEAL: Advancing Speech Language Models to be Few-Shot Learners},
+  journal = {arXiv preprint arXiv:2407.14875},
+  year    = {2024},
+  doi     = {10.48550/arXiv.2407.14875}
 }
 
-
 @article{hacioglu2025slot,
-  title={Slot Filling as a Reasoning Task for SpeechLLMs},
-  author={Hacioglu, Kadri and Stolcke, Andreas and others},
-  journal={arXiv preprint arXiv:2510.19326},
-  year={2025}
+  title   = {Slot Filling as a Reasoning Task for SpeechLLMs},
+  author  = {Hacioglu, Kadri and Stolcke, Andreas and others},
+  journal = {arXiv preprint arXiv:2510.19326},
+  year    = {2025}
 }
 
 @article{choi2025exploring,
-  title={Exploring Fine-Tuning of Large Audio Language Models for Spoken Language Understanding under Limited Speech Data},
-  author={Choi, Youngwon and Jung, Jaeyoon and Kim, Hyeonyu and Nguyen, Huu-Kim and Kim, Hwayeon},
-  journal={arXiv preprint arXiv:2509.15389},
-  year={2025}
+  title   = {Exploring Fine-Tuning of Large Audio Language Models for Spoken Language Understanding under Limited Speech Data},
+  author  = {Choi, Youngwon and Jung, Jaeyoon and Kim, Hyeonyu and Nguyen, Huu-Kim and Kim, Hwayeon},
+  journal = {arXiv preprint arXiv:2509.15389},
+  year    = {2025}
 }
 
 @article{wei2022chain,
-  title={Chain-of-thought prompting elicits reasoning in large language models},
-  author={Wei, Jason and Wang, Xuezhi and Schuurmans, Dale and Bosma, Maarten and Xia, Fei and Chi, Ed and Le, Quoc V and Zhou, Denny and others},
-  journal={Advances in neural information processing systems},
-  volume={35},
-  pages={24824--24837},
-  year={2022}
+  title   = {Chain-of-thought prompting elicits reasoning in large language models},
+  author  = {Wei, Jason and Wang, Xuezhi and Schuurmans, Dale and Bosma, Maarten and Xia, Fei and others},
+  journal = {Advances in neural information processing systems},
+  volume  = {35},
+  pages   = {24824--24837},
+  year    = {2022}
 }
 
-
 @inproceedings{tang2024salmonn,
-  title={{SALMONN}: Towards Generic Hearing Abilities for Large Language Models},
-  author={Changli Tang and Wenyi Yu and Guangzhi Sun and Xianzhao Chen and Tian Tan and Wei Li and Lu Lu and Zejun Ma and Chao Zhang},
-  booktitle={International Conference on Learning Representations (ICLR)},
-  year={2024}
+  title     = {{SALMONN}: Towards Generic Hearing Abilities for Large Language Models},
+  author    = {Changli Tang and Wenyi Yu and Guangzhi Sun and Xianzhao Chen and Tian Tan and others},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2024}
 }
 
 @inproceedings{hsieh-etal-2023-distilling,
-    title = "Distilling Step-by-Step! Outperforming Larger Language Models with Less Training Data and Smaller Model Sizes",
-    author = "Hsieh, Cheng-Yu  and
-      Li, Chun-Liang  and
-      Yeh, Chih-kuan  and
-      Nakhost, Hootan  and
-      Fujii, Yasuhisa  and
-      Ratner, Alex  and
-      Krishna, Ranjay  and
-      Lee, Chen-Yu  and
-      Pfister, Tomas",
-    editor = "Rogers, Anna  and
-      Boyd-Graber, Jordan  and
-      Okazaki, Naoaki",
-    booktitle = "Findings of the Association for Computational Linguistics: ACL 2023",
-    month = jul,
-    year = "2023",
-    address = "Toronto, Canada",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2023.findings-acl.507/",
-    doi = "10.18653/v1/2023.findings-acl.507",
-    pages = "8003--8017",
-    abstract = "Deploying large language models (LLMs) is challenging because they are memory inefficient and compute-intensive for practical applications. In reaction, researchers train smaller task-specific models by either finetuning with human labels or distilling using LLM-generated labels. However, finetuning and distillation require large amounts of training data to achieve comparable performance to LLMs. We introduce Distilling step-by-step, a new mechanism that (a) trains smaller models that outperform LLMs, and (b) achieves so by leveraging less training data needed by finetuning or distillation. Our method extracts LLM rationales as additional supervision for training small models within a multi-task framework. We present three findings across 4 NLP benchmarks: First, compared to both finetuning and distillation, our mechanism achieves better performance with much fewer labeled/unlabeled training examples. Second, compared to few-shot prompted LLMs, we achieve better performance using substantially smaller model sizes. Third, we reduce both the model size and the amount of data required to outperform LLMs; our finetuned 770M T5 model outperforms the few-shot prompted 540B PaLM model using only 80{\%} of available data on a benchmark, whereas standard finetuning the same T5 model struggles to match even by using 100{\%} of the dataset."
+  title     = {Distilling Step-by-Step! Outperforming Larger Language Models with Less Training Data and Smaller Model Sizes},
+  author    = {Hsieh, Cheng-Yu and Li, Chun-Liang and Yeh, Chih-kuan and Nakhost, Hootan and Fujii, Yasuhisa and others},
+  booktitle = {Findings of the Association for Computational Linguistics: ACL 2023},
+  month     = jul,
+  year      = {2023},
+  address   = {Toronto, Canada},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2023.findings-acl.507},
+  pages     = {8003--8017}
 }
-
 
 @inproceedings{chen-etal-2025-skip,
-    title = "Skip-Thinking: Chunk-wise Chain-of-Thought Distillation Enable Smaller Language Models to Reason Better and Faster",
-    author = "Chen, Xiaoshu  and
-      Zhou, Sihang  and
-      Liang, Ke  and
-      Sun, Xiaoyu  and
-      Liu, Xinwang",
-    editor = "Christodoulopoulos, Christos  and
-      Chakraborty, Tanmoy  and
-      Rose, Carolyn  and
-      Peng, Violet",
-    booktitle = "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
-    month = nov,
-    year = "2025",
-    address = "Suzhou, China",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2025.emnlp-main.610/",
-    doi = "10.18653/v1/2025.emnlp-main.610",
-    pages = "12142--12157",
-    ISBN = "979-8-89176-332-6",
-    abstract = "Chain-of-thought (CoT) distillation allows a large language model (LLM) to guide a small language model (SLM) in reasoning tasks. Existing methods train the SLM to learn the long rationale in one iteration, resulting in two issues: 1) Long rationales lead to a large token-level batch size during training, making gradients of core reasoning tokens (i.e., the token will directly affect the correctness of subsequent reasoning) over-smoothed as they contribute a tiny fraction of the rationale. As a result, the SLM converges to sharp minima where it fails to grasp the reasoning logic. 2) The response is slow, as the SLM must generate a long rationale before reaching the answer. Therefore, we propose chunk-wise training (CWT), which uses a heuristic search to divide the rationale into internal semantically coherent chunks and focuses SLM on learning from only one chunk per iteration. In this way, CWT naturally isolates non-reasoning chunks that do not involve the core reasoning token (e.g., summary and transitional chunks) from the SLM learning for reasoning chunks, making the fraction of the core reasoning token increase in the corresponding iteration. Based on CWT, skip-thinking training (STT) is proposed. STT makes the SLM automatically skip non-reasoning medium chunks to reach the answer, improving reasoning speed while maintaining accuracy. We validate our approach on a variety of SLMs and multiple reasoning tasks."
+  title     = {Skip-Thinking: Chunk-wise Chain-of-Thought Distillation Enable Smaller Language Models to Reason Better and Faster},
+  author    = {Chen, Xiaoshu and Zhou, Sihang and Liang, Ke and Sun, Xiaoyu and Liu, Xinwang},
+  booktitle = {Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing},
+  month     = nov,
+  year      = {2025},
+  address   = {Suzhou, China},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2025.emnlp-main.610},
+  pages     = {12142--12157}
 }
 
-
-@article{chu2024qwen2audio,
-  title={Qwen2-Audio Technical Report},
-  author={Chu, Yunfei and Xu, Jin and Yang, Qian and Wei, Haojie and Wei, Xipin and Guo, Zhifang and Leng, Yichong and Lv, Yuanjun and He, Jinzheng and Lin, Junyang and Zhou, Chang and Zhou, Jingren},
-  journal={arXiv preprint arXiv:2407.10759},
-  year={2024}
-}
 @inproceedings{chen-etal-2025-unveiling-key,
-    title = "Unveiling the Key Factors for Distilling Chain-of-Thought Reasoning",
-    author = "Chen, Xinghao  and
-      Sun, Zhijing  and
-      Wenjin, Guo  and
-      Zhang, Miaoran  and
-      Chen, Yanjun  and
-      Sun, Yirong  and
-      Su, Hui  and
-      Pan, Yijie  and
-      Klakow, Dietrich  and
-      Li, Wenjie  and
-      Shen, Xiaoyu",
-    editor = "Che, Wanxiang  and
-      Nabende, Joyce  and
-      Shutova, Ekaterina  and
-      Pilehvar, Mohammad Taher",
-    booktitle = "Findings of the Association for Computational Linguistics: ACL 2025",
-    month = jul,
-    year = "2025",
-    address = "Vienna, Austria",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2025.findings-acl.782/",
-    doi = "10.18653/v1/2025.findings-acl.782",
-    pages = "15094--15119",
-    ISBN = "979-8-89176-256-5",
-    abstract = "Large Language Models (LLMs) excel in reasoning tasks through Chain-of-Thought (CoT) prompting. However, CoT prompting greatly increases computational demands, which has prompted growing interest in distilling CoT capabilities into Small Language Models (SLMs). This study systematically examines the factors influencing CoT distillation, including the choice of granularity, format and teacher model. Through experiments involving four teacher models and seven student models across seven mathematical and commonsense reasoning datasets, we uncover three key findings: (1) Unlike LLMs, SLMs exhibit a *non-monotonic* relationship with granularity, with stronger models benefiting from finer-grained reasoning and weaker models performing better with simpler CoT supervision; (2) CoT format significantly impacts LLMs but has *minimal* effect on SLMs, likely due to their reliance on supervised fine-tuning rather than pretraining preferences; (3) Stronger teacher models do *NOT* always produce better student models, as diversity and complexity in CoT supervision can outweigh accuracy alone. These findings emphasize the need to tailor CoT strategies to specific student model, offering actionable insights for optimizing CoT distillation in SLMs."
-}
-
-
-@inproceedings{li-etal-2025-small-models,
-  title     = {Small Models Struggle to Learn from Strong Reasoners},
-  author    = {Li, Yuetai and Yue, Xiang and Xu, Zhangchen and Jiang, Fengqing and Niu, Luyao and Lin, Bill Yuchen and Ramasubramanian, Bhaskar and Poovendran, Radha},
-  editor    = {Che, Wanxiang and Nabende, Joyce and Shutova, Ekaterina and Pilehvar, Mohammad Taher},
+  title     = {Unveiling the Key Factors for Distilling Chain-of-Thought Reasoning},
+  author    = {Chen, Xinghao and Sun, Zhijing and Wenjin, Guo and Zhang, Miaoran and Chen, Yanjun and others},
   booktitle = {Findings of the Association for Computational Linguistics: ACL 2025},
   month     = jul,
   year      = {2025},
   address   = {Vienna, Austria},
   publisher = {Association for Computational Linguistics},
-  url       = {https://aclanthology.org/2025.findings-acl.1301/},
-  doi       = {10.18653/v1/2025.findings-acl.1301},
-  pages     = {25366--25394},
-  isbn      = {979-8-89176-256-5}
+  doi       = {10.18653/v1/2025.findings-acl.782},
+  pages     = {15094--15119}
 }
 
+@inproceedings{li-etal-2025-small-models,
+  title     = {Small Models Struggle to Learn from Strong Reasoners},
+  author    = {Li, Yuetai and Yue, Xiang and Xu, Zhangchen and Jiang, Fengqing and Niu, Luyao and others},
+  booktitle = {Findings of the Association for Computational Linguistics: ACL 2025},
+  month     = jul,
+  year      = {2025},
+  address   = {Vienna, Austria},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/2025.findings-acl.1301},
+  pages     = {25366--25394}
+}
 
 @misc{ghosh2025musicflamingoscalingmusic,
-      title={Music Flamingo: Scaling Music Understanding in Audio Language Models}, 
-      author={Sreyan Ghosh and Arushi Goel and Lasha Koroshinadze and Sang-gil Lee and Zhifeng Kong and Joao Felipe Santos and Ramani Duraiswami and Dinesh Manocha and Wei Ping and Mohammad Shoeybi and Bryan Catanzaro},
-      year={2025},
-      eprint={2511.10289},
-      archivePrefix={arXiv},
-      primaryClass={eess.AS},
-      url={https://arxiv.org/abs/2511.10289}, 
+  title        = {Music Flamingo: Scaling Music Understanding in Audio Language Models},
+  author       = {Sreyan Ghosh and Arushi Goel and Lasha Koroshinadze and Sang-gil Lee and Zhifeng Kong and others},
+  year         = {2025},
+  eprint       = {2511.10289},
+  archivePrefix = {arXiv},
+  primaryClass = {eess.AS},
+  url          = {https://arxiv.org/abs/2511.10289}
 }
 
-@misc{zelikman2022starbootstrappingreasoningreasoning,
-      title={STaR: Bootstrapping Reasoning With Reasoning}, 
-      author={Eric Zelikman and Yuhuai Wu and Jesse Mu and Noah D. Goodman},
-      year={2022},
-      eprint={2203.14465},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2203.14465}, 
-}
 @article{Guo_2025,
-   title={DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning},
-   volume={645},
-   ISSN={1476-4687},
-   url={http://dx.doi.org/10.1038/s41586-025-09422-z},
-   DOI={10.1038/s41586-025-09422-z},
-   number={8081},
-   journal={Nature},
-   publisher={Springer Science and Business Media LLC},
-   author={Guo, Daya and Yang, Dejian and Zhang, Haowei and Song, Junxiao and Wang, Peiyi and Zhu, Qihao and Xu, Runxin and Zhang, Ruoyu and Ma, Shirong and Bi, Xiao and Zhang, Xiaokang and Yu, Xingkai and Wu, Yu and Wu, Z. F. and Gou, Zhibin and Shao, Zhihong and Li, Zhuoshu and Gao, Ziyi and Liu, Aixin and Xue, Bing and Wang, Bingxuan and Wu, Bochao and Feng, Bei and Lu, Chengda and Zhao, Chenggang and Deng, Chengqi and Ruan, Chong and Dai, Damai and Chen, Deli and Ji, Dongjie and Li, Erhang and Lin, Fangyun and Dai, Fucong and Luo, Fuli and Hao, Guangbo and Chen, Guanting and Li, Guowei and Zhang, H. and Xu, Hanwei and Ding, Honghui and Gao, Huazuo and Qu, Hui and Li, Hui and Guo, Jianzhong and Li, Jiashi and Chen, Jingchang and Yuan, Jingyang and Tu, Jinhao and Qiu, Junjie and Li, Junlong and Cai, J. L. and Ni, Jiaqi and Liang, Jian and Chen, Jin and Dong, Kai and Hu, Kai and You, Kaichao and Gao, Kaige and Guan, Kang and Huang, Kexin and Yu, Kuai and Wang, Lean and Zhang, Lecong and Zhao, Liang and Wang, Litong and Zhang, Liyue and Xu, Lei and Xia, Leyi and Zhang, Mingchuan and Zhang, Minghua and Tang, Minghui and Zhou, Mingxu and Li, Meng and Wang, Miaojun and Li, Mingming and Tian, Ning and Huang, Panpan and Zhang, Peng and Wang, Qiancheng and Chen, Qinyu and Du, Qiushi and Ge, Ruiqi and Zhang, Ruisong and Pan, Ruizhe and Wang, Runji and Chen, R. J. and Jin, R. L. and Chen, Ruyi and Lu, Shanghao and Zhou, Shangyan and Chen, Shanhuang and Ye, Shengfeng and Wang, Shiyu and Yu, Shuiping and Zhou, Shunfeng and Pan, Shuting and Li, S. S. and Zhou, Shuang and Wu, Shaoqing and Yun, Tao and Pei, Tian and Sun, Tianyu and Wang, T. and Zeng, Wangding and Liu, Wen and Liang, Wenfeng and Gao, Wenjun and Yu, Wenqin and Zhang, Wentao and Xiao, W. L. and An, Wei and Liu, Xiaodong and Wang, Xiaohan and Chen, Xiaokang and Nie, Xiaotao and Cheng, Xin and Liu, Xin and Xie, Xin and Liu, Xingchao and Yang, Xinyu and Li, Xinyuan and Su, Xuecheng and Lin, Xuheng and Li, X. Q. and Jin, Xiangyue and Shen, Xiaojin and Chen, Xiaosha and Sun, Xiaowen and Wang, Xiaoxiang and Song, Xinnan and Zhou, Xinyi and Wang, Xianzu and Shan, Xinxia and Li, Y. K. and Wang, Y. Q. and Wei, Y. X. and Zhang, Yang and Xu, Yanhong and Li, Yao and Zhao, Yao and Sun, Yaofeng and Wang, Yaohui and Yu, Yi and Zhang, Yichao and Shi, Yifan and Xiong, Yiliang and He, Ying and Piao, Yishi and Wang, Yisong and Tan, Yixuan and Ma, Yiyang and Liu, Yiyuan and Guo, Yongqiang and Ou, Yuan and Wang, Yuduan and Gong, Yue and Zou, Yuheng and He, Yujia and Xiong, Yunfan and Luo, Yuxiang and You, Yuxiang and Liu, Yuxuan and Zhou, Yuyang and Zhu, Y. X. and Huang, Yanping and Li, Yaohui and Zheng, Yi and Zhu, Yuchen and Ma, Yunxian and Tang, Ying and Zha, Yukun and Yan, Yuting and Ren, Z. Z. and Ren, Zehui and Sha, Zhangli and Fu, Zhe and Xu, Zhean and Xie, Zhenda and Zhang, Zhengyan and Hao, Zhewen and Ma, Zhicheng and Yan, Zhigang and Wu, Zhiyu and Gu, Zihui and Zhu, Zijia and Liu, Zijun and Li, Zilin and Xie, Ziwei and Song, Ziyang and Pan, Zizheng and Huang, Zhen and Xu, Zhipeng and Zhang, Zhongyu and Zhang, Zhen},
-   year={2025},
-   month=sep, pages={633–638} }
-
+  title     = {DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning},
+  author    = {Guo, Daya and Yang, Dejian and Zhang, Haowei and Song, Junxiao and Wang, Peiyi and others},
+  journal   = {Nature},
+  volume    = {645},
+  number    = {8081},
+  pages     = {633--638},
+  year      = {2025},
+  month     = sep,
+  doi       = {10.1038/s41586-025-09422-z}
+}
 
 @inproceedings{lei-etal-2016-rationalizing,
-    title = "Rationalizing Neural Predictions",
-    author = "Lei, Tao  and
-      Barzilay, Regina  and
-      Jaakkola, Tommi",
-    editor = "Su, Jian  and
-      Duh, Kevin  and
-      Carreras, Xavier",
-    booktitle = "Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing",
-    month = nov,
-    year = "2016",
-    address = "Austin, Texas",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/D16-1011/",
-    doi = "10.18653/v1/D16-1011",
-    pages = "107--117"
+  title     = {Rationalizing Neural Predictions},
+  author    = {Lei, Tao and Barzilay, Regina and Jaakkola, Tommi},
+  booktitle = {Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing},
+  month     = nov,
+  year      = {2016},
+  address   = {Austin, Texas},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/D16-1011},
+  pages     = {107--117}
 }
 
-
 @inproceedings{10.5555/1613715.1613721,
-author = {Zaidan, Omar F. and Eisner, Jason},
-title = {Modeling annotators: a generative approach to learning from annotator rationales},
-year = {2008},
-publisher = {Association for Computational Linguistics},
-address = {USA},
-abstract = {A human annotator can provide hints to a machine learner by highlighting contextual "rationales" for each of his or her annotations (Zaidan et al., 2007). How can one exploit this side information to better learn the desired parameters θ? We present a generative model of how a given annotator, knowing the true θ, stochastically chooses rationales. Thus, observing the rationales helps us infer the true θ. We collect substring rationales for a sentiment classification task (Pang and Lee, 2004) and use them to obtain significant accuracy improvements for each annotator. Our new generative approach exploits the rationales more effectively than our previous "masking SVM" approach. It is also more principled, and could be adapted to help learn other kinds of probabilistic classifiers for quite different tasks.},
-booktitle = {Proceedings of the Conference on Empirical Methods in Natural Language Processing},
-pages = {31–40},
-numpages = {10},
-location = {Honolulu, Hawaii},
-series = {EMNLP '08}
+  author    = {Zaidan, Omar F. and Eisner, Jason},
+  title     = {Modeling annotators: a generative approach to learning from annotator rationales},
+  year      = {2008},
+  publisher = {Association for Computational Linguistics},
+  address   = {USA},
+  booktitle = {Proceedings of the Conference on Empirical Methods in Natural Language Processing},
+  pages     = {31--40},
+  series    = {EMNLP '08}
 }
 
 @inproceedings{zaidan-etal-2007-using,
-    title = "Using ``Annotator Rationales'' to Improve Machine Learning for Text Categorization",
-    author = "Zaidan, Omar  and
-      Eisner, Jason  and
-      Piatko, Christine",
-    editor = "Sidner, Candace  and
-      Schultz, Tanja  and
-      Stone, Matthew  and
-      Zhai, ChengXiang",
-    booktitle = "Human Language Technologies 2007: The Conference of the North {A}merican Chapter of the Association for Computational Linguistics; Proceedings of the Main Conference",
-    month = apr,
-    year = "2007",
-    address = "Rochester, New York",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/N07-1033/",
-    pages = "260--267"
+  title     = {Using ``Annotator Rationales'' to Improve Machine Learning for Text Categorization},
+  author    = {Zaidan, Omar and Eisner, Jason and Piatko, Christine},
+  booktitle = {Human Language Technologies 2007: The Conference of the North {A}merican Chapter of the Association for Computational Linguistics; Proceedings of the Main Conference},
+  month     = apr,
+  year      = {2007},
+  address   = {Rochester, New York},
+  publisher = {Association for Computational Linguistics},
+  pages     = {260--267}
 }
 
 @inproceedings{zhang-etal-2016-rationale,
-    title = "Rationale-Augmented Convolutional Neural Networks for Text Classification",
-    author = "Zhang, Ye  and
-      Marshall, Iain  and
-      Wallace, Byron C.",
-    editor = "Su, Jian  and
-      Duh, Kevin  and
-      Carreras, Xavier",
-    booktitle = "Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing",
-    month = nov,
-    year = "2016",
-    address = "Austin, Texas",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/D16-1076/",
-    doi = "10.18653/v1/D16-1076",
-    pages = "795--804"
+  title     = {Rationale-Augmented Convolutional Neural Networks for Text Classification},
+  author    = {Zhang, Ye and Marshall, Iain and Wallace, Byron C.},
+  booktitle = {Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing},
+  month     = nov,
+  year      = {2016},
+  address   = {Austin, Texas},
+  publisher = {Association for Computational Linguistics},
+  doi       = {10.18653/v1/D16-1076},
+  pages     = {795--804}
 }
 
-
 @article{xu2025qwen25omni,
-  title={Qwen2.5-Omni Technical Report},
-  author={Xu, Jin and Guo, Zhifang and He, Jinzheng and Hu, Hangrui and He, Ting and Bai, Shuai and Chen, Keqin and Wang, Jialin and Fan, Yang and Dang, Kai and Zhang, Bin and Wang, Xiong and Chu, Yunfei and Lin, Junyang},
-  journal={arXiv preprint arXiv:2503.20215},
-  year={2025}
+  title   = {Qwen2.5-Omni Technical Report},
+  author  = {Xu, Jin and Guo, Zhifang and He, Jinzheng and Hu, Hangrui and He, Ting and others},
+  journal = {arXiv preprint arXiv:2503.20215},
+  year    = {2025}
 }
 
 @article{goel2025audioflamingo3,
-  title={Audio Flamingo 3: Advancing Audio Intelligence with Fully Open Large Audio Language Models},
-  author={Goel, Arushi and Ghosh, Sreyan and Kim, Jaehyeon and Kumar, Sonal and Kong, Zhifeng and others},
-  journal={arXiv preprint arXiv:2507.08128},
-  year={2025}
+  title   = {Audio Flamingo 3: Advancing Audio Intelligence with Fully Open Large Audio Language Models},
+  author  = {Goel, Arushi and Ghosh, Sreyan and Kim, Jaehyeon and Kumar, Sonal and Kong, Zhifeng and others},
+  journal = {arXiv preprint arXiv:2507.08128},
+  year    = {2025}
 }

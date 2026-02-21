@@ -468,31 +468,38 @@ provides a holistic measure of the full semantic frame,
 penalizing slot errors more heavily when the intent is incorrect.
 
 
+
 \subsection{Representation Analysis}
 \label{sec:rep_analysis}
 To quantitatively assess whether multitask reasoning supervision
 improves intent discriminability, we extract hidden state vectors
-at the moment of intent generation. Specifically, we identify the
-tokens corresponding to the scenario and action values in the
-generated output and pool their hidden states to obtain a single
-intent representation vector per utterance. We evaluate
-inter-class separability using three complementary metrics.
-
-The \textbf{Silhouette coefficient}~\cite{rousseeuw1987silhouettes}
-measures, for each sample, how much closer it is to its own class
-than to the nearest competing class using cosine distance. The
-overall score approaches $1$ when clusters are well-separated.
-
-The \textbf{Fisher ratio}~\cite{fisher1936use} measures the ratio
-of between-class scatter to within-class scatter in the
-representation space. A higher value indicates that intent classes
-are more discriminable.
-
-The \textbf{nearest-centroid margin} measures, for each sample,
-the difference between its distance to the nearest incorrect class
-centroid and its distance to the correct class centroid. A larger
-positive margin indicates a clearer decision boundary between
+at the moment of intent generation.
+Specifically, we identify the tokens corresponding to the scenario
+and action fields in the generated output and pool their hidden
+states to form a single intent representation vector per utterance.
+Inter-class separability is evaluated using three complementary metrics.
+Silhouette coefficient~\cite{ROUSSEEUW198753} measures,
+for each sample, how much closer it is to its own cluster than to the
+nearest competing cluster under cosine distance; the overall score
+approaches $1$ when clusters are well-separated.
+Fisher ratio~\cite{fisher1936use} is the ratio of
+between-class scatter to within-class scatter in the representation
+space; higher values indicate greater discriminability.
+Nearest-centroid margin:
+for a sample representation $z$ with true class $y$, let
+$\mu_y$ denote the centroid of class $y$ and
+$y'=\arg\min_{k\neq y} d(z,\mu_k)$ the nearest competing class,
+where $d(\cdot,\cdot)$ is Euclidean distance.
+The margin is defined as
+\begin{equation}
+m(z)= d(z,\mu_{y'}) - d(z,\mu_{y}).
+\label{eq:ncm}
+\end{equation}
+A larger positive margin indicates clearer separation between
 semantically adjacent intents.
+
+
+
 
 \subsection{Implementation Details}
 
@@ -622,44 +629,6 @@ integrated design of the $C \to R \to L$ trajectory: each
 component contributes incrementally, and the structured ordering
 is essential to the effectiveness of rejection reasoning as a
 regularization signal.
-
-
-\subsection{Inference Branch: Reasoning-branch vs.\ Label-branch}
-Table~\ref{tab:branch_comparison} reports intent accuracy and
-SLU-F1 for each multitask configuration under two inference
-modes: Reasoning-branch ($g_{\text{reasoning}}$) and Label-branch
-($g_{\text{label}}$). Across all configurations, Label-branch
-consistently achieves higher performance than Reasoning-branch.
-Notably, the performance gap is particularly pronounced in the
-RG-FT w/ R+L configuration, where Label-branch outperforms
-Reasoning-branch by $2.06\%$ in intent accuracy. This trend
-suggests that Reasoning-branch supervision effectively shapes the
-shared representation space during training, but the benefit does
-not transfer to inference-time rationale generation. Rather, the
-structured reasoning internalized through Reasoning-branch
-training is more effectively utilized when the model performs
-direct prediction via Label-branch, without the overhead of
-generating intermediate rationale sequences.
-
-\begin{table}[t]
-\centering
-\caption{Comparison of Reasoning-branch and Label-branch inference
-on intent accuracy and SLU-F1 for RG-FT configurations
-(Qwen2.5-Omni-7B). Reasoning-branch generates the full $C \to R \to L$
-trajectory at inference; Label-branch outputs $L$ directly.}
-\label{tab:branch_comparison}
-\resizebox{\columnwidth}{!}{
-\begin{tabular}{lcccc}
-\hline
-\multirow{2}{*}{\textbf{Configuration}} & \multicolumn{2}{c}{\textbf{Intent Acc.}} & \multicolumn{2}{c}{\textbf{SLU-F1}} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}
- & Reasoning & Label & Reasoning & Label \\ \hline
-RG-FT w/ C+L   & 87.66 & \textbf{88.06} & 77.31 & \textbf{77.89} \\
-RG-FT w/ R+L   & 85.84 & \textbf{87.90} & 75.57 & \textbf{77.78} \\
-RG-FT w/ C+R+L & 86.89 & \textbf{88.23} & 77.12 & \textbf{77.10} \\ \hline
-\end{tabular}
-}
-\end{table}
 
 
 %% ============================================================
