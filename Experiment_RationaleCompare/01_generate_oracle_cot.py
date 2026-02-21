@@ -374,6 +374,14 @@ def _error_text(exc: Exception, limit: int = 220) -> str:
     return text[: limit - 3] + "..."
 
 
+def _set_hf_offline_env(enable: bool) -> Dict[str, str]:
+    keys = ("HF_DATASETS_OFFLINE", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    if bool(enable):
+        for key in keys:
+            os.environ.setdefault(key, "1")
+    return {key: str(os.environ.get(key, "")) for key in keys}
+
+
 def _looks_like_missing_cache(exc: Exception) -> bool:
     text = str(exc or "").lower()
     markers = [
@@ -821,6 +829,24 @@ def main() -> None:
         ),
     )
     parser.add_argument("--massive_cache_dir", type=str, default=None)
+    parser.add_argument(
+        "--massive_offline",
+        "--massive-offline",
+        dest="massive_offline",
+        action="store_true",
+        default=True,
+        help=(
+            "Force HF offline env vars for Speech-MASSIVE "
+            "(HF_DATASETS_OFFLINE/HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE)."
+        ),
+    )
+    parser.add_argument(
+        "--no_massive_offline",
+        "--no-massive-offline",
+        dest="massive_offline",
+        action="store_false",
+        help="Disable forced HF offline env vars for Speech-MASSIVE.",
+    )
     parser.add_argument("--massive_transcript_field", type=str, default="utt")
     parser.add_argument("--massive_outside_label", type=str, default="Other")
     parser.add_argument("--output_file", type=str, default="Experiment_RationaleCompare/oracle_cot.jsonl")
@@ -858,6 +884,19 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true", help="Process only 300 samples for debugging.")
     args = parser.parse_args()
     args.model_name = _canonicalize_model_name(args.model_name)
+
+    if args.dataset == "speech_massive":
+        offline_env = _set_hf_offline_env(bool(args.massive_offline))
+        if int(args.worker_rank) == 0:
+            offline_state = "enabled" if bool(args.massive_offline) else "disabled"
+            print(
+                "[INFO] Speech-MASSIVE HF offline guard: "
+                f"{offline_state} "
+                f"(HF_DATASETS_OFFLINE={offline_env['HF_DATASETS_OFFLINE']!r}, "
+                f"HF_HUB_OFFLINE={offline_env['HF_HUB_OFFLINE']!r}, "
+                f"TRANSFORMERS_OFFLINE={offline_env['TRANSFORMERS_OFFLINE']!r})"
+            )
+
     if args.all:
         _run_all_massive(args)
         return
