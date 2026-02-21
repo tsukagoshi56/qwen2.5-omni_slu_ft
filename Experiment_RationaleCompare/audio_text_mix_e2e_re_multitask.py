@@ -4,7 +4,7 @@ Audio/text mixed SLU training and distributed inference for multitask outputs.
 
 - Task A (CoT): C/R/J rationale output.
 - Task B (Label): J-only output.
-- Multitask training loss: 0.5 * L_cot + 0.5 * L_label.
+- Multitask training loss: (1 - alpha) * L_label + alpha * L_cot.
 """
 
 import argparse
@@ -2752,7 +2752,10 @@ class CustomTrainer(Trainer):
         if cot_mask.any() and label_mask.any():
             cot_loss = per_sample_loss[cot_mask].mean()
             label_loss = per_sample_loss[label_mask].mean()
-            loss = 0.5 * cot_loss + 0.5 * label_loss
+            cot_weight = float(getattr(self, "cot_loss_weight", 0.5))
+            cot_weight = max(0.0, min(1.0, cot_weight))
+            label_weight = 1.0 - cot_weight
+            loss = label_weight * label_loss + cot_weight * cot_loss
         elif cot_mask.any():
             loss = per_sample_loss[cot_mask].mean()
         elif label_mask.any():
@@ -3854,6 +3857,17 @@ def main():
     parser.add_argument("--num_train_epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
+    parser.add_argument(
+        "--cot_loss_weight",
+        "--cot-loss-weight",
+        "--alpha",
+        type=float,
+        default=0.5,
+        help=(
+            "Alpha for multitask loss interpolation: "
+            "(1-alpha) * label_loss + alpha * cot_loss. Range: [0.0, 1.0]."
+        ),
+    )
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument(
         "--eval_max_samples",
@@ -3999,6 +4013,8 @@ def main():
         args.train_id_sample_seed = int(args.seed)
     if args.random_cot_seed is None:
         args.random_cot_seed = int(args.seed)
+    if not (0.0 <= float(args.cot_loss_weight) <= 1.0):
+        raise ValueError("--cot_loss_weight must be between 0.0 and 1.0")
     strict_determinism = not bool(args.allow_nondeterministic)
     deterministic_warn_only = bool(args.deterministic_warn_only)
     if args.smoke and strict_determinism:
@@ -4370,6 +4386,13 @@ def main():
                 "Proceeding without explicitly passing tokenizer."
             )
         trainer = CustomTrainer(**trainer_kwargs)
+        trainer.cot_loss_weight = float(args.cot_loss_weight)
+        if rank == 0:
+            logger.info(
+                "Multitask loss weights | alpha(cot)=%.4f alpha(label)=%.4f",
+                float(args.cot_loss_weight),
+                1.0 - float(args.cot_loss_weight),
+            )
 
         trainer.train()
 
