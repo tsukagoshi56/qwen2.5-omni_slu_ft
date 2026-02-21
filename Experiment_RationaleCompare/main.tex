@@ -9,38 +9,7 @@
 % CAMERA-READY: Use the following command for the camera-ready version, one
 % affiliation per line:
 \documentclass[cameraready]{Interspeech}
-% 
-
-System: SLU Logic Analyst. Infer the intent and slots using "Transcript", "DB Definitions", and "Target JSON".
-
-Rules:
-- Compare candidates from DB before deciding.
-- In C, list candidate intents: include the target label itself and all plausible similar/inclusive alternatives from DB.
-- When plausible, include both a broad/umbrella intent and a more specific intent from the same domain family.
-- In C, list candidate slots (slot types). If a slot has 2+ plausible values, include value candidates as slot_type(value1|value2). If only one value, omit parentheses. If no slots, write (none).
-- R must list only rejection reasons for candidates in C (except the accepted label). Do not write adoption reasons.
-- The accepted label is the remaining one and should match J.
-- Cite specific evidence from transcript.
-- Output exactly 3 lines (C, R, J) and nothing else.
-- List candidates in the exact order they appear in DB Definitions.
-- No conversational filler.
-- J must exactly match the provided Target JSON (verbatim). Do not alter it.
-
----
-[DB Definitions]
-{db_definitions}
-
-[Input Data]
-- Transcript: {gold_text}
-- Target JSON: {gold_json}
-
-Output Format:
-C: Intent candidates: intent1 | intent2 | intent3 | intent4; Slot candidates: slot_type1(value1|value2) | slot_type2 | slot_type3
-R: label1!reason1; label2!reason2; ...
-J: [Target JSON]
-
-
-*==================================================================================*
+% *==================================================================================*
 
 
 % **************************************
@@ -56,6 +25,19 @@ J: [Target JSON]
 % **************************************
 
 %==================================================================================
+
+\newcommand{\blfootnote}[1]{%
+  \begingroup
+  \renewcommand{\thefootnote}{}%
+  \footnote{#1}%
+  \addtocounter{footnote}{-1}%
+  \endgroup
+}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins}
+\usepackage{float}
+
+
 % Title
 % Must exactly match the title entered into the paper submission system
 \title{Distilling Structured Reasoning into SpeechLLMs for Spoken Language Understanding}
@@ -66,9 +48,10 @@ J: [Target JSON]
 % Note that the COMPLETE list of authors MUST be entered into the paper submission system at the outset, including when submitting your manuscript for double-blind review
 % The ORCID number is still optional but will become mandatory in the future years. It is strongly encouraged to get an ORCID for each cu-author.
 % Middle names, including initials, must be included in the first name
-\author[affiliation={1}]{Tsukagoshi}{Toshihiro}
+\author[affiliation={1}]{Toshihiro}{Tsukagoshi}
 \author[affiliation={2}]{Natsuo}{Yamashita}
-\author[affiliation={1,3}]{FirstNameC}{LastNameC}
+\author[affiliation={2}]{Hiroaki}{Kokubo}
+\author[affiliation={2}]{Masaaki}{Yamamoto}
 % The maximum number of authors in the author list is 20. If the number of contributing authors is more than this, they should be listed in a footnote or the acknowledgement section.
 
 %==================================================================================
@@ -76,12 +59,13 @@ J: [Target JSON]
 
 \address{
     $^1$ Shizuoka University, Japan \\
-    $^2$ Address Affiliation 2, Country Affiliation 2 
+    $^2$ Hitachi, Ltd., Japan
 }
 
 %==================================================================================
 % Emails
-\email{tsukagoshi.toshihiro.20@shizuoka.ac.jp, second@companyA.com, third@companyB.ai}
+\email{tsukagoshi.toshihiro.20@shizuoka.ac.jp,
+\{natsuo.yamashita.gh, hiroaki.kokubo.dz, masaaki.yamamoto.af\}@hitachi.com}
 
 %==================================================================================
 % Keywords
@@ -98,19 +82,30 @@ J: [Target JSON]
 
 \maketitle
 
-% the abstract here must exactly match the abstract entered into the paper submission system
-%% ============================================================
-%%  Abstract
-%% ============================================================
 
-%% ============================================================
-%%  Abstract
-%% ============================================================
+% the abstract here must exactly match the abstract entered into the paper submission system
+
+
+
 
 \begin{abstract}
-Recent Speech Large Language Models (SpeechLLMs) enable end-to-end Spoken language understanding (SLU) by directly processing acoustic inputs. However, (1) learning clear decision boundaries among competing interpretations remains challenging. In text-only LLMs, structured reasoning distillation has been shown to improve downstream performance. Yet, (2) directly training SpeechLLMs to generate reasoning traces as a solution to this problem can destabilize optimization and degrade performance.
-To address both issues, we propose a structured reasoning distillation framework that integrates reasoning not as a primary generation objective but as a form of regularization. To explicitly model differences among competing interpretations, we formulate SLU as a stepwise decision process consisting of candidate enumeration, rejection of incorrect alternatives, and final label prediction. By jointly optimizing reasoning trajectories and direct label prediction in a multitask learning framework, reasoning functions as a structural regularizer that enhances boundary-sensitive representations without incurring inference-time overhead.
-Experiments on the SLURP benchmark across six architectures demonstrate consistent improvements over both standard fine-tuning and reasoning-only training in intent accuracy and SLU-F1. Representation analysis further confirms improved inter-class separability in the latent space.
+Recent Speech Large Language Models (SpeechLLMs) have emerged as a
+promising approach for end-to-end Spoken Language Understanding (SLU).
+While adapting SpeechLLMs to specific SLU tasks such as intent
+classification requires alignment with task-specific label schemas,
+conventional fine-tuning still struggles to separate semantically
+adjacent intent categories.
+To address this, we propose Reasoning-Guided Fine-Tuning (RG-FT),
+which distills structured reasoning trajectories generated by
+DeepSeek-R1, comprising candidate enumeration, rejection reasoning,
+and label prediction, into SpeechLLMs as a multitask objective.
+Explicitly verbalizing why incorrect candidates are rejected forces the
+model to capture fine-grained distinctions and sharpen inter-class
+decision boundaries.
+At inference, only direct label prediction is used, incurring zero
+additional computational cost.
+Experiments on an SLU benchmark across six architectures demonstrate
+that RG-FT consistently improves SLU performance.
 \end{abstract}
 
 
@@ -119,7 +114,6 @@ Experiments on the SLURP benchmark across six architectures demonstrate consiste
 %% ============================================================
 
 \section{Introduction}
-
 Spoken language understanding (SLU) is a key component of task-oriented
 dialogue systems, enabling a wide range of real-world applications such
 as commercial voice
@@ -127,10 +121,12 @@ assistants~\cite{SaxonChoudharyMcKennaMouchtaris2021E2ESLUVoiceAssistants},
 customer-service automation in contact
 centers~\cite{WuMaoFeng2022AIOnlineCustomerService}, and supporting
 front-line workers in operational
-environments~\cite{LinaresGarcia2022VIVA}. SLU typically comprises
-intent classification~\cite{Atuhurra2024DomainAI} and slot
-filling~\cite{weld2022survey} for mapping an utterance to a semantic
-frame.
+environments~\cite{LinaresGarcia2022VIVA}.
+Among the core SLU tasks, intent
+classification (IC)~\cite{Atuhurra2024DomainAI} and slot
+filling (SF)~\cite{weld2022survey} are of particular relevance to this work,
+as they jointly map an utterance to a structured semantic frame; the
+remainder of this paper focuses on these two tasks.
 
 Recent advances in Speech Large Language Models (SpeechLLMs), including
 SALMONN~\cite{tang2024salmonn}, Qwen2-Audio~\cite{chu2024qwen2audio},
@@ -138,116 +134,189 @@ Qwen2.5-Omni~\cite{xu2025qwen25omni}, and
 Audio-Flamingo~\cite{goel2025audioflamingo3}, enable end-to-end SLU by
 directly processing acoustic signals and generating structured textual
 outputs.
-
-Prior work on SpeechLLMs for SLU has explored a range of approaches,
-including zero-shot and prompting-based SLU that reformulates intent
-detection and slot filling as question-answering
-tasks~\cite{LiKeizerDoddipatla2024PromptingWhisperQASLU}, large-scale
-zero-shot slot filling across diverse schema
-settings~\cite{hacioglu2025speechllms,hacioglu2025slot},
-parameter-efficient fine-tuning with modality
-alignment~\cite{li2024whisma}, task-agnostic generalization to unseen
-intents~\cite{AgrawalGanapathy2025SLUUnseenICL}, and systematic analyses
-of fine-tuning strategies under limited speech
-supervision~\cite{choi2025exploring}. Despite these efforts, correctly
-distinguishing semantically adjacent intents that differ only in subtle
-aspects such as scope or granularity remains a persistent challenge.
-Learning such fine-grained distinctions purely from data requires a
-substantial number of boundary examples, which are costly to collect in
+Prior work on SpeechLLMs for IC and SF has explored a range of
+approaches.
+\cite{LiKeizerDoddipatla2024PromptingWhisperQASLU} reformulated intent
+detection and slot filling as question-answering tasks, demonstrating
+that SpeechLLMs can perform SLU in a zero-shot prompting regime without
+task-specific training.
+\cite{hacioglu2025speechllms} tackled large-scale zero-shot slot
+filling, revealing systematic performance and robustness gaps and showing
+that improvements to training data, architecture, and strategy can
+substantially narrow them.
+\cite{AgrawalGanapathy2025SLUUnseenICL} demonstrated that
+task-agnostic fine-tuning with randomized class labels unlocks few-shot
+generalization to entirely unseen intents without task-specific
+annotations.
+While such zero-shot and few-shot approaches offer flexibility,
+fine-tuning on task-specific data remains necessary to achieve
+competitive accuracy.
+\cite{li2024whisma} showed that coupling a modality aligner with
+parameter-efficient LoRA fine-tuning enables strong performance across
+diverse SLU benchmarks, and \cite{choi2025exploring} established that
+even a small fraction of paired speech data suffices to recover most of
+the gap between text-only and fully supervised fine-tuning.
+Despite these efforts, correctly distinguishing semantically adjacent
+intents that differ only in subtle aspects such as scope or granularity
+remains a persistent challenge, as conventional fine-tuning approaches
+fail to provide sufficient separation between competing interpretations.
+Acquiring such fine-grained distinctions purely from data demands a
+large number of near-boundary examples, which are costly to obtain in
 practice.
+Figure~\ref{fig:proposed_method} provides an overview of the proposed
+framework. The following subsections describe each component in detail.
 
-Correctly identifying semantically adjacent intents requires the model
-to explicitly learn fine-grained differences among candidates.
-Supervision through structured intermediate reasoning offers a promising
-path toward this goal. In text-based LLM research, rationale-based
-supervision~\cite{zelikman2022starbootstrappingreasoningreasoning} and
-reasoning
-distillation~\cite{magister-etal-2023-teaching,HoSchmidYun2023ReasoningTeachers,Fu2022ComplexityBasedPF,hsieh2023distillingstepbystepoutperforminglarger}
-have shown that incorporating structured intermediate reasoning can
-improve downstream performance on text tasks. However, these findings
-are grounded in text-only settings, and whether such supervision
-transfers effectively to SpeechLLM-based SLU---where acoustic and
-semantic representations must be jointly modeled---has not yet been
-investigated.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figure/method.png}
+  \caption{Overview of the proposed method.}
+  \label{fig:proposed_method}
+\end{figure}
 
-In this work, we propose a structured reasoning distillation framework
-for SpeechLLM-based SLU that addresses confusion among semantically
-adjacent intent categories. We explicitly model SLU as a stepwise
-decision process---enumerating plausible intent candidates, rejecting
-incorrect alternatives with evidence-grounded justifications, and
-producing a structured semantic label---and distill such structured
-rationales from a large reasoning teacher into SpeechLLMs. Rather than
-treating reasoning as a primary inference objective, we adopt a multitask
-learning formulation that uses intermediate reasoning as a structural
-regularizer for direct label prediction. By jointly optimizing reasoning
-generation and direct prediction, the model acquires feature
-representations that are sensitive to fine-grained differences among
-intent candidates, while at inference time producing labels directly
-without generating reasoning traces, incurring no additional
-computational cost.
+One promising direction for addressing this challenge is to supervise
+the reasoning process that underlies fine-grained intent discrimination,
+rather than relying solely on label supervision.
+In text-based LLM research, rationale-based supervision~\cite{zaidan-etal-2007-using,10.5555/1613715.1613721,lei-etal-2016-rationalizing} and reasoning distillation~\cite{magister-etal-2023-teaching,HoSchmidYun2023ReasoningTeachers,Fu2022ComplexityBasedPF,hsieh2023distillingstepbystepoutperforminglarger,zelikman2022starbootstrappingreasoningreasoning} have demonstrated that injecting structured intermediate reasoning signals into the training objective can improve downstream performance.
+However, these results are largely established in text-only settings.
+It remains unclear whether such supervision transfers to SpeechLLM-based SLU, where semantic decisions must be formed from acoustically entangled representations that exhibit variability from speakers, prosody, and noise.
+This acoustic--semantic coupling makes fine-grained intent discrimination particularly challenging under limited supervision, especially for semantically adjacent intent categories.
+
+We address this gap with Reasoning-Guided Fine-Tuning (RG-FT),
+a structured reasoning distillation framework for SpeechLLM-based SLU.
+In this framework, structured reasoning trajectories generated by
+DeepSeek-R1~\cite{Guo_2025}---each consisting of candidate
+enumeration, rejection reasoning, and label prediction---are distilled
+into SpeechLLMs.
+The core idea is that explicitly verbalizing the grounds for rejecting
+incorrect candidates serves as a structural regularizer, forcing the
+model to capture fine-grained distinctions and sharpen inter-class
+decision boundaries.
+We formulate this as a multitask learning objective, using only direct
+label prediction at inference with zero additional computational cost.
+We validate RG-FT on SLURP~\cite{bastianelli-etal-2020-slurp} across
+six SpeechLLM architectures, and further provide quantitative analysis
+of the resulting latent representations via Silhouette coefficients and
+Fisher ratios.
+
+
 
 Our contributions are as follows:
 \begin{itemize}
-    \item We propose Reasoning-Guided Fine-Tuning(RG-FT), a structured reasoning distillation framework
-    for SpeechLLM-based SLU, in which teacher-generated reasoning
-    trajectories $(C \to R \to L)$ serve as an auxiliary regularizer for
-    direct intent prediction under a multitask learning objective.
-    \item Through experiments on SLURP across six architectures, we
-    demonstrate that RG-FT consistently improves intent accuracy and
-    SLU-F1 over standard fine-tuning, with intent accuracy gains of up
-    to $+2.79\%$ and SLU-F1 improvements of up to $+1.26$ points.
+    \item We propose \textbf{RG-FT (Reasoning-Guided Fine-Tuning)}, a
+    structured reasoning distillation framework for SpeechLLM-based SLU,
+    in which reasoning trajectories generated by
+    DeepSeek-R1---consisting of candidate enumeration, rejection
+    reasoning, and label prediction $(C \to R \to L)$---are distilled
+    into SpeechLLMs as an auxiliary regularizer for direct intent
+    prediction under a multitask learning objective.
+    \item Through experiments on SLURP across six SpeechLLM
+    architectures, we demonstrate that RG-FT consistently improves
+    intent accuracy (up to $+2.79\%$) and SLU-F1 (up to $+1.26$
+    points) over standard fine-tuning, with zero additional
+    computational cost at inference.
     \item We provide quantitative evidence via Silhouette coefficients,
-    Fisher ratio, and nearest-centroid margin that multitask reasoning
-    supervision improves inter-class separability in the latent
-    representation space.
+    Fisher ratios, and nearest-centroid margin that multitask reasoning
+    supervision enhances inter-class separability of latent speech
+    representations, corroborating the mechanism by which RG-FT
+    addresses confusion among semantically adjacent intent categories.
 \end{itemize}
+
+
+
 
 
 %% ============================================================
 %%  2. Proposed Method
 %% ============================================================
+
+
+
 \section{Proposed Method}
 
 
-\subsection{Structured Reasoning Trajectory: $T = (C, R, L)$}
+\begin{figure}[t]
+\centering
+\begin{tcolorbox}[
+  colback=white, colframe=black!40,
+  title={\small Prompt Structure},
+  fonttitle=\bfseries, width=\columnwidth
+]
+\scriptsize
+\textbf{System:} You are an SLU Logic Analyst. Given [Input] and
+DB Definitions, output exactly 3 lines (C, R, L).
+Compare candidates from DB. Cite evidence. 
 
+\smallskip
+\hrule
+\smallskip
+
+\textbf{DB Definitions:} \textit{intent and slot definitions}\\
+\textbf{[Input]:} Transcript $+$ Target Label 
+
+\smallskip
+\hrule
+\smallskip
+
+\textbf{C:} List intent candidates; list slot candidates with value candidates.\\
+\textbf{R:} For each $c \in \bar{C}_I$, cite evidence why $c$ is incorrect.\\
+{\footnotesize\textbf{L:} \{"Intent": \textit{scenario\_action}, "entities": \textit{[...]}\}}
+\end{tcolorbox}
+\caption{Prompt structure for structured reasoning trajectory generation.}
+\label{fig:prompt}
+\end{figure}
+
+
+
+
+\subsection{Structured Reasoning Trajectory: $T = (C, R, L)$}
 We represent the SLU decision process as a structured reasoning
 trajectory $T(x) = (C, R, L)$.
 Although conceptually decomposed into candidate enumeration ($C$),
 rejection rationale ($R$), and final label ($L$), the trajectory is
 generated as a single structured output sequence.
+The trajectory $T(x) = (C, R, L)$ is operationalized through a
+structured prompt, as illustrated in Figure~\ref{fig:prompt}.
 
 \textbf{Candidate Space ($C$):}
-Given input speech $x$, the model enumerates intent and slot
-candidates:
+Given input speech $x$, the model enumerates $K$ intent candidates
+and $J$ slot candidates, where each slot $s_j$ is associated with
+a set of value candidates $\{v_{j,m}\}_m$:
 \begin{equation}
 C_I = \{i_k\}_{k=1}^{K}, \qquad
 C_S = \{ s_j(\{v_{j,m}\}_m) \}_{j=1}^{J}.
 \end{equation}
+Here, $i_k$ denotes the $k$-th intent candidate, $s_j$ the $j$-th
+slot type, and $v_{j,m}$ the $m$-th value candidate for slot $s_j$.
 We assume the ground-truth intent $y^*$ is included in $C_I$.
 
 \textbf{Rejection Rationale ($R$):}
-Let $\bar{C}_I = C_I \setminus \{y^*\}$ denote incorrect intent
-candidates. For each $c \in \bar{C}_I$, the model produces a
-contradiction evidence string $r(c; x)$ grounded in the utterance.
-The rejection rationale is defined as
+Let $\bar{C}_I = C_I \setminus \{y^*\}$ denote the set of incorrect
+intent candidates. For each $c \in \bar{C}_I$, the model generates
+a natural language rationale $r(c; x)$ explaining why $c$
+contradicts the utterance $x$. The rejection rationale $R$ is
+the collection of these paired explanations:
 \begin{equation}
-R = \bigoplus_{c \in \bar{C}_I} (c \Vert r(c; x)),
+R = \{(c,\ r(c; x))\}_{c \in \bar{C}_I}.
 \end{equation}
-where $\bigoplus$ denotes concatenation.
-Unlike affirmation-based reasoning, which merely describes
-properties of the correct intent, rejection explicitly requires
-the model to articulate why each competing hypothesis contradicts
-the utterance. This contrastive elimination forces the model to
-identify fine-grained distinctions among semantically adjacent
-intents, thereby sharpening inter-class decision boundaries.
+Compared to affirmation-based reasoning, explicitly rejecting each
+competing hypothesis in a contrastive manner encourages
+fine-grained differentiation among semantically adjacent intents,
+thereby sharpening inter-class decision boundaries more effectively.
+This design is supported by empirical evidence from contrastive
+explanation generation~\cite{chen-etal-2021-kace} and Contrastive
+Chain-of-Thought prompting~\cite{shim2024chainofthoughtaugmentationlogitcontrast}, as well as
+theoretical arguments that counterfactual explanations promote
+clearer understanding of decision boundaries~\cite{verma2021counterfactual}.
 
 \textbf{Structured Label ($L$):}
-The final structured output is
+The final structured output consists of the predicted intent $y^*$
+and a set of slot--value pairs $(s_k, v_k)$, where $s_k$ is the
+$k$-th predicted slot type and $v_k$ its corresponding value:
 \begin{equation}
 L=\{\,\texttt{intent}: y^*,\ 
 \texttt{entities}: \{(s_k, v_k)\}_k\,\}.
 \end{equation}
+
 
 
 \subsection{Teacher-based Data Construction}
@@ -257,86 +326,13 @@ teacher model. The teacher receives the speech transcript, the
 ground-truth labels $(y^*, S^*)$, and a database of all valid intent and
 slot definitions. It is instructed to generate, for each $c \in \bar{C}$,
 a specific contradiction with the utterance content
-(Fig.~\ref{fig:prompt}). This oracle-guided construction is intended to
+(Fig.~\ref{fig:proposed_method}). This oracle-guided construction is intended to
 improve the logical consistency of the reasoning trajectories used for
 distillation, by constraining the teacher to generate rationales that do
 not contradict the ground-truth labels. Note that the teacher operates
 on text transcripts rather than raw audio, leveraging its strong language
 reasoning capability; the student model is then trained to align its
 acoustic representations with the resulting structured rationales.
-
-
-\subsection{Proposed Method: Reasoning-Guided Fine-Tuning (RG-FT)}
-
-Simply training on reasoning traces as the primary generation objective
-tends to destabilize optimization in moderate-scale models, sometimes
-degrading
-performance~\cite{li-etal-2025-small-models,chen-etal-2025-unveiling-key,
-chen-etal-2025-skip,hsieh-etal-2023-distilling}. To avoid this, we
-instead treat reasoning as a regularizer for direct label prediction
-within a multitask learning framework. By jointly optimizing reasoning
-generation as an auxiliary task, the model acquires feature
-representations that are sensitive to fine-grained differences among
-intent candidates, while at inference time producing labels directly
-without generating reasoning traces, incurring no additional
-computational cost.
-
-Each training sample $(x_i, T_i, L_i)$ is expanded into two optimization
-targets distinguished by a task identifier:
-\begin{align}
-  \ell_{\text{reasoning}}(x_i)
-    &= -\log p_\theta\!\left(T_i \mid x_i,\, g_{\text{reasoning}}\right) \\
-  \ell_{\text{label}}(x_i)
-    &= -\log p_\theta\!\left(L_i \mid x_i,\, g_{\text{label}}\right)
-\end{align}
-where $g_{\text{reasoning}}$ instructs the model to generate the full
-trajectory $T = (C, R, L)$, and $g_{\text{label}}$ instructs it to
-generate the structured label $L$ directly. The multitask objective is:
-\begin{equation}
-  \mathcal{L}_{\text{RG-FT}}
-  = \underbrace{
-      \frac{1}{|\mathcal{B}_0|}
-      \sum_{i \in \mathcal{B}_0} \ell_{\text{reasoning}}(x_i)
-    }_{\mathcal{L}_{\text{Reasoning}}}
-  +\; \alpha
-    \underbrace{
-      \frac{1}{|\mathcal{B}_1|}
-      \sum_{i \in \mathcal{B}_1} \ell_{\text{label}}(x_i)
-    }_{\mathcal{L}_{\text{Label}}}
-\end{equation}
-where $\mathcal{B}_0$ and $\mathcal{B}_1$ are the subsets of a
-mini-batch assigned to the Reasoning and Label branches respectively,
-and $\alpha{=}0.5$ throughout all experiments. Because each training
-sample generates one item per branch, the two branches receive balanced
-supervision within every batch.
-
-
-\subsection{Baseline: Direct Fine-Tuning (Direct-FT)}
-
-Direct-FT maps speech $x$ to the structured label $L$ without
-intermediate reasoning, reimplementing the protocol
-of~\cite{choi2025exploring} under our exact experimental conditions for
-a controlled comparison:
-\begin{equation}
-  \mathcal{L}_{\text{Direct}}
-  = \frac{1}{|\mathcal{B}|}
-    \sum_{i \in \mathcal{B}} \ell_{\text{label}}(x_i)
-\end{equation}
-
-
-\subsection{Alternative: Reasoning Fine-Tuning (Reasoning-FT)}
-
-Reasoning-FT treats the full trajectory $T$ as the sole training
-objective, serving as an ablation that isolates the effect of
-reasoning-only supervision without the complementary Label branch:
-\begin{equation}
-  \mathcal{L}_{\text{Reasoning}}
-  = \frac{1}{|\mathcal{B}|}
-    \sum_{i \in \mathcal{B}} \ell_{\text{reasoning}}(x_i)
-\end{equation}
-At inference, the model generates $C$ and $R$ explicitly before
-producing $L$, introducing both increased latency and the risk of error
-propagation through the reasoning chain.
 
 \begin{table*}[t]
 \centering
@@ -365,6 +361,84 @@ Music-Flamingo~\cite{ghosh2025musicflamingoscalingmusic} & 87.69 & 83.89 & 82.65
 }
 \end{table*}
 
+\subsection{Training Objectives}
+
+Three training configurations are compared to isolate the contribution
+of each component. Direct-FT serves as the baseline, Reasoning-FT as
+an ablation, and RG-FT as the proposed method.
+
+\subsubsection{Direct Fine-Tuning (Direct-FT)}
+
+Direct-FT maps speech $x$ directly to the structured label $L$ without
+intermediate reasoning, reimplementing the protocol
+of~\cite{choi2025exploring} under our exact experimental conditions for
+a controlled comparison:
+\begin{equation}
+  \mathcal{L}_{\text{Direct}}
+  = \frac{1}{|\mathcal{B}|}
+    \sum_{x \in \mathcal{B}} \ell_{\text{label}}(x).
+\end{equation}
+
+\subsubsection{Reasoning Fine-Tuning (Reasoning-FT)}
+
+Reasoning-FT treats the full trajectory $T$ as the sole training
+objective, serving as an ablation that isolates the effect of
+reasoning-only supervision without the complementary Label branch:
+\begin{equation}
+  \mathcal{L}_{\text{Reasoning}}
+  = \frac{1}{|\mathcal{B}|}
+    \sum_{x \in \mathcal{B}} \ell_{\text{reasoning}}(x).
+\end{equation}
+At inference, the model generates $C$ and $R$ explicitly before
+producing $L$, introducing both increased latency and the risk of error
+propagation through the reasoning chain.
+
+
+\subsubsection{Reasoning-Guided Fine-Tuning (RG-FT) --- Proposed}
+
+Simply training on reasoning traces tends to destabilize optimization
+in moderate-scale models~\cite{li-etal-2025-small-models,
+chen-etal-2025-unveiling-key,chen-etal-2025-skip,hsieh-etal-2023-distilling}.
+We therefore treat reasoning as an auxiliary regularizer within a
+multitask framework, allowing the model to acquire representations
+sensitive to fine-grained intent differences while producing labels
+directly at inference without additional computational cost.
+
+Each training sample $(x, T, L)$ is expanded into two optimization
+targets distinguished by a task identifier:
+\begin{align}
+  \ell_{\text{reasoning}}(x)
+    &= -\log p_\theta\!\left(T \mid x,\, g_{\text{reasoning}}\right), \\
+  \ell_{\text{label}}(x)
+    &= -\log p_\theta\!\left(L \mid x,\, g_{\text{label}}\right),
+\end{align}
+where $g_{\text{reasoning}}$ instructs the model to generate the full
+trajectory $T = (C, R, L)$, and $g_{\text{label}}$ instructs it to
+generate the structured label $L$ directly. The multitask objective is:
+\begin{equation}
+  \mathcal{L}_{\text{RG-FT}}
+  = \alpha
+    \underbrace{
+      \frac{1}{|\mathcal{B}_0|}
+      \sum_{x \in \mathcal{B}_0} \ell_{\text{reasoning}}(x)
+    }_{\mathcal{L}_{\text{Reasoning}}}
+  +\; (1-\alpha)
+    \underbrace{
+      \frac{1}{|\mathcal{B}_1|}
+      \sum_{x \in \mathcal{B}_1} \ell_{\text{label}}(x)
+    }_{\mathcal{L}_{\text{Label}}},
+\end{equation}
+where $\mathcal{B}_0$ and $\mathcal{B}_1$ are independently sampled
+mini-batches assigned to the Reasoning and Label branches respectively,
+and $\alpha{=}0.5$ throughout all experiments, yielding equal weight
+to both branches.
+
+
+
+
+
+
+
 
 %% ============================================================
 %%  3. Experimental Setup
@@ -377,7 +451,7 @@ Music-Flamingo~\cite{ghosh2025musicflamingoscalingmusic} & 87.69 & 83.89 & 82.65
 We evaluate our framework on the SLURP
 dataset~\cite{bastianelli-etal-2020-slurp}, which comprises
 11,514 training, 2,033 development, and 2,974 test utterances
-covering 18 domains and 60 intent classes. Following
+covering 18 domains and 46 action classes. Following
 \cite{choi2025exploring}, all models are trained on both speech
 and gold transcription inputs to facilitate acquisition of
 fundamental SLU capabilities.
@@ -422,12 +496,18 @@ semantically adjacent intents.
 
 \subsection{Implementation Details}
 
-All models are fine-tuned in BF16 precision using AdamW with a learning rate of $4 \times 10^{-5}$,
-a batch size of 4, and 4 gradient accumulation steps. Training is conducted on two NVIDIA H200 GPUs.
-Direct-FT and Reasoning-FT are trained for 2 epochs.
-For RG-FT, each training sample provides supervision to both the Reasoning and Label branches within a mini-batch.
-To keep the total number of optimization (parameter update) steps comparable across training conditions,
-we train RG-FT for 1 epoch.
+All models are fine-tuned using BF16 precision with the AdamW
+optimizer, a learning rate of $4 \times 10^{-5}$, a batch size
+of 4, and 4 gradient accumulation steps. Oracle rationales for
+multitask training are generated via DeepSeek-R1, whose
+chain-of-thought pretraining makes it well-suited for producing
+structured, evidence-grounded reasoning traces in the
+$C \to R \to L$ format. For Direct-FT and Reasoning-FT, training proceeds for 4 epochs. 
+For RG-FT, each training step simultaneously processes samples for 
+both the Reasoning and Label branches, doubling the effective 
+data exposure per update compared to the single-task baselines. 
+To ensure a fair comparison in terms of the total,
+we train RG-FT for 2 epochs.
 
 \begin{table}[t]
 \centering
@@ -502,39 +582,46 @@ SLU-F1 (Qwen2.5-Omni-7B, Label-branch inference).
 \begin{tabular}{lcc}
 \hline
 \textbf{Configuration} & \textbf{Sce / Act / Int} & \textbf{SLU-F1} \\ \hline
-Direct-FT              & 91.53 / 88.74 / 87.83 & 76.20 \\
-RG-FT w/ C            & 91.56 / 89.00 / 88.20 & 77.18 \\
-RG-FT w/ R            & 91.53 / 88.84 / 87.96 & 76.01 \\
-RG-FT w/ C+R          & 91.83 / 88.87 / 88.13 & \textbf{77.18} \\
-\textbf{RG-FT w/ C+R+L} & \textbf{91.96 / 88.97 / 88.23} & 77.10 \\ \hline
+Direct-FT              & 88.67 / 85.84 / 84.7 & 70.83 \\
+RG-FT w/ C            & 89.54 / 86.05 / 85.21 & 72.3 \\
+RG-FT w/ R            & 89.98 / 86.48 / 85.54 & 70.78 \\
+RG-FT w/ C+R          & 89.88 / 86.85 / 85.94 & \textbf{72.8} \\
+\textbf{RG-FT w/ C+R+L} & \textbf{90.11 / 87.19 / 86.38} & 72.79 \\ \hline
 \end{tabular}
 \end{table}
 
 \subsection{Impact of Rationale Components}
 Table~\ref{tab:ablation_components} reports intent accuracy and
 SLU-F1 for each rationale component configuration using
-Label-branch ($g_{\text{label}}$) inference. Among individual
-components, $C$ yields the largest improvement in intent accuracy
-($+0.37\%$ over Direct-FT), indicating that explicitly enumerating
-candidate intents contributes most to sharpening decision
-boundaries. $R$ alone provides marginal gains, suggesting that
-rejection rationale is insufficient as a standalone supervisory
-signal. The full configuration $C+R+L$ achieves the highest intent
-accuracy, while $C+L$ and $C+R+L$ both attain the highest SLU-F1
-of 77.18, indicating that the combination of candidate enumeration
-and rejection rationale contributes to stable performance across
-metrics.
+Label-branch ($g_{\text{label}}$) inference (Qwen2-Audio-7B-Instruct).
+Among individual components, $C$ yields a notable improvement in
+intent accuracy ($+0.51\%$ over Direct-FT), indicating that
+explicitly enumerating candidate intents provides a strong
+inductive signal for distinguishing semantically adjacent intents.
+Interestingly, $R$ alone achieves comparable intent accuracy
+($+0.84\%$) but substantially lower SLU-F1 ($70.78$, nearly
+identical to Direct-FT at $70.83$), suggesting that rejection
+rationale without candidate context improves intent boundary
+sharpness in isolation, yet fails to propagate this benefit to
+slot-level prediction. This asymmetry indicates that $R$ is not a
+standalone supervisory signal but rather depends on the structured
+context established by $C$ to function effectively---a finding
+consistent with the sequential design of the proposed
+$C \to R \to L$ trajectory, in which candidate enumeration
+provides the necessary referential grounding for subsequent
+rejection reasoning.
 
-
-
-The results indicate that providing Intent Candidates ($C$) yields
-the most significant initial boost in intent accuracy ($+0.37\%$
-over Direct-FT). This supports our hypothesis that forcing the
-model to explicitly contrast similar intent categories early in
-the process sharpens the decision boundaries. While Rejection
-Rationale ($R$) alone provides marginal gains, its combination
-with candidates in $C+R+L$ achieves the highest overall accuracy
-and stability across domains.
+The combination $C+R$ further improves both intent accuracy
+($+1.24\%$) and SLU-F1 ($+1.97$ points) over Direct-FT,
+confirming that the two components are mutually reinforcing rather
+than independently sufficient. The full configuration $C+R+L$
+achieves the highest intent accuracy ($86.38\%$), while $C+R$
+attains the highest SLU-F1 ($72.80$), with $C+R+L$ performing
+comparably ($72.79$). Taken together, these results validate the
+integrated design of the $C \to R \to L$ trajectory: each
+component contributes incrementally, and the structured ordering
+is essential to the effectiveness of rejection reasoning as a
+regularization signal.
 
 
 \subsection{Inference Branch: Reasoning-branch vs.\ Label-branch}
@@ -601,7 +688,6 @@ models and its application to multilingual SLU scenarios.
 
 
 
-
 \bibliographystyle{IEEEtran}
 \bibliography{mybib}
 
@@ -611,3 +697,6 @@ models and its application to multilingual SLU scenarios.
 %%% mode: LaTeX
 %%% TeX-master: t
 %%% End:
+
+
+

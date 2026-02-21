@@ -18,6 +18,65 @@
   note    = {Accepted: 01 December 2020; Published online: 23 July 2021}
 }
 
+@misc{shim2024chainofthoughtaugmentationlogitcontrast,
+      title={Chain-of-Thought Augmentation with Logit Contrast for Enhanced Reasoning in Language Models}, 
+      author={Jay Shim and Grant Kruttschnitt and Alyssa Ma and Daniel Kim and Benjamin Chek and Athul Anand and Kevin Zhu and Sean O'Brien},
+      year={2024},
+      eprint={2407.03600},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2407.03600}, 
+}
+
+@article{verma2021counterfactual, title={Counterfactual explanations for machine learning: Challenges revisited}, author={Verma, Sahil and Dickerson, John and Hines, Keegan}, journal={arXiv preprint arXiv:2106.07756}, year={2021} }
+
+
+@inproceedings{chen-etal-2021-kace,
+    title = "{KACE}: Generating Knowledge Aware Contrastive Explanations for Natural Language Inference",
+    author = "Chen, Qianglong  and
+      Ji, Feng  and
+      Zeng, Xiangji  and
+      Li, Feng-Lin  and
+      Zhang, Ji  and
+      Chen, Haiqing  and
+      Zhang, Yin",
+    editor = "Zong, Chengqing  and
+      Xia, Fei  and
+      Li, Wenjie  and
+      Navigli, Roberto",
+    booktitle = "Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers)",
+    month = aug,
+    year = "2021",
+    address = "Online",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2021.acl-long.196/",
+    doi = "10.18653/v1/2021.acl-long.196",
+    pages = "2516--2527",
+    abstract = "In order to better understand the reason behind model behaviors (i.e., making predictions), most recent works have exploited generative models to provide complementary explanations. However, existing approaches in NLP mainly focus on ``WHY A'' rather than contrastive ``WHY A NOT B'', which is shown to be able to better distinguish confusing candidates and improve data efficiency in other research fields. In this paper, we focus on generating contrastive explanations with counterfactual examples in NLI and propose a novel \textbf{K}nowledge-\textbf{A}ware \textbf{C}ontrastive \textbf{E}xplanation generation framework (\textbf{KACE}).Specifically, we first identify rationales (i.e., key phrases) from input sentences, and use them as key perturbations for generating counterfactual examples. After obtaining qualified counterfactual examples, we take them along with original examples and external knowledge as input, and employ a knowledge-aware generative pre-trained language model to generate contrastive explanations. Experimental results show that contrastive explanations are beneficial to fit the scenarios by clarifying the difference between the predicted answer and other possible wrong ones. Moreover, we train an NLI model enhanced with contrastive explanations and achieves an accuracy of 91.9{\%} on SNLI, gaining improvements of 5.7{\%} against ETPA ({``}Explain-Then-Predict-Attention'') and 0.6{\%} against NILE ({``}WHY A'')."
+}
+
+@inproceedings{bastianelli-etal-2020-slurp,
+    title = "{SLURP}: A Spoken Language Understanding Resource Package",
+    author = "Bastianelli, Emanuele  and
+      Vanzo, Andrea  and
+      Swietojanski, Pawel  and
+      Rieser, Verena",
+    editor = "Webber, Bonnie  and
+      Cohn, Trevor  and
+      He, Yulan  and
+      Liu, Yang",
+    booktitle = "Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)",
+    month = nov,
+    year = "2020",
+    address = "Online",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2020.emnlp-main.588/",
+    doi = "10.18653/v1/2020.emnlp-main.588",
+    pages = "7252--7262",
+    abstract = "Spoken Language Understanding infers semantic meaning directly from audio data, and thus promises to reduce error propagation and misunderstandings in end-user applications. However, publicly available SLU resources are limited. In this paper, we release SLURP, a new SLU package containing the following: (1) A new challenging dataset in English spanning 18 domains, which is substantially bigger and linguistically more diverse than existing datasets; (2) Competitive baselines based on state-of-the-art NLU and ASR systems; (3) A new transparent metric for entity labelling which enables a detailed error analysis for identifying potential areas of improvement. SLURP is available at \url{https://github.com/pswietojanski/slurp}."
+}
+
+
 @article{LinaresGarcia2022VIVA,
   author    = {Linares-Garcia, Daniel Antonio and Roofigari-Esfahan, Nazila and Pratt, Kristina and Jeon, Myounghoon},
   title     = {Voice-Based Intelligent Virtual Agents (VIVA) to Support Construction Worker Productivity},
@@ -395,6 +454,98 @@
       url={https://arxiv.org/abs/2511.10289}, 
 }
 
+@misc{zelikman2022starbootstrappingreasoningreasoning,
+      title={STaR: Bootstrapping Reasoning With Reasoning}, 
+      author={Eric Zelikman and Yuhuai Wu and Jesse Mu and Noah D. Goodman},
+      year={2022},
+      eprint={2203.14465},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2203.14465}, 
+}
+@article{Guo_2025,
+   title={DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning},
+   volume={645},
+   ISSN={1476-4687},
+   url={http://dx.doi.org/10.1038/s41586-025-09422-z},
+   DOI={10.1038/s41586-025-09422-z},
+   number={8081},
+   journal={Nature},
+   publisher={Springer Science and Business Media LLC},
+   author={Guo, Daya and Yang, Dejian and Zhang, Haowei and Song, Junxiao and Wang, Peiyi and Zhu, Qihao and Xu, Runxin and Zhang, Ruoyu and Ma, Shirong and Bi, Xiao and Zhang, Xiaokang and Yu, Xingkai and Wu, Yu and Wu, Z. F. and Gou, Zhibin and Shao, Zhihong and Li, Zhuoshu and Gao, Ziyi and Liu, Aixin and Xue, Bing and Wang, Bingxuan and Wu, Bochao and Feng, Bei and Lu, Chengda and Zhao, Chenggang and Deng, Chengqi and Ruan, Chong and Dai, Damai and Chen, Deli and Ji, Dongjie and Li, Erhang and Lin, Fangyun and Dai, Fucong and Luo, Fuli and Hao, Guangbo and Chen, Guanting and Li, Guowei and Zhang, H. and Xu, Hanwei and Ding, Honghui and Gao, Huazuo and Qu, Hui and Li, Hui and Guo, Jianzhong and Li, Jiashi and Chen, Jingchang and Yuan, Jingyang and Tu, Jinhao and Qiu, Junjie and Li, Junlong and Cai, J. L. and Ni, Jiaqi and Liang, Jian and Chen, Jin and Dong, Kai and Hu, Kai and You, Kaichao and Gao, Kaige and Guan, Kang and Huang, Kexin and Yu, Kuai and Wang, Lean and Zhang, Lecong and Zhao, Liang and Wang, Litong and Zhang, Liyue and Xu, Lei and Xia, Leyi and Zhang, Mingchuan and Zhang, Minghua and Tang, Minghui and Zhou, Mingxu and Li, Meng and Wang, Miaojun and Li, Mingming and Tian, Ning and Huang, Panpan and Zhang, Peng and Wang, Qiancheng and Chen, Qinyu and Du, Qiushi and Ge, Ruiqi and Zhang, Ruisong and Pan, Ruizhe and Wang, Runji and Chen, R. J. and Jin, R. L. and Chen, Ruyi and Lu, Shanghao and Zhou, Shangyan and Chen, Shanhuang and Ye, Shengfeng and Wang, Shiyu and Yu, Shuiping and Zhou, Shunfeng and Pan, Shuting and Li, S. S. and Zhou, Shuang and Wu, Shaoqing and Yun, Tao and Pei, Tian and Sun, Tianyu and Wang, T. and Zeng, Wangding and Liu, Wen and Liang, Wenfeng and Gao, Wenjun and Yu, Wenqin and Zhang, Wentao and Xiao, W. L. and An, Wei and Liu, Xiaodong and Wang, Xiaohan and Chen, Xiaokang and Nie, Xiaotao and Cheng, Xin and Liu, Xin and Xie, Xin and Liu, Xingchao and Yang, Xinyu and Li, Xinyuan and Su, Xuecheng and Lin, Xuheng and Li, X. Q. and Jin, Xiangyue and Shen, Xiaojin and Chen, Xiaosha and Sun, Xiaowen and Wang, Xiaoxiang and Song, Xinnan and Zhou, Xinyi and Wang, Xianzu and Shan, Xinxia and Li, Y. K. and Wang, Y. Q. and Wei, Y. X. and Zhang, Yang and Xu, Yanhong and Li, Yao and Zhao, Yao and Sun, Yaofeng and Wang, Yaohui and Yu, Yi and Zhang, Yichao and Shi, Yifan and Xiong, Yiliang and He, Ying and Piao, Yishi and Wang, Yisong and Tan, Yixuan and Ma, Yiyang and Liu, Yiyuan and Guo, Yongqiang and Ou, Yuan and Wang, Yuduan and Gong, Yue and Zou, Yuheng and He, Yujia and Xiong, Yunfan and Luo, Yuxiang and You, Yuxiang and Liu, Yuxuan and Zhou, Yuyang and Zhu, Y. X. and Huang, Yanping and Li, Yaohui and Zheng, Yi and Zhu, Yuchen and Ma, Yunxian and Tang, Ying and Zha, Yukun and Yan, Yuting and Ren, Z. Z. and Ren, Zehui and Sha, Zhangli and Fu, Zhe and Xu, Zhean and Xie, Zhenda and Zhang, Zhengyan and Hao, Zhewen and Ma, Zhicheng and Yan, Zhigang and Wu, Zhiyu and Gu, Zihui and Zhu, Zijia and Liu, Zijun and Li, Zilin and Xie, Ziwei and Song, Ziyang and Pan, Zizheng and Huang, Zhen and Xu, Zhipeng and Zhang, Zhongyu and Zhang, Zhen},
+   year={2025},
+   month=sep, pages={633–638} }
+
+
+@inproceedings{lei-etal-2016-rationalizing,
+    title = "Rationalizing Neural Predictions",
+    author = "Lei, Tao  and
+      Barzilay, Regina  and
+      Jaakkola, Tommi",
+    editor = "Su, Jian  and
+      Duh, Kevin  and
+      Carreras, Xavier",
+    booktitle = "Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2016",
+    address = "Austin, Texas",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/D16-1011/",
+    doi = "10.18653/v1/D16-1011",
+    pages = "107--117"
+}
+
+
+@inproceedings{10.5555/1613715.1613721,
+author = {Zaidan, Omar F. and Eisner, Jason},
+title = {Modeling annotators: a generative approach to learning from annotator rationales},
+year = {2008},
+publisher = {Association for Computational Linguistics},
+address = {USA},
+abstract = {A human annotator can provide hints to a machine learner by highlighting contextual "rationales" for each of his or her annotations (Zaidan et al., 2007). How can one exploit this side information to better learn the desired parameters θ? We present a generative model of how a given annotator, knowing the true θ, stochastically chooses rationales. Thus, observing the rationales helps us infer the true θ. We collect substring rationales for a sentiment classification task (Pang and Lee, 2004) and use them to obtain significant accuracy improvements for each annotator. Our new generative approach exploits the rationales more effectively than our previous "masking SVM" approach. It is also more principled, and could be adapted to help learn other kinds of probabilistic classifiers for quite different tasks.},
+booktitle = {Proceedings of the Conference on Empirical Methods in Natural Language Processing},
+pages = {31–40},
+numpages = {10},
+location = {Honolulu, Hawaii},
+series = {EMNLP '08}
+}
+
+@inproceedings{zaidan-etal-2007-using,
+    title = "Using ``Annotator Rationales'' to Improve Machine Learning for Text Categorization",
+    author = "Zaidan, Omar  and
+      Eisner, Jason  and
+      Piatko, Christine",
+    editor = "Sidner, Candace  and
+      Schultz, Tanja  and
+      Stone, Matthew  and
+      Zhai, ChengXiang",
+    booktitle = "Human Language Technologies 2007: The Conference of the North {A}merican Chapter of the Association for Computational Linguistics; Proceedings of the Main Conference",
+    month = apr,
+    year = "2007",
+    address = "Rochester, New York",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/N07-1033/",
+    pages = "260--267"
+}
+
+@inproceedings{zhang-etal-2016-rationale,
+    title = "Rationale-Augmented Convolutional Neural Networks for Text Classification",
+    author = "Zhang, Ye  and
+      Marshall, Iain  and
+      Wallace, Byron C.",
+    editor = "Su, Jian  and
+      Duh, Kevin  and
+      Carreras, Xavier",
+    booktitle = "Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2016",
+    address = "Austin, Texas",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/D16-1076/",
+    doi = "10.18653/v1/D16-1076",
+    pages = "795--804"
+}
+
 
 @article{xu2025qwen25omni,
   title={Qwen2.5-Omni Technical Report},
@@ -409,7 +560,3 @@
   journal={arXiv preprint arXiv:2507.08128},
   year={2025}
 }
-
-
-
-

@@ -16,6 +16,7 @@ Output:
 import argparse
 import csv
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,7 @@ resolve_prediction_path = _mod.resolve_prediction_path
 derive_model_name = _mod.derive_model_name
 _auto_detect_gold_path = _mod._auto_detect_gold_path
 ModelResult = _mod.ModelResult
+_extract_gold_from_row = getattr(_mod, "_extract_gold_from_row", None)
 
 # ============================================================================
 # Plot style — publication quality
@@ -280,6 +282,196 @@ def _in_wer_bin(w: float, lo: float, hi: float, include_hi: bool) -> bool:
     return lo <= w < hi
 
 
+def _normalize_intent_label(text: str) -> str:
+    s = str(text or "").strip().lower()
+    if not s:
+        return ""
+    s = s.strip("`\"'[](){}")
+    s = s.replace("-", "_")
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
+def _extract_c_block(text: str) -> Tuple[bool, str]:
+    raw = str(text or "")
+    if not raw.strip():
+        return False, ""
+
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*[cC]\s*[:：]\s*(.*)$", line)
+        if not m:
+            continue
+        chunk = [m.group(1).strip()]
+        for j in range(i + 1, len(lines)):
+            nxt = lines[j].strip()
+            if not nxt:
+                if chunk:
+                    break
+                continue
+            if re.match(r"^\s*[cCrRjJ]\s*[:：]", nxt):
+                break
+            chunk.append(nxt)
+        return True, " ".join(x for x in chunk if x).strip()
+
+    if re.search(r"\bintent\s*candidates?\b", raw, flags=re.IGNORECASE):
+        return True, raw.strip()
+    return False, ""
+
+
+def _extract_intent_candidates_from_c_block(c_block: str) -> List[str]:
+    text = str(c_block or "")
+    if not text:
+        return []
+
+    text = re.split(r"\n\s*[rRjJ]\s*[:：]", text, maxsplit=1)[0]
+    text = re.split(r";\s*slot\s*candidates?\s*[:：]", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    text = re.split(r"\bslot\s*candidates?\s*[:：]", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    text = re.sub(
+        r"^\s*(?:intent\s*candidates?|intent\s*candidate|intents?)\s*[:：\-]?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    candidates: List[str] = []
+
+    def _push(item: str) -> None:
+        norm = _normalize_intent_label(item)
+        if "_" not in norm:
+            return
+        if norm not in candidates:
+            candidates.append(norm)
+
+    for piece in re.split(r"[|,;\n]+", text):
+        p = re.sub(r"^\s*\d+\s*[\).:\-]?\s*", "", piece.strip())
+        p = p.strip("`\"'")
+        if not p:
+            continue
+        _push(p)
+
+    if candidates:
+        return candidates
+
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+", text):
+        _push(token)
+    return candidates
+
+
+def _extract_c_intent_candidates_from_text(text: str) -> Tuple[bool, List[str]]:
+    has_c, c_block = _extract_c_block(text)
+    if not has_c:
+        return False, []
+    return True, _extract_intent_candidates_from_c_block(c_block)
+
+
+def _extract_c_intent_candidates_from_row(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    text_keys = (
+        "raw_output",
+        "prediction",
+        "pred_text",
+        "model_output",
+        "output",
+        "response",
+        "assistant",
+        "assistant_text",
+        "generated_text",
+    )
+    best_has_c = False
+    best_candidates: List[str] = []
+
+    for key in text_keys:
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        has_c, candidates = _extract_c_intent_candidates_from_text(value)
+        if not has_c:
+            continue
+        if (not best_has_c) or (len(candidates) > len(best_candidates)):
+            best_has_c = True
+            best_candidates = candidates
+
+    return best_has_c, best_candidates
+
+
+def _match_rows_for_candidate_analysis(
+    pred_rows: List[Dict[str, Any]],
+    gold_map: Optional[Dict[str, Dict[str, Any]]],
+    key_field: str,
+) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    matched_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+
+    if gold_map is not None:
+        for row in pred_rows:
+            key = row.get(key_field)
+            if key is None:
+                key = row.get("slurp_id") or row.get("id")
+            key = str(key).strip() if key else ""
+            if not key:
+                continue
+            gold = gold_map.get(key)
+            if gold is None:
+                gold = gold_map.get(os.path.basename(key))
+            if gold is None:
+                continue
+            matched_rows.append((row, gold))
+        return matched_rows
+
+    if callable(_extract_gold_from_row):
+        for row in pred_rows:
+            gold = _extract_gold_from_row(row)
+            if not isinstance(gold, dict):
+                continue
+            gs = str(gold.get("scenario", "")).strip()
+            ga = str(gold.get("action", "")).strip()
+            if not gs and not ga:
+                continue
+            matched_rows.append((row, gold))
+    return matched_rows
+
+
+def attach_candidate_intent_flags(
+    model: ModelResult,
+    prediction_path: str,
+    gold_map: Optional[Dict[str, Dict[str, Any]]],
+    key_field: str,
+) -> Dict[str, Any]:
+    pred_rows = read_jsonl(prediction_path)
+    matched_rows = _match_rows_for_candidate_analysis(pred_rows, gold_map, key_field)
+
+    c_present_list: List[bool] = []
+    c_hit_list: List[bool] = []
+    for row, gold in matched_rows:
+        has_c, candidates = _extract_c_intent_candidates_from_row(row)
+        gold_intent = _normalize_intent_label(
+            f"{str(gold.get('scenario', '')).strip()}_{str(gold.get('action', '')).strip()}"
+        )
+        hit = bool(has_c and gold_intent and (gold_intent in set(candidates)))
+        c_present_list.append(bool(has_c))
+        c_hit_list.append(bool(hit))
+
+    setattr(model, "c_present_list", c_present_list)
+    setattr(model, "c_hit_list", c_hit_list)
+
+    n_cmp = min(len(model.intent_pairs), len(c_hit_list))
+    hit_n = sum(1 for i in range(n_cmp) if c_hit_list[i])
+    hit_correct_n = sum(
+        1 for i in range(n_cmp)
+        if c_hit_list[i] and model.intent_pairs[i][0] == model.intent_pairs[i][1]
+    )
+    c_present_n = sum(1 for x in c_present_list if x)
+    return {
+        "n_candidate_rows": len(matched_rows),
+        "n_metric_rows": len(model.intent_pairs),
+        "n_compared_rows": n_cmp,
+        "c_present_n": c_present_n,
+        "c_hit_n": hit_n,
+        "c_hit_correct_n": hit_correct_n,
+    }
+
+
 # ============================================================================
 # Per-bin metric computation
 # ============================================================================
@@ -290,12 +482,17 @@ def compute_bin_metrics(
     hi: float,
     include_hi: bool,
 ) -> Dict[str, Any]:
-    """指定 WER 範囲のサンプルで Scenario/Action/Intent Acc, SLU-F1 を算出。"""
+    """指定 WER 範囲で主要メトリクスと C 候補メトリクスを算出。"""
     scen_m = FMeasureAccumulator()
     act_m = FMeasureAccumulator()
     int_m = FMeasureAccumulator()
     ent_m = SpanFMeasureAccumulator()
     n = 0
+    c_present_list = getattr(model, "c_present_list", [])
+    c_hit_list = getattr(model, "c_hit_list", [])
+    c_present_n = 0
+    c_hit_n = 0
+    c_hit_correct_n = 0
     for i, w in enumerate(model.wer_list):
         if w is None:
             continue
@@ -309,6 +506,15 @@ def compute_bin_metrics(
         int_m.add(gi, pi)
         pred, gold = model.matched[i]
         ent_m.add(gold["entities"], pred["entities"])
+
+        has_c = bool(c_present_list[i]) if i < len(c_present_list) else False
+        if has_c:
+            c_present_n += 1
+            hit = bool(c_hit_list[i]) if i < len(c_hit_list) else False
+            if hit:
+                c_hit_n += 1
+                if gi == pi:
+                    c_hit_correct_n += 1
         n += 1
     _, _, ef = ent_m.overall()
     return {
@@ -317,6 +523,11 @@ def compute_bin_metrics(
         "action_acc": act_m.accuracy if n > 0 else None,
         "intent_acc": int_m.accuracy if n > 0 else None,
         "slu_f1": ef if n > 0 else None,
+        "c_present_n": c_present_n,
+        "c_hit_n": c_hit_n,
+        "c_hit_rate": (c_hit_n / c_present_n) if c_present_n > 0 else None,
+        "c_hit_correct_n": c_hit_correct_n,
+        "c_correct_given_hit": (c_hit_correct_n / c_hit_n) if c_hit_n > 0 else None,
     }
 
 
@@ -324,8 +535,22 @@ def compute_bin_metrics(
 # Plotting
 # ============================================================================
 
-METRIC_KEYS = ["scenario_acc", "action_acc", "intent_acc", "slu_f1"]
-METRIC_LABELS = ["Scenario Accuracy", "Action Accuracy", "Intent Accuracy", "SLU-F1"]
+METRIC_KEYS = [
+    "scenario_acc",
+    "action_acc",
+    "intent_acc",
+    "slu_f1",
+    "c_hit_rate",
+    "c_correct_given_hit",
+]
+METRIC_LABELS = [
+    "Scenario Accuracy",
+    "Action Accuracy",
+    "Intent Accuracy",
+    "SLU-F1",
+    "Gold Intent in C (%)",
+    "Intent Accuracy | Gold in C (%)",
+]
 
 MIN_SAMPLES = 5  # ビン内サンプル数がこれ未満なら非表示
 
@@ -432,6 +657,11 @@ def export_bin_metrics_csv(
         "action_acc",
         "intent_acc",
         "slu_f1",
+        "c_present_n",
+        "c_hit_n",
+        "c_hit_rate",
+        "c_hit_correct_n",
+        "c_correct_given_hit",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -450,6 +680,13 @@ def export_bin_metrics_csv(
                     "action_acc": "" if metrics["action_acc"] is None else f"{metrics['action_acc']:.6f}",
                     "intent_acc": "" if metrics["intent_acc"] is None else f"{metrics['intent_acc']:.6f}",
                     "slu_f1": "" if metrics["slu_f1"] is None else f"{metrics['slu_f1']:.6f}",
+                    "c_present_n": metrics["c_present_n"],
+                    "c_hit_n": metrics["c_hit_n"],
+                    "c_hit_rate": "" if metrics["c_hit_rate"] is None else f"{metrics['c_hit_rate']:.6f}",
+                    "c_hit_correct_n": metrics["c_hit_correct_n"],
+                    "c_correct_given_hit": (
+                        "" if metrics["c_correct_given_hit"] is None else f"{metrics['c_correct_given_hit']:.6f}"
+                    ),
                 }
                 writer.writerow(row)
     print(f"Saved: {csv_path}")
@@ -480,8 +717,12 @@ def plot_wer_metrics(
         model_data.append(bins_metrics)
 
     # --- Create figure ---
-    fig, axes = plt.subplots(2, 2, figsize=(7.5, 5.5), sharex=True)
-    axes_flat = axes.flatten()
+    n_metrics = len(METRIC_KEYS)
+    n_cols = 2 if n_metrics > 1 else 1
+    n_rows = int(np.ceil(n_metrics / n_cols))
+    fig_h = 2.0 * n_rows + 1.8
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7.5, fig_h), sharex=True)
+    axes_flat = np.atleast_1d(axes).reshape(-1)
 
     for ax_idx, (metric_key, metric_label) in enumerate(
         zip(METRIC_KEYS, METRIC_LABELS)
@@ -545,7 +786,7 @@ def plot_wer_metrics(
         )
 
         # Only bottom row gets x-labels
-        if ax_idx >= 2:
+        if ax_idx >= (n_rows - 1) * n_cols:
             if x_scale == "log1p":
                 ax.set_xlabel("WER (%) [log1p scale]")
             else:
@@ -559,6 +800,9 @@ def plot_wer_metrics(
         # Subplot title
         ax.set_title(metric_label, fontsize=10, fontweight="bold", pad=4)
 
+    for ax in axes_flat[n_metrics:]:
+        ax.axis("off")
+
     # Shared legend at top
     handles, labels = axes_flat[0].get_legend_handles_labels()
     if handles:
@@ -571,7 +815,7 @@ def plot_wer_metrics(
             fontsize=9,
         )
 
-    fig.align_ylabels(axes)
+    fig.align_ylabels(axes_flat[:n_metrics])
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     # --- Add sample count annotation below bottom-left subplot ---
@@ -585,7 +829,7 @@ def plot_wer_metrics(
         center = model_data[0][b_idx]["center"]
         valid_bins.append((_x_transform(center, x_scale), label))
     if valid_bins:
-        ax_bottom = axes_flat[2]
+        ax_bottom = axes_flat[(n_rows - 1) * n_cols]
         y_anchor = ax_bottom.get_ylim()[0]
         for center, n_label in valid_bins:
             ax_bottom.annotate(
@@ -699,6 +943,26 @@ def main():
         r = process_model(path, name, gold_map, args.key)
         has_wer = sum(1 for w in r.wer_list if w is not None)
         print(f"  Matched: {r.n_matched}  WER available: {has_wer}")
+        c_stats = attach_candidate_intent_flags(r, path, gold_map, args.key)
+        if c_stats["n_candidate_rows"] != c_stats["n_metric_rows"]:
+            print(
+                f"  [WARN] Candidate rows mismatch: "
+                f"{c_stats['n_candidate_rows']} vs {c_stats['n_metric_rows']}",
+                file=sys.stderr,
+            )
+        c_present_n = int(c_stats["c_present_n"])
+        c_hit_n = int(c_stats["c_hit_n"])
+        c_hit_correct_n = int(c_stats["c_hit_correct_n"])
+        if c_present_n > 0:
+            c_hit_rate = c_hit_n / c_present_n
+            c_acc_given_hit = (c_hit_correct_n / c_hit_n) if c_hit_n > 0 else 0.0
+            print(
+                f"  C present: {c_present_n}  Gold-in-C: {c_hit_n}/{c_present_n} "
+                f"({c_hit_rate:.4f})  IntentAcc|Gold-in-C: {c_hit_correct_n}/{max(c_hit_n, 1)} "
+                f"({c_acc_given_hit:.4f})"
+            )
+        else:
+            print("  C present: 0  (C候補メトリクス対象なし)")
         models.append(r)
 
     if not models or all(m.n_matched == 0 for m in models):
