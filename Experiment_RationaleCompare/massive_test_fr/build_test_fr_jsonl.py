@@ -22,6 +22,7 @@ import argparse
 import glob
 import json
 import os
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -56,6 +57,26 @@ def _extract_audio_path(record: Dict[str, Any]) -> str:
         if isinstance(path, str) and path.strip():
             return path.strip()
     return ""
+
+
+def _extract_numeric_id(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+
+    matches = re.findall(r"\d+", text)
+    if not matches:
+        return None
+    return int(matches[-1])
 
 
 def _split_bio_label(label: str, outside_labels: Sequence[str]) -> Tuple[str, str]:
@@ -119,13 +140,15 @@ def _labels_to_entity_spans(
 
 
 def _load_records_from_parquet_glob(pattern: str) -> List[Dict[str, Any]]:
-    from datasets import load_dataset
+    from datasets import Audio, load_dataset
 
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No parquet files matched: {pattern}")
 
     ds = load_dataset("parquet", data_files=files, split="train")
+    if "audio" in ds.column_names:
+        ds = ds.cast_column("audio", Audio(decode=False))
     return [dict(row) for row in ds]
 
 
@@ -196,21 +219,20 @@ def _iter_slurp_rows(
             or (os.path.basename(audio_path) if audio_path else "")
             or str(idx)
         )
-        slurp_id = f"massive-{dataset_config}-{base_id}"
+        slurp_id = _extract_numeric_id(base_id)
+        if slurp_id is None:
+            slurp_id = int(idx)
 
         yield {
             "slurp_id": slurp_id,
             "sentence": transcript,
-            "text": transcript,
-            "scenario": scenario,
-            "action": action,
+            "sentence_annotation": transcript,
             "intent": intent,
+            "action": action,
             "tokens": [{"surface": tok} for tok in tokens],
-            "entities": entities,
+            "scenario": scenario,
             "recordings": recordings,
-            "dataset": "speech_massive",
-            "dataset_config": dataset_config,
-            "dataset_split": dataset_split,
+            "entities": entities,
         }
 
 
