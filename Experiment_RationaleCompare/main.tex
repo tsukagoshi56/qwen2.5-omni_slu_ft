@@ -8,7 +8,8 @@
 %
 % CAMERA-READY: Use the following command for the camera-ready version, one
 % affiliation per line:
-\documentclass[cameraready]{Interspeech}
+% \documentclass[cameraready]{Interspeech}
+\documentclass{Interspeech}
 % *==================================================================================*
 
 
@@ -125,7 +126,7 @@ environments~\cite{LinaresGarcia2022VIVA}.
 Among the core SLU tasks, this work focuses on intent classification (IC)~\cite{Atuhurra2024DomainAI} and slot filling (SF)~\cite{weld2022survey} , which jointly map an utterance to a structured semantic frame.
 
 Recent Speech Large Language Models (SpeechLLMs), including
-SALMONN~\cite{tang2024salmonn}, Qwen2-Audio~\cite{chu2024qwen2audio},
+SALMONN~\cite{tang2024salmonn}, Qwen2-Audio~\cite{chu2024qwen2},
 Qwen2.5-Omni~\cite{xu2025qwen25omni}, and
 Audio-Flamingo~\cite{goel2025audioflamingo3}, enable end-to-end SLU by
 directly processing acoustic signals and generating structured textual
@@ -321,26 +322,32 @@ On average, DeepSeek-R1 enumerated 2.5 intent candidates and
 
 \begin{table*}[t]
 \centering
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1}
 \caption{Main results on SLURP and Speech-MASSIVE~(FR) test sets
 (averaged over 3 random seeds).
-\textbf{Bold} marks the best result per model and metric.}
+\textbf{Bold} marks the best result per model and metric.
+Sce.: Scenario accuracy, Act.: Action accuracy, Int.: Intent accuracy, F1: SLU-F1 score.}
 \label{tab:main_results}
 \resizebox{\textwidth}{!}{
 \begin{tabular}{llcccccccccccc}
 \hline
  & & \multicolumn{4}{c}{Direct-FT~\cite{choi2025exploring}} & \multicolumn{4}{c}{Reasoning-FT ($C \to R \to L$)} & \multicolumn{4}{c}{RG-FT (Proposed)} \\
 \cmidrule(lr){3-6}\cmidrule(lr){7-10}\cmidrule(lr){11-14}
-Corpus & Model & Scenario & Action & Intent & SLU-F1 & Scenario & Action & Intent & SLU-F1 & Scenario & Action & Intent & SLU-F1 \\
+Corpus & Model & Sce. & Act. & Int. & F1 & Sce. & Act. & Int. & F1 & Sce. & Act. & Int. & F1 \\
 \hline
-\multirow{6}{*}{\textit{SLURP~\cite{bastianelli-etal-2020-slurp}}}
+\multirow{6}{*}{\shortstack{\textit{SLURP}\\{[24]}}}
  & Qwen2.5-Omni-7B~\cite{xu2025qwen25omni} & 91.30 & 88.67 & 87.78 & 76.19 & 89.53 & 86.53 & 85.24 & 74.89 & \textbf{91.81} & \textbf{89.22} & \textbf{88.35} & \textbf{76.88} \\
  & Qwen2.5-Omni-3B~\cite{xu2025qwen25omni} & 90.66 & 87.61 & 86.63 & 74.87 & 88.79 & 84.74 & 83.57 & 71.87 & \textbf{91.32} & \textbf{88.55} & \textbf{87.62} & \textbf{75.88} \\
  & Qwen2-Audio-7B~\cite{chu2024qwen2} & 88.87 & 85.34 & 84.20 & 69.84 & 87.44 & 83.56 & 82.04 & 69.29 & \textbf{90.23} & \textbf{86.64} & \textbf{85.81} & \textbf{72.26} \\
  & Qwen2-Audio-7B-Inst.~\cite{chu2024qwen2} & 88.97 & 85.36 & 84.26 & 70.09 & 87.14 & 83.39 & 81.73 & 69.87 & \textbf{90.28} & \textbf{87.16} & \textbf{86.31} & \textbf{72.78} \\
  & Audio-Flamingo-3~\cite{goel2025audioflamingo3} & 88.30 & 84.51 & 83.23 & 70.22 & 86.83 & 83.05 & 81.51 & 69.44 & \textbf{89.75} & \textbf{86.42} & \textbf{85.25} & \textbf{72.61} \\
  & Music-Flamingo~\cite{ghosh2025musicflamingoscalingmusic} & 87.63 & 84.07 & 82.81 & 69.36 & 86.87 & 82.96 & 81.31 & 69.35 & \textbf{89.81} & \textbf{86.23} & \textbf{85.21} & \textbf{72.16} \\
+\noalign{\vspace{2pt}}
 \hline
-\multirow{6}{*}{\shortstack{\textit{Speech-MASSIVE} \\ \textit{(FR)~\cite{lee2024speechmassivemultilingualspeechdataset}}}}
+\noalign{\vspace{2pt}}
+\multirow{6}{*}{\shortstack{\textit{Speech-}\\\textit{MASSIVE}\\\textit{-FR~\cite{lee2024speechmassivemultilingualspeechdataset}}}}
  & Qwen2.5-Omni-7B~\cite{xu2025qwen25omni} & 91.62 & 89.09 & 88.10 & 74.88 & 90.33 & 87.08 & 85.98 & 71.90 & \textbf{92.00} & \textbf{89.85} & \textbf{88.67} & \textbf{75.83} \\
  & Qwen2.5-Omni-3B~\cite{xu2025qwen25omni} & 91.14 & 88.26 & 87.12 & 72.72 & 88.75 & 85.66 & 84.31 & 70.21 & \textbf{91.22} & \textbf{88.94} & \textbf{87.79} & \textbf{74.56} \\
  & Qwen2-Audio-7B~\cite{chu2024qwen2} & 89.21 & 85.91 & 84.59 & 68.04 & 88.20 & 84.59 & 82.98 & 67.38 & \textbf{90.61} & \textbf{88.04} & \textbf{86.80} & \textbf{70.46} \\
@@ -351,13 +358,6 @@ Corpus & Model & Scenario & Action & Intent & SLU-F1 & Scenario & Action & Inten
 \end{tabular}
 }
 \end{table*}
-
-
-
-
-
-
-
 
 
 
@@ -477,29 +477,14 @@ matching and filler-level textual similarity.
 
 \subsection{Latent Space Separability Analysis}
 \label{sec:rep_analysis}
-To quantitatively assess whether multitask reasoning supervision
-improves intent discriminability, we extract hidden state vectors
-at the moment of intent generation.
-Specifically, we identify the tokens corresponding to the scenario
-and action fields in the generated output and pool their hidden
-states to form an intent representation vector per utterance.
-Inter-class separability is evaluated using three complementary metrics.
-Silhouette coefficient~\cite{ROUSSEEUW198753} measures how much closer
-each sample is to its own cluster than to the nearest competing cluster
-under cosine distance; the score approaches $1$ when clusters are well-separated.
-Fisher ratio~\cite{fisher1936use} is the ratio of between-class to
-within-class scatter; higher values indicate greater discriminability.
-Nearest-centroid margin is defined as
+To quantitatively assess whether multitask reasoning supervision improves intent discriminability, we extract hidden state vectors at the moment of intent generation.
+Specifically, we identify the tokens corresponding to the scenario and action fields in the generated output and pool their hidden states to form an intent representation vector per utterance.
+Inter-class separability is evaluated using three complementary metrics: Silhouette coefficient~\cite{ROUSSEEUW198753}, Fisher ratio~\cite{fisher1936use}, and nearest-centroid margin, defined as
 \begin{equation}
-m(z)= d(z,\mu_{y'}) - d(z,\mu_{y}),
-\label{eq:ncm}
+  m(z) = d(z, \mu_{y'}) - d(z, \mu_{y}),
+  \label{eq:ncm}
 \end{equation}
-where $\mu_y$ is the centroid of the true class $y$ and
-$y'=\arg\min_{k\neq y} d(z,\mu_k)$ is the nearest competing class;
-a larger positive margin indicates clearer separation between
-semantically adjacent intents.
-
-
+where $\mu_y$ is the centroid of the true class $y$, $y' = \arg\min_{k \neq y} d(z, \mu_k)$ is the nearest competing class, and a larger positive margin indicates clearer separation between semantically adjacent intents.
 
 
 \subsection{Implementation Details}
@@ -587,22 +572,24 @@ leading to more discriminable latent representations even when
 reasoning is absent at inference.
 
 
-
-
 \begin{table}[t]
 \centering
-\caption{Effect of each rationale component on intent accuracy and
-SLU-F1 (Qwen2.5-Omni-7B).}
+\caption{Effect of each rationale component on intent accuracy and SLU-F1 (Qwen2.5-Omni-7B). In all RG-FT variants, the model is trained to predict the label directly via a multitask objective.}
 \label{tab:ablation_components}
+\resizebox{\columnwidth}{!}{% % ここでカラム幅に強制的に合わせます
 \begin{tabular}{lcc}
 \hline
-\textbf{Configuration} & \textbf{Sce / Act / Int} & \textbf{SLU-F1} \\ \hline
-Direct-FT              & 91.30 / 88.67 / 87.78 & 76.19 \\
-RG-FT w/ C            & 91.59 / 88.87 / 88.01 & 76.93 \\
-RG-FT w/ C+R          & 91.81 / 89.14 / 88.29 & \textbf{77.00} \\
-\textbf{RG-FT w/ C+R+L} & \textbf{91.81 / 89.22 / 88.35} & 76.88 \\ \hline
-\end{tabular}
+\textbf{Configuration (Supervision)} & \textbf{Sce / Act / Int} & \textbf{SLU-F1} \\ \hline
+Direct-FT (No auxiliary)             & 91.30 / 88.67 / 87.78 & 76.19 \\
+RG-FT (Label + C)              & 91.59 / 88.87 / 88.01 & 76.93 \\
+RG-FT (Label + C→R)        & 91.81 / 89.14 / 88.29 & \textbf{77.00} \\
+\textbf{RG-FT (Label + C→R→L)} & \textbf{91.81 / 89.22 / 88.35} & 76.88 \\ \hline
+\end{tabular}%
+}
 \end{table}
+
+
+
 
 \subsection{Impact of Rationale Components}
 Table~\ref{tab:ablation_components} reports the contribution of
