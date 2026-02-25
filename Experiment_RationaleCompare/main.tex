@@ -36,6 +36,7 @@
 \usepackage{tcolorbox}
 \tcbuselibrary{skins}
 \usepackage{float}
+\usepackage{multirow}
 
 
 % Title
@@ -104,8 +105,7 @@ model to capture fine-grained distinctions and sharpen inter-class
 decision boundaries.
 At inference, only direct label prediction is used, incurring zero
 additional computational cost.
-Experiments on an SLU benchmark across six architectures demonstrate
-that RG-FT consistently improves SLU performance.
+Experiments on multiple SLU benchmarks and six SpeechLLM architectures demonstrate that RG-FT consistently improves SLU performance.
 \end{abstract}
 
 
@@ -122,80 +122,64 @@ customer-service automation in contact
 centers~\cite{WuMaoFeng2022AIOnlineCustomerService}, and supporting
 front-line workers in operational
 environments~\cite{LinaresGarcia2022VIVA}.
-Among the core SLU tasks, intent
-classification (IC)~\cite{Atuhurra2024DomainAI} and slot
-filling (SF)~\cite{weld2022survey} are of particular relevance to this work,
-as they jointly map an utterance to a structured semantic frame; the
-remainder of this paper focuses on these two tasks.
+Among the core SLU tasks, this work focuses on intent classification (IC)~\cite{Atuhurra2024DomainAI} and slot filling (SF)~\cite{weld2022survey} , which jointly map an utterance to a structured semantic frame.
 
-Recent advances in Speech Large Language Models (SpeechLLMs), including
+Recent Speech Large Language Models (SpeechLLMs), including
 SALMONN~\cite{tang2024salmonn}, Qwen2-Audio~\cite{chu2024qwen2audio},
 Qwen2.5-Omni~\cite{xu2025qwen25omni}, and
 Audio-Flamingo~\cite{goel2025audioflamingo3}, enable end-to-end SLU by
 directly processing acoustic signals and generating structured textual
 outputs.
-Prior work on SpeechLLMs for IC and SF has explored a range of
-approaches.
-\cite{LiKeizerDoddipatla2024PromptingWhisperQASLU} reformulated intent
-detection and slot filling as question-answering tasks, demonstrating
-that SpeechLLMs can perform SLU in a zero-shot prompting regime without
-task-specific training.
-\cite{hacioglu2025speechllms} tackled large-scale zero-shot slot
-filling, revealing systematic performance and robustness gaps and showing
-that improvements to training data, architecture, and strategy can
-substantially narrow them.
-\cite{AgrawalGanapathy2025SLUUnseenICL} demonstrated that
-task-agnostic fine-tuning with randomized class labels unlocks few-shot
-generalization to entirely unseen intents without task-specific
-annotations.
-While such zero-shot and few-shot approaches offer flexibility,
-fine-tuning on task-specific data remains necessary to achieve
-competitive accuracy.
-\cite{li2024whisma} showed that coupling a modality aligner with
-parameter-efficient LoRA fine-tuning enables strong performance across
-diverse SLU benchmarks, and \cite{choi2025exploring} established that
-even a small fraction of paired speech data suffices to recover most of
-the gap between text-only and fully supervised fine-tuning.
-Despite these efforts, correctly distinguishing semantically adjacent
-intents that differ only in subtle aspects such as scope or granularity
-remains a persistent challenge, as conventional fine-tuning approaches
-fail to provide sufficient separation between competing interpretations.
+Prior work on SpeechLLMs for IC and SF has actively explored
+zero-shot and few-shot approaches that eliminate the need for
+task-specific training~\cite{LiKeizerDoddipatla2024PromptingWhisperQASLU,
+hacioglu2025speechllms, AgrawalGanapathy2025SLUUnseenICL}.
+However, fine-tuning on task-specific data remains essential to achieve
+competitive accuracy~\cite{li2024whisma}.
+Choi et al.\ showed that fine-tuning SpeechLLMs on paired speech and
+text data can recover most of the performance gap between text-only and
+fully supervised settings, even with a small amount of paired
+data~\cite{choi2025exploring}.
+Nevertheless, correctly distinguishing semantically adjacent intents
+that differ only in subtle aspects such as scope or granularity remains
+a persistent challenge, as conventional fine-tuning fails to provide
+sufficient separation between competing interpretations.
 Acquiring such fine-grained distinctions purely from data demands a
 large number of near-boundary examples, which are costly to obtain in
 practice.
-Figure~\ref{fig:proposed_method} provides an overview of the proposed
-framework. The following subsections describe each component in detail.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figure/method.png}
-  \caption{Overview of the proposed method.}
-  \label{fig:proposed_method}
-\end{figure}
+
 
 One promising direction for addressing this challenge is to supervise
 the reasoning process that underlies fine-grained intent discrimination,
 rather than relying solely on label supervision.
-In text-based LLM research, rationale-based supervision~\cite{zaidan-etal-2007-using,10.5555/1613715.1613721,lei-etal-2016-rationalizing} and reasoning distillation~\cite{magister-etal-2023-teaching,HoSchmidYun2023ReasoningTeachers,Fu2022ComplexityBasedPF,hsieh2023distillingstepbystepoutperforminglarger,zelikman2022starbootstrappingreasoningreasoning} have demonstrated that injecting structured intermediate reasoning signals into the training objective can improve downstream performance.
-However, these results are largely established in text-only settings.
-It remains unclear whether such supervision transfers to SpeechLLM-based SLU, where semantic decisions must be formed from acoustically entangled representations that exhibit variability from speakers, prosody, and noise.
-This acoustic--semantic coupling makes fine-grained intent discrimination particularly challenging under limited supervision, especially for semantically adjacent intent categories.
+In text-based LLM research, rationale-based
+supervision~\cite{zaidan-etal-2007-using,10.5555/1613715.1613721,lei-etal-2016-rationalizing}
+and reasoning
+distillation~\cite{magister-etal-2023-teaching,HoSchmidYun2023ReasoningTeachers,Fu2022ComplexityBasedPF,hsieh2023distillingstepbystepoutperforminglarger,zelikman2022starbootstrappingreasoningreasoning}
+have demonstrated that injecting structured intermediate reasoning
+signals into the training objective can improve downstream performance.
+However, these results are largely established in text-only settings,
+and it remains unclear whether such supervision transfers to
+SpeechLLM-based SLU, where semantic decisions must be formed from
+speech inputs exhibiting variability from speakers, prosody, and noise.
 
 We address this gap with Reasoning-Guided Fine-Tuning (RG-FT),
 a structured reasoning distillation framework for SpeechLLM-based SLU.
 In this framework, structured reasoning trajectories generated by
-DeepSeek-R1~\cite{Guo_2025}---each consisting of candidate
-enumeration, rejection reasoning, and label prediction---are distilled
-into SpeechLLMs.
+DeepSeek-R1~\cite{Guo_2025}, consisting of candidate enumeration,
+rejection reasoning, and label prediction, are distilled into
+SpeechLLMs.
 The core idea is that explicitly verbalizing the grounds for rejecting
 incorrect candidates serves as a structural regularizer, forcing the
 model to capture fine-grained distinctions and sharpen inter-class
 decision boundaries.
 We formulate this as a multitask learning objective, using only direct
 label prediction at inference with zero additional computational cost.
-We validate RG-FT on SLURP~\cite{bastianelli-etal-2020-slurp} across
-six SpeechLLM architectures, and further provide quantitative analysis
-of the resulting latent representations via Silhouette coefficients and
+We validate RG-FT on SLURP~\cite{bastianelli-etal-2020-slurp} and
+SpeechMassive~\cite{lee2024speechmassivemultilingualspeechdataset} across six SpeechLLM
+architectures, and further provide quantitative analysis of the
+resulting latent representations via Silhouette coefficients and
 Fisher ratios.
 
 
@@ -205,14 +189,14 @@ Our contributions are as follows:
     \item We propose \textbf{RG-FT (Reasoning-Guided Fine-Tuning)}, a
     structured reasoning distillation framework for SpeechLLM-based SLU,
     in which reasoning trajectories generated by
-    DeepSeek-R1---consisting of candidate enumeration, rejection
-    reasoning, and label prediction $(C \to R \to L)$---are distilled
+    DeepSeek-R1, consisting of candidate enumeration, rejection
+    reasoning, and label prediction $(C \to R \to L)$, are distilled
     into SpeechLLMs as an auxiliary regularizer for direct intent
     prediction under a multitask learning objective.
-    \item Through experiments on SLURP across six SpeechLLM
-    architectures, we demonstrate that RG-FT consistently improves
-    intent accuracy (up to $+2.79\%$) and SLU-F1 (up to $+1.26$
-    points) over standard fine-tuning, with zero additional
+    \item Through experiments on SLURP and SpeechMassive across six
+    SpeechLLM architectures, we demonstrate that RG-FT consistently
+    improves intent accuracy (up to $+2.79\%$) and SLU-F1 (up to
+    $+1.26$ points) over standard fine-tuning, with zero additional
     computational cost at inference.
     \item We provide quantitative evidence via Silhouette coefficients,
     Fisher ratios, and nearest-centroid margin that multitask reasoning
@@ -230,41 +214,38 @@ Our contributions are as follows:
 %% ============================================================
 
 
-
 \section{Proposed Method}
+Figure~\ref{fig:proposed_method} provides an overview of the proposed
+framework. The following subsections describe each component in detail.
 
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figure/method.png}
+  \caption{Overview of the proposed method.}
+  \label{fig:proposed_method}
+\end{figure}
 
 \begin{figure}[t]
 \centering
 \begin{tcolorbox}[
   colback=white, colframe=black!40,
   title={\small Prompt Structure},
-  fonttitle=\bfseries, width=\columnwidth
+  fonttitle=\bfseries, width=\columnwidth,
+  top=2pt, bottom=2pt, left=3pt, right=3pt
 ]
 \scriptsize
-\textbf{System:} You are an SLU Logic Analyst. Given [Input] and
-DB Definitions, output exactly 3 lines (C, R, L).
-Compare candidates from DB. Cite evidence. 
-
-\smallskip
-\hrule
-\smallskip
-
-\textbf{DB Definitions:} \textit{intent and slot definitions}\\
-\textbf{[Input]:} Transcript $+$ Target Label 
-
-\smallskip
-\hrule
-\smallskip
-
+\textbf{System:} You are an SLU Logic Analyst. Given [Input] and DB Definitions, output exactly 3 lines (C, R, L). Compare candidates from DB. Cite evidence.\\[2pt]
+\textbf{DB Definitions:} \textit{intent and slot definitions}\quad
+\textbf{[Input]:} Transcript $+$ Target Label\\[2pt]
 \textbf{C:} List intent candidates; list slot candidates with value candidates.\\
-\textbf{R:} For each $c \in \bar{C}_I$, cite evidence why $c$ is incorrect.\\
-{\footnotesize\textbf{L:} \{"Intent": \textit{scenario\_action}, "entities": \textit{[...]}\}}
+\textbf{R:} For each $c \in \bar{C}_I \cup \bar{C}_S$, cite evidence why $c$ is incorrect.\\
+\textbf{L:} \{"Intent": \textit{scenario\_action}, "entities": \textit{[...]}\}
 \end{tcolorbox}
 \caption{Prompt structure for structured reasoning trajectory generation.}
 \label{fig:prompt}
 \end{figure}
-
 
 
 
@@ -291,16 +272,18 @@ We assume the ground-truth intent $y^*$ is included in $C_I$.
 
 \textbf{Rejection Rationale ($R$):}
 Let $\bar{C}_I = C_I \setminus \{y^*\}$ denote the set of incorrect
-intent candidates. For each $c \in \bar{C}_I$, the model generates
-a natural language rationale $r(c; x)$ explaining why $c$
-contradicts the utterance $x$. The rejection rationale $R$ is
+intent candidates, and let $\bar{C}_S$ denote the set of incorrect
+slot-type candidates. For each $c \in \bar{C}_I \cup \bar{C}_S$,
+the model generates a natural language rationale $r(c; x)$ explaining
+why $c$ contradicts the utterance $x$. The rejection rationale $R$ is
 the collection of these paired explanations:
 \begin{equation}
-R = \{(c,\ r(c; x))\}_{c \in \bar{C}_I}.
+R = \{(c,\ r(c; x))\}_{c \in \bar{C}_I \cup \bar{C}_S}.
 \end{equation}
 Compared to affirmation-based reasoning, explicitly rejecting each
 competing hypothesis in a contrastive manner encourages
-fine-grained differentiation among semantically adjacent intents,
+fine-grained differentiation among semantically adjacent intents
+and slot types,
 thereby sharpening inter-class decision boundaries more effectively.
 This design is supported by empirical evidence from contrastive
 explanation generation~\cite{chen-etal-2021-kace} and Contrastive
@@ -320,46 +303,66 @@ L=\{\,\texttt{intent}: y^*,\
 
 
 \subsection{Teacher-based Data Construction}
+To construct training data containing $T$, we employ
+DeepSeek-R1~\cite{Guo_2025} as a teacher model.
+The teacher receives the speech transcript, the ground-truth labels
+$(y^*, S^*)$, and a database of all valid intent and slot definitions
+to generate $T$.
+Crucially, the ground-truth labels are explicitly provided to the
+teacher, reducing the risk of generating rejection rationales that
+contradict the correct labels.
+We verified that 94.0\% of the training samples yielded well-formed
+trajectories conforming to the prescribed $C \to R \to L$ format;
+the remaining samples were discarded.
+On average, DeepSeek-R1 enumerated 2.5 intent candidates and
+1.2 slot-type candidates per utterance.
 
-To construct training data containing $T$, we employ DeepSeek-R1 as a
-teacher model. The teacher receives the speech transcript, the
-ground-truth labels $(y^*, S^*)$, and a database of all valid intent and
-slot definitions. It is instructed to generate, for each $c \in \bar{C}$,
-a specific contradiction with the utterance content
-(Fig.~\ref{fig:proposed_method}). This oracle-guided construction is intended to
-improve the logical consistency of the reasoning trajectories used for
-distillation, by constraining the teacher to generate rationales that do
-not contradict the ground-truth labels. Note that the teacher operates
-on text transcripts rather than raw audio, leveraging its strong language
-reasoning capability; the student model is then trained to align its
-acoustic representations with the resulting structured rationales.
+
 
 \begin{table*}[t]
 \centering
-\caption{Main results on the SLURP test set. Each column group reports
-Scenario (Sce), Action (Act), Intent (Int), and SLU-F1 (F1) accuracy.
-The proposed RG-FT consistently achieves the best performance
-across all architectures.}
+\caption{Main results on SLURP and Speech-MASSIVE~(FR) test sets
+(averaged over 3 random seeds).
+\textbf{Bold} marks the best result per model and metric.}
 \label{tab:main_results}
 \resizebox{\textwidth}{!}{
-\begin{tabular}{lcccccccccccc}
+\begin{tabular}{llcccccccccccc}
 \hline
- & \multicolumn{4}{c}{Direct-FT}
- & \multicolumn{4}{c}{Reasoning-FT ($C \to R \to L$)}
- & \multicolumn{4}{c}{RG-FT (Proposed)} \\
-\cmidrule(lr){2-5}\cmidrule(lr){6-9}\cmidrule(lr){10-13}
-Model & Sce & Act & Int & F1
-      & Sce & Act & Int & F1
-      & Sce & Act & Int & F1 \\ \hline
-Qwen2.5-Omni-7B~\cite{xu2025qwen25omni}        & 91.53 & 88.74 & 87.83 & 76.20 & 91.12 & 87.90 & 87.05 & 76.08 & \textbf{91.96} & \textbf{88.97} & \textbf{88.23} & \textbf{77.10} \\
-Qwen2.5-Omni-3B~\cite{xu2025qwen25omni}        & 90.65 & 87.79 & 86.79 & 75.04 & 89.27 & 85.47 & 84.47 & 73.23 & \textbf{91.39} & \textbf{88.77} & \textbf{87.79} & \textbf{76.30} \\
-Qwen2-Audio-7B~\cite{chu2024qwen2audio}         & 89.37 & 85.21 & 84.23 & 70.08 & 88.63 & 84.80 & 83.46 & 70.62 & \textbf{90.15} & \textbf{86.65} & \textbf{85.71} & \textbf{72.22} \\
-Qwen2-Audio-7B-Instruct~\cite{chu2024qwen2audio} & 88.67 & 85.84 & 84.70 & 70.83 & 88.84 & 85.00 & 83.73 & 71.42 & \textbf{90.11} & \textbf{87.19} & \textbf{86.38} & \textbf{72.79} \\
-Audio-Flamingo-3~\cite{goel2025audioflamingo3}   & 87.93 & 84.10 & 82.65 & 69.98 & 87.90 & 84.33 & 83.05 & 71.92 & \textbf{89.88} & \textbf{86.45} & \textbf{85.44} & \textbf{72.86} \\
-Music-Flamingo~\cite{ghosh2025musicflamingoscalingmusic} & 87.69 & 83.89 & 82.65 & 69.02 & 87.96 & 84.36 & 82.92 & 71.42 & \textbf{90.01} & \textbf{86.65} & \textbf{85.74} & \textbf{72.11} \\ \hline
+ & & \multicolumn{4}{c}{Direct-FT~\cite{choi2025exploring}} & \multicolumn{4}{c}{Reasoning-FT ($C \to R \to L$)} & \multicolumn{4}{c}{RG-FT (Proposed)} \\
+\cmidrule(lr){3-6}\cmidrule(lr){7-10}\cmidrule(lr){11-14}
+Corpus & Model & Scenario & Action & Intent & SLU-F1 & Scenario & Action & Intent & SLU-F1 & Scenario & Action & Intent & SLU-F1 \\
+\hline
+\multirow{6}{*}{\textit{SLURP~\cite{bastianelli-etal-2020-slurp}}}
+ & Qwen2.5-Omni-7B~\cite{xu2025qwen25omni} & 91.30 & 88.67 & 87.78 & 76.19 & 89.53 & 86.53 & 85.24 & 74.89 & \textbf{91.81} & \textbf{89.22} & \textbf{88.35} & \textbf{76.88} \\
+ & Qwen2.5-Omni-3B~\cite{xu2025qwen25omni} & 90.66 & 87.61 & 86.63 & 74.87 & 88.79 & 84.74 & 83.57 & 71.87 & \textbf{91.32} & \textbf{88.55} & \textbf{87.62} & \textbf{75.88} \\
+ & Qwen2-Audio-7B~\cite{chu2024qwen2} & 88.87 & 85.34 & 84.20 & 69.84 & 87.44 & 83.56 & 82.04 & 69.29 & \textbf{90.23} & \textbf{86.64} & \textbf{85.81} & \textbf{72.26} \\
+ & Qwen2-Audio-7B-Inst.~\cite{chu2024qwen2} & 88.97 & 85.36 & 84.26 & 70.09 & 87.14 & 83.39 & 81.73 & 69.87 & \textbf{90.28} & \textbf{87.16} & \textbf{86.31} & \textbf{72.78} \\
+ & Audio-Flamingo-3~\cite{goel2025audioflamingo3} & 88.30 & 84.51 & 83.23 & 70.22 & 86.83 & 83.05 & 81.51 & 69.44 & \textbf{89.75} & \textbf{86.42} & \textbf{85.25} & \textbf{72.61} \\
+ & Music-Flamingo~\cite{ghosh2025musicflamingoscalingmusic} & 87.63 & 84.07 & 82.81 & 69.36 & 86.87 & 82.96 & 81.31 & 69.35 & \textbf{89.81} & \textbf{86.23} & \textbf{85.21} & \textbf{72.16} \\
+\hline
+\multirow{6}{*}{\shortstack{\textit{Speech-MASSIVE} \\ \textit{(FR)~\cite{lee2024speechmassivemultilingualspeechdataset}}}}
+ & Qwen2.5-Omni-7B~\cite{xu2025qwen25omni} & 91.62 & 89.09 & 88.10 & 74.88 & 90.33 & 87.08 & 85.98 & 71.90 & \textbf{92.00} & \textbf{89.85} & \textbf{88.67} & \textbf{75.83} \\
+ & Qwen2.5-Omni-3B~\cite{xu2025qwen25omni} & 91.14 & 88.26 & 87.12 & 72.72 & 88.75 & 85.66 & 84.31 & 70.21 & \textbf{91.22} & \textbf{88.94} & \textbf{87.79} & \textbf{74.56} \\
+ & Qwen2-Audio-7B~\cite{chu2024qwen2} & 89.21 & 85.91 & 84.59 & 68.04 & 88.20 & 84.59 & 82.98 & 67.38 & \textbf{90.61} & \textbf{88.04} & \textbf{86.80} & \textbf{70.46} \\
+ & Qwen2-Audio-7B-Inst.~\cite{chu2024qwen2} & 89.13 & 85.83 & 84.48 & 68.04 & 87.93 & 84.23 & 82.78 & 66.78 & \textbf{90.46} & \textbf{87.94} & \textbf{86.67} & \textbf{70.71} \\
+ & Audio-Flamingo-3~\cite{goel2025audioflamingo3} & 88.42 & 85.35 & 83.87 & 67.89 & 87.72 & 84.72 & 83.02 & 65.96 & \textbf{91.07} & \textbf{88.13} & \textbf{87.09} & \textbf{70.80} \\
+ & Music-Flamingo~\cite{ghosh2025musicflamingoscalingmusic} & 89.03 & 85.90 & 84.50 & 69.66 & 87.72 & 84.08 & 82.77 & 67.41 & \textbf{90.69} & \textbf{87.83} & \textbf{86.72} & \textbf{71.28} \\
+\hline
 \end{tabular}
 }
 \end{table*}
+
+
+
+
+
+
+
+
+
+
+
+
 
 \subsection{Training Objectives}
 
@@ -429,9 +432,8 @@ generate the structured label $L$ directly. The multitask objective is:
     }_{\mathcal{L}_{\text{Label}}},
 \end{equation}
 where $\mathcal{B}_0$ and $\mathcal{B}_1$ are independently sampled
-mini-batches assigned to the Reasoning and Label branches respectively,
-and $\alpha{=}0.5$ throughout all experiments, yielding equal weight
-to both branches.
+mini-batches assigned to the Reasoning and Label branches respectively.
+
 
 
 
@@ -448,13 +450,18 @@ to both branches.
 \label{sec:experiments}
 
 \subsection{Dataset}
-We evaluate our framework on the SLURP
-dataset~\cite{bastianelli-etal-2020-slurp}, which comprises
-11,514 training, 2,033 development, and 2,974 test utterances
-covering 18 domains and 46 action classes. Following
-\cite{choi2025exploring}, all models are trained on both speech
-and gold transcription inputs to facilitate acquisition of
-fundamental SLU capabilities.
+We evaluate our framework on two SLU benchmarks.
+SLURP~\cite{bastianelli-etal-2020-slurp} is an English dataset
+comprising 11,514 training, 2,033 development, and 2,974 test
+sentences covering 18 domains and 60 intent classes.
+Speech-MASSIVE~\cite{lee2024speechmassivemultilingualspeechdataset}
+is a multilingual speech dataset built upon the MASSIVE
+corpus; we use its French subset, which provides the same
+split sizes and label schema.
+Following \cite{choi2025exploring}, all models are trained on
+both speech and gold transcription inputs to facilitate
+acquisition of fundamental SLU capabilities.
+
 
 \subsection{Metrics}
 Performance is assessed across four complementary metrics.
@@ -463,39 +470,33 @@ high-level domain classification (e.g., \textit{calendar},
 \textit{email}) and specific intent action (e.g., \textit{set},
 \textit{query}), respectively. Intent accuracy evaluates the
 combined (Scenario, Action) pair, reflecting overall
-classification correctness. SLU-F1~\cite{bastianelli-etal-2020-slurp}
-provides a holistic measure of the full semantic frame,
-penalizing slot errors more heavily when the intent is incorrect.
+classification correctness. SLU-F1~\cite{bastianelli-etal-2020-slurp} is a metric for
+entity prediction that accounts for both semantic label
+matching and filler-level textual similarity.
 
 
-
-\subsection{Representation Analysis}
+\subsection{Latent Space Separability Analysis}
 \label{sec:rep_analysis}
 To quantitatively assess whether multitask reasoning supervision
 improves intent discriminability, we extract hidden state vectors
 at the moment of intent generation.
 Specifically, we identify the tokens corresponding to the scenario
 and action fields in the generated output and pool their hidden
-states to form a single intent representation vector per utterance.
+states to form an intent representation vector per utterance.
 Inter-class separability is evaluated using three complementary metrics.
-Silhouette coefficient~\cite{ROUSSEEUW198753} measures,
-for each sample, how much closer it is to its own cluster than to the
-nearest competing cluster under cosine distance; the overall score
-approaches $1$ when clusters are well-separated.
-Fisher ratio~\cite{fisher1936use} is the ratio of
-between-class scatter to within-class scatter in the representation
-space; higher values indicate greater discriminability.
-Nearest-centroid margin:
-for a sample representation $z$ with true class $y$, let
-$\mu_y$ denote the centroid of class $y$ and
-$y'=\arg\min_{k\neq y} d(z,\mu_k)$ the nearest competing class,
-where $d(\cdot,\cdot)$ is Euclidean distance.
-The margin is defined as
+Silhouette coefficient~\cite{ROUSSEEUW198753} measures how much closer
+each sample is to its own cluster than to the nearest competing cluster
+under cosine distance; the score approaches $1$ when clusters are well-separated.
+Fisher ratio~\cite{fisher1936use} is the ratio of between-class to
+within-class scatter; higher values indicate greater discriminability.
+Nearest-centroid margin is defined as
 \begin{equation}
-m(z)= d(z,\mu_{y'}) - d(z,\mu_{y}).
+m(z)= d(z,\mu_{y'}) - d(z,\mu_{y}),
 \label{eq:ncm}
 \end{equation}
-A larger positive margin indicates clearer separation between
+where $\mu_y$ is the centroid of the true class $y$ and
+$y'=\arg\min_{k\neq y} d(z,\mu_k)$ is the nearest competing class;
+a larger positive margin indicates clearer separation between
 semantically adjacent intents.
 
 
@@ -503,23 +504,25 @@ semantically adjacent intents.
 
 \subsection{Implementation Details}
 
-All models are fine-tuned using BF16 precision with the AdamW
-optimizer, a learning rate of $4 \times 10^{-5}$, a batch size
-of 4, and 4 gradient accumulation steps. Oracle rationales for
-multitask training are generated via DeepSeek-R1, whose
-chain-of-thought pretraining makes it well-suited for producing
-structured, evidence-grounded reasoning traces in the
-$C \to R \to L$ format. For Direct-FT and Reasoning-FT, training proceeds for 4 epochs. 
-For RG-FT, each training step simultaneously processes samples for 
-both the Reasoning and Label branches, doubling the effective 
-data exposure per update compared to the single-task baselines. 
-To ensure a fair comparison in terms of the total,
-we train RG-FT for 2 epochs.
+All models are fully fine-tuned using BF16 precision with
+the AdamW optimizer, a learning rate of $4 \times 10^{-5}$
+with cosine annealing learning rate schedule, a batch size
+of 4, and 4 gradient accumulation steps. The maximum number
+of new tokens is set to 384. All configurations are trained
+for up to 4 epochs, and the best checkpoint is selected
+based on development set performance. All experiments are
+conducted on 2$\times$H200 GPUs, and results are averaged
+over three random seeds.
+We set $\alpha{=}0.5$ for all main experiments. A sensitivity
+analysis over $\alpha \in \{0.1, 0.2, \ldots, 0.9\}$ confirmed
+that performance follows a bell-shaped trend across all six
+architectures, with $\alpha{=}0.5$ consistently yielding
+competitive results (see Section~\ref{sec:results}).
+
 
 \begin{table}[t]
 \centering
-\caption{Representation geometry metrics for Qwen2.5-Omni-7B.
-Higher values indicate greater inter-class separability.}
+\caption{Latent space separability metrics for Qwen2.5-Omni-7B comparing Direct-FT and RG-FT. All metrics quantify the degree of inter-class separability; higher values indicate greater separation.}
 \label{tab:rep_analysis}
 \resizebox{\columnwidth}{!}{
 \begin{tabular}{lccc}
@@ -541,122 +544,148 @@ Norm. centroid margin (mean) & 0.174 & 0.194 & +0.020 \\ \hline
 
 \section{Results}
 \label{sec:results}
-
 \subsection{Main Results}
 Table~\ref{tab:main_results} reports Scenario, Action, Intent
 accuracy and SLU-F1 for three training conditions across six
 architectures: Direct-FT, Reasoning-FT, and the proposed RG-FT
 using Label-branch ($g_{\text{label}}$) inference.
-RG-FT consistently outperforms both baselines across all models
-and metrics, with intent accuracy gains ranging from
-$+0.96\%$ (Qwen2.5-Omni-7B) to $+2.79\%$ (Qwen2.5-Omni-3B)
-over Direct-FT, and SLU-F1 improvements of up to $+1.26$ points
-(Qwen2.5-Omni-7B).
-Notably, Reasoning-FT occasionally underperforms Direct-FT, with
-intent accuracy degrading by up to $2.32\%$ (Qwen2.5-Omni-3B),
+RG-FT consistently outperforms both baselines across all models,
+metrics, and corpora.
+On SLURP, intent accuracy gains over Direct-FT range from
+$+0.57\%$ (Qwen2.5-Omni-7B) to $+2.79\%$ (Qwen2.5-Omni-3B),
+and SLU-F1 improves by up to $+2.42$ points (Qwen2-Audio-7B).
+Similar trends are observed on Speech-MASSIVE~(FR),
+where intent accuracy improves by up to $+2.21\%$ (Audio-Flamingo-3)
+and SLU-F1 by up to $+2.76$ points (Qwen2.5-Omni-3B).
+Notably, Reasoning-FT occasionally underperforms Direct-FT on both corpora,
+with intent accuracy degrading by up to $2.32\%$ (Qwen2.5-Omni-3B) on SLURP,
 indicating that reasoning supervision without a complementary
 Label-branch objective does not reliably improve performance in
 moderate-scale models.
 These results demonstrate that explicitly supervising reasoning
 as a multitask regularizer is more effective than treating it as
-a primary generation objective for moderate-scale SpeechLLMs.
+a primary generation objective for moderate-scale SpeechLLMs,
+a finding that holds consistently across both corpora.
 
 
-\subsection{Representation Analysis}
+\subsection{Multitask Reasoning Sharpens Intent Clusters in Latent Space}
+Table~\ref{tab:rep_analysis} reports latent space separability metrics
+comparing Direct-FT and RG-FT (Qwen2.5-Omni-7B).
+RG-FT improves consistently across all metrics.
+The Fisher ratio rises from 1.133 to 1.276 ($+0.143$), indicating
+that between-class scatter increases relative to within-class scatter,
+and the mean inter-centroid cosine distance increases from 0.262 to
+0.328 ($+0.067$), suggesting that intent clusters become more evenly
+spread across the representation space.
+The normalized nearest-centroid margin improves from 0.174 to 0.194
+($+0.020$), confirming that decision boundaries between semantically
+adjacent intents are more clearly defined under RG-FT.
+Taken together, these results provide quantitative evidence that
+supervising rejection reasoning as an auxiliary objective encourages
+the model to internalize fine-grained inter-class distinctions,
+leading to more discriminable latent representations even when
+reasoning is absent at inference.
 
-Table~\ref{tab:rep_analysis} reports representation geometry
-metrics comparing Direct-FT and RG-FT (Qwen2.5-Omni-7B).
-RG-FT improves across all separability metrics: the Silhouette
-coefficient (cosine) increases from 0.242 to 0.279 ($+0.037$),
-and the Fisher ratio rises from 1.133 to 1.276 ($+0.143$),
-indicating greater between-class scatter relative to within-class
-scatter. The mean inter-centroid cosine distance also increases
-from 0.262 to 0.328 ($+0.067$), suggesting that intent clusters
-are more evenly spread across the representation space.
-Furthermore, the normalized nearest-centroid margin improves from
-0.174 to 0.194 ($+0.020$), confirming that decision boundaries
-between semantically adjacent intents become more clearly defined
-under RG-FT.
+
+
 
 \begin{table}[t]
 \centering
 \caption{Effect of each rationale component on intent accuracy and
-SLU-F1 (Qwen2.5-Omni-7B, Label-branch inference).
-\textbf{C}: Intent Candidates,
-\textbf{R}: Rejection Rationale, \textbf{L}: Label
-(direct prediction).}
+SLU-F1 (Qwen2.5-Omni-7B).}
 \label{tab:ablation_components}
 \begin{tabular}{lcc}
 \hline
 \textbf{Configuration} & \textbf{Sce / Act / Int} & \textbf{SLU-F1} \\ \hline
-Direct-FT              & 88.67 / 85.84 / 84.7 & 70.83 \\
-RG-FT w/ C            & 89.54 / 86.05 / 85.21 & 72.3 \\
-RG-FT w/ R            & 89.98 / 86.48 / 85.54 & 70.78 \\
-RG-FT w/ C+R          & 89.88 / 86.85 / 85.94 & \textbf{72.8} \\
-\textbf{RG-FT w/ C+R+L} & \textbf{90.11 / 87.19 / 86.38} & 72.79 \\ \hline
+Direct-FT              & 91.30 / 88.67 / 87.78 & 76.19 \\
+RG-FT w/ C            & 91.59 / 88.87 / 88.01 & 76.93 \\
+RG-FT w/ C+R          & 91.81 / 89.14 / 88.29 & \textbf{77.00} \\
+\textbf{RG-FT w/ C+R+L} & \textbf{91.81 / 89.22 / 88.35} & 76.88 \\ \hline
 \end{tabular}
 \end{table}
 
 \subsection{Impact of Rationale Components}
-Table~\ref{tab:ablation_components} reports intent accuracy and
-SLU-F1 for each rationale component configuration using
-Label-branch ($g_{\text{label}}$) inference (Qwen2-Audio-7B-Instruct).
-Among individual components, $C$ yields a notable improvement in
-intent accuracy ($+0.51\%$ over Direct-FT), indicating that
-explicitly enumerating candidate intents provides a strong
-inductive signal for distinguishing semantically adjacent intents.
-Interestingly, $R$ alone achieves comparable intent accuracy
-($+0.84\%$) but substantially lower SLU-F1 ($70.78$, nearly
-identical to Direct-FT at $70.83$), suggesting that rejection
-rationale without candidate context improves intent boundary
-sharpness in isolation, yet fails to propagate this benefit to
-slot-level prediction. This asymmetry indicates that $R$ is not a
-standalone supervisory signal but rather depends on the structured
-context established by $C$ to function effectively---a finding
-consistent with the sequential design of the proposed
-$C \to R \to L$ trajectory, in which candidate enumeration
-provides the necessary referential grounding for subsequent
-rejection reasoning.
+Table~\ref{tab:ablation_components} reports the contribution of
+each rationale component using Label-branch ($g_{\text{label}}$)
+inference (Qwen2.5-Omni-7B).
+Adding candidate enumeration ($C$) alone already yields a
+consistent gain over Direct-FT ($+0.23\%$ intent accuracy,
+$+0.74$ SLU-F1), confirming that enumerating competing hypotheses
+provides a useful inductive signal for distinguishing semantically
+adjacent intents.
+Appending rejection rationale ($C+R$) further improves both
+intent accuracy ($+0.51\%$ over $C$ alone) and SLU-F1
+($+0.07$ points), demonstrating that explicitly verbalizing
+why incorrect candidates are rejected sharpens inter-class
+boundaries beyond what candidate enumeration achieves alone.
+The full trajectory ($C+R+L$) achieves the highest intent
+accuracy ($88.35\%$), while $C+R$ attains the highest SLU-F1
+($77.00$), with $C+R+L$ performing comparably ($76.88$).
+These results validate the sequential $C \to R \to L$ design:
+each component contributes incrementally, and rejection reasoning
+depends on the referential grounding established by candidate
+enumeration to function effectively as a regularization signal.
 
-The combination $C+R$ further improves both intent accuracy
-($+1.24\%$) and SLU-F1 ($+1.97$ points) over Direct-FT,
-confirming that the two components are mutually reinforcing rather
-than independently sufficient. The full configuration $C+R+L$
-achieves the highest intent accuracy ($86.38\%$), while $C+R$
-attains the highest SLU-F1 ($72.80$), with $C+R+L$ performing
-comparably ($72.79$). Taken together, these results validate the
-integrated design of the $C \to R \to L$ trajectory: each
-component contributes incrementally, and the structured ordering
-is essential to the effectiveness of rejection reasoning as a
-regularization signal.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figure/alpha.png}
+  \caption{%
+    Sensitivity of intent accuracy (top) and SLU-F1 (bottom) to the
+    mixing ratio $\alpha$ on the SLURP test set across all six
+    SpeechLLM architectures.
+    The x-axis ranges from $\alpha{=}0$ (Direct-FT) to $\alpha{=}1$
+    (Reasoning-FT only); the shaded region marks $\alpha{=}0.5$
+    (RG-FT). Results are averaged over three random seeds.
+  }
+  \label{fig:alpha_sensitivity}
+\end{figure}
+
+
+\subsection{Sensitivity Analysis on $\alpha$}
+\label{sec:alpha_analysis}
+Figure~\ref{fig:alpha_sensitivity} shows intent accuracy and SLU-F1
+as $\alpha$ is swept from $0$ (Direct-FT) to $1$ (Reasoning-FT) across
+all six architectures on the SLURP test set.
+Both metrics follow a consistent bell-shaped profile across all model
+families: performance improves steadily over the Direct-FT baseline
+as $\alpha$ increases from $0$, peaks in the range
+$\alpha \in [0.4, 0.6]$, and then degrades sharply as the
+Label-branch objective ($\mathcal{L}_{\text{Label}}$) is progressively
+removed toward $\alpha{=}1$.
+The sharp degradation near $\alpha{=}1$ mirrors the underperformance
+of Reasoning-FT observed in Table~\ref{tab:main_results}, reinforcing
+the finding that reasoning supervision alone is insufficient for
+moderate-scale SpeechLLMs.
+Conversely, the consistent improvement over Direct-FT ($\alpha{=}0$)
+across a wide range of intermediate $\alpha$ values demonstrates that
+even a modest amount of reasoning supervision provides a meaningful
+regularization effect on latent representations.
+The fact that this bell-shaped trend holds uniformly across all three
+model families confirms that $\alpha{=}0.5$ is a broadly robust
+default, and that the complementary interplay between the Reasoning
+and Label objectives is an architecture-independent property of RG-FT.
 
 
 %% ============================================================
 %%  5. Conclusion
 %% ============================================================
-
 \section{Conclusion}
 \label{sec:conclusion}
-In this paper, we proposed RG-FT, a structured reasoning distillation
-framework for moderate-scale SpeechLLMs, to address the challenge of
+We proposed RG-FT, a structured reasoning distillation framework
+for moderate-scale SpeechLLMs, to address the challenge of
 distinguishing semantically adjacent intents in spoken language
 understanding. By supervising a structured reasoning process
-($C \to R \to L$) alongside direct label prediction under a multitask
-learning objective, we consistently improved performance across six
-distinct model architectures on the SLURP benchmark. Representation
-analysis via Silhouette coefficients, Fisher ratio, and nearest-centroid
-margin provided quantitative evidence that multitask reasoning supervision
-encourages the model to develop more separable intent clusters in the
-latent space. Crucially, we demonstrated that treating reasoning as a
-training regularizer while performing direct inference via Label-branch
-allows the model to leverage the benefits of structured reasoning without
-the overhead or noise of inference-time rationale generation. Future work
-will explore the scalability of this approach to smaller edge-device
-models and its application to multilingual SLU scenarios.
-
-
-
-
+($C \to R \to L$) alongside direct label prediction under a
+multitask learning objective, we consistently improved performance
+across six architectures on both SLURP and Speech-MASSIVE~(FR).
+Latent space separability analysis provided quantitative evidence
+that reasoning supervision encourages more separable intent clusters,
+and restricting inference to direct label prediction eliminates
+the overhead of rationale generation.
+Future work will investigate generalization to more diverse corpora
+and analyze how acoustic conditions such as speaker variability
+and background noise affect the efficacy of reasoning supervision.
 \bibliographystyle{IEEEtran}
 \bibliography{mybib}
 
