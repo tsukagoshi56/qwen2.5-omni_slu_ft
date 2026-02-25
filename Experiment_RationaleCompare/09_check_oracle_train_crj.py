@@ -138,6 +138,14 @@ def main() -> None:
         default="",
         help="Optional path to save full report JSON.",
     )
+    parser.add_argument(
+        "--strict_r",
+        action="store_true",
+        help=(
+            "Require non-empty R in all rows. "
+            "By default, empty R is allowed when both intent/slot candidates are <= 1."
+        ),
+    )
     args = parser.parse_args()
 
     fields = [x.strip() for x in str(args.text_fields).split(",") if x.strip()]
@@ -147,10 +155,13 @@ def main() -> None:
     text_present = 0
     has_c = 0
     has_r = 0
+    has_r_nonempty = 0
     has_j_line = 0
     has_crj = 0
+    has_crj_strict = 0
     valid_j = 0
     valid_crj = 0
+    r_optional_cases = 0
 
     intent_counts_all: List[int] = []
     slot_counts_all: List[int] = []
@@ -169,17 +180,31 @@ def main() -> None:
         r_body = _extract_prefixed_line(text, "R")
         j_body = _extract_prefixed_line(text, "J")
 
+        intent_candidates = _extract_intent_candidates(c_body)
+        slot_candidates = _extract_slot_candidates(c_body)
+        intent_n = len(intent_candidates)
+        slot_n = len(slot_candidates)
+        single_candidate_case = intent_n <= 1 and slot_n <= 1
+        r_optional = bool(c_body) and single_candidate_case
+        if r_optional:
+            r_optional_cases += 1
+
         c_ok = bool(c_body)
-        r_ok = bool(r_body)
+        r_nonempty = bool(r_body)
+        r_ok = r_nonempty or (r_optional and (not bool(args.strict_r)))
         j_line_ok = bool(j_body)
 
         if c_ok:
             has_c += 1
+        if r_nonempty:
+            has_r_nonempty += 1
         if r_ok:
             has_r += 1
         if j_line_ok:
             has_j_line += 1
 
+        if c_ok and r_nonempty and j_line_ok:
+            has_crj_strict += 1
         if c_ok and r_ok and j_line_ok:
             has_crj += 1
         else:
@@ -199,8 +224,6 @@ def main() -> None:
             if len(invalid_j_ids) < max(0, int(args.sample_limit)):
                 invalid_j_ids.append(rid)
 
-        intent_candidates = _extract_intent_candidates(c_body)
-        slot_candidates = _extract_slot_candidates(c_body)
         intent_counts_all.append(len(intent_candidates))
         slot_counts_all.append(len(slot_candidates))
         if c_ok and r_ok and j_line_ok:
@@ -215,8 +238,11 @@ def main() -> None:
         "text_rows": text_present,
         "checks": {
             "has_c": {"count": has_c, "ratio": _as_ratio_str(has_c, total)},
+            "has_r_nonempty": {"count": has_r_nonempty, "ratio": _as_ratio_str(has_r_nonempty, total)},
             "has_r": {"count": has_r, "ratio": _as_ratio_str(has_r, total)},
             "has_j_line": {"count": has_j_line, "ratio": _as_ratio_str(has_j_line, total)},
+            "r_optional_cases": {"count": r_optional_cases, "ratio": _as_ratio_str(r_optional_cases, total)},
+            "has_crj_lines_strict": {"count": has_crj_strict, "ratio": _as_ratio_str(has_crj_strict, total)},
             "has_crj_lines": {"count": has_crj, "ratio": _as_ratio_str(has_crj, total)},
             "j_json_valid": {"count": valid_j, "ratio": _as_ratio_str(valid_j, total)},
             "crj_and_j_valid": {"count": valid_crj, "ratio": _as_ratio_str(valid_crj, total)},
@@ -240,8 +266,11 @@ def main() -> None:
     print()
     print("[CRJ / J checks]")
     print(f"- has_c:           {report['checks']['has_c']['ratio']}")
+    print(f"- has_r_nonempty:  {report['checks']['has_r_nonempty']['ratio']}")
     print(f"- has_r:           {report['checks']['has_r']['ratio']}")
     print(f"- has_j_line:      {report['checks']['has_j_line']['ratio']}")
+    print(f"- r_optional:      {report['checks']['r_optional_cases']['ratio']}")
+    print(f"- has_crj_strict:  {report['checks']['has_crj_lines_strict']['ratio']}")
     print(f"- has_crj_lines:   {report['checks']['has_crj_lines']['ratio']}")
     print(f"- j_json_valid:    {report['checks']['j_json_valid']['ratio']}")
     print(f"- crj_and_j_valid: {report['checks']['crj_and_j_valid']['ratio']}")
