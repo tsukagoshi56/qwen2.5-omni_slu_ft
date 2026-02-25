@@ -5,7 +5,7 @@ import re
 from statistics import mean, median
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from common import normalize_intent_label, parse_j_from_output, read_jsonl
+from common import label_from_record, normalize_intent_label, parse_j_from_output, read_jsonl
 
 
 def _pick_text(row: Dict[str, Any], fields: Sequence[str]) -> str:
@@ -112,6 +112,24 @@ def _summarize_counts(values: Sequence[int]) -> Dict[str, Any]:
     }
 
 
+def _gold_slot_types_from_row(row: Dict[str, Any]) -> List[str]:
+    label = label_from_record(row if isinstance(row, dict) else {})
+    entities = label.get("entities", []) if isinstance(label, dict) else []
+    slots: List[str] = []
+    if not isinstance(entities, list):
+        return slots
+    seen = set()
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        slot = str(ent.get("type", "")).strip().lower()
+        if not slot or slot in seen:
+            continue
+        seen.add(slot)
+        slots.append(slot)
+    return slots
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -167,6 +185,10 @@ def main() -> None:
     slot_counts_all: List[int] = []
     intent_counts_crj: List[int] = []
     slot_counts_crj: List[int] = []
+    slot_counts_gold_has_slots_all: List[int] = []
+    slot_counts_gold_has_slots_crj: List[int] = []
+    gold_has_slots_rows = 0
+    gold_has_slots_with_slot_candidates = 0
 
     missing_crj_ids: List[str] = []
     invalid_j_ids: List[str] = []
@@ -184,10 +206,17 @@ def main() -> None:
         slot_candidates = _extract_slot_candidates(c_body)
         intent_n = len(intent_candidates)
         slot_n = len(slot_candidates)
+        gold_slot_types = _gold_slot_types_from_row(row)
+        gold_has_slots = len(gold_slot_types) > 0
         single_candidate_case = intent_n <= 1 and slot_n <= 1
         r_optional = bool(c_body) and single_candidate_case
         if r_optional:
             r_optional_cases += 1
+        if gold_has_slots:
+            gold_has_slots_rows += 1
+            slot_counts_gold_has_slots_all.append(slot_n)
+            if slot_n > 0:
+                gold_has_slots_with_slot_candidates += 1
 
         c_ok = bool(c_body)
         r_nonempty = bool(r_body)
@@ -229,6 +258,8 @@ def main() -> None:
         if c_ok and r_ok and j_line_ok:
             intent_counts_crj.append(len(intent_candidates))
             slot_counts_crj.append(len(slot_candidates))
+            if gold_has_slots:
+                slot_counts_gold_has_slots_crj.append(slot_n)
 
     valid_crj = min(has_crj, valid_j)
 
@@ -252,6 +283,13 @@ def main() -> None:
             "slot_per_row_all": _summarize_counts(slot_counts_all),
             "intent_per_row_crj_only": _summarize_counts(intent_counts_crj),
             "slot_per_row_crj_only": _summarize_counts(slot_counts_crj),
+            "slot_per_row_gold_has_slots_all": _summarize_counts(slot_counts_gold_has_slots_all),
+            "slot_per_row_gold_has_slots_crj_only": _summarize_counts(slot_counts_gold_has_slots_crj),
+            "gold_has_slots_rows": gold_has_slots_rows,
+            "gold_has_slots_with_slot_candidates": {
+                "count": gold_has_slots_with_slot_candidates,
+                "ratio": _as_ratio_str(gold_has_slots_with_slot_candidates, gold_has_slots_rows),
+            },
         },
         "samples": {
             "missing_crj_ids": missing_crj_ids,
@@ -280,6 +318,8 @@ def main() -> None:
     s_all = report["candidate_stats"]["slot_per_row_all"]
     i_crj = report["candidate_stats"]["intent_per_row_crj_only"]
     s_crj = report["candidate_stats"]["slot_per_row_crj_only"]
+    s_gold = report["candidate_stats"]["slot_per_row_gold_has_slots_all"]
+    s_gold_crj = report["candidate_stats"]["slot_per_row_gold_has_slots_crj_only"]
     print(
         f"- intent/all: mean={i_all['mean']:.3f}, median={i_all['median']:.3f}, "
         f"min={i_all['min']}, max={i_all['max']}"
@@ -295,6 +335,18 @@ def main() -> None:
     print(
         f"- slot/crj:   mean={s_crj['mean']:.3f}, median={s_crj['median']:.3f}, "
         f"min={s_crj['min']}, max={s_crj['max']}"
+    )
+    print(
+        f"- slot/gold_has_slots: mean={s_gold['mean']:.3f}, median={s_gold['median']:.3f}, "
+        f"min={s_gold['min']}, max={s_gold['max']} (n={s_gold['n']})"
+    )
+    print(
+        f"- slot/gold_has_slots_crj: mean={s_gold_crj['mean']:.3f}, median={s_gold_crj['median']:.3f}, "
+        f"min={s_gold_crj['min']}, max={s_gold_crj['max']} (n={s_gold_crj['n']})"
+    )
+    print(
+        f"- gold_has_slots_with_slot_candidates: "
+        f"{report['candidate_stats']['gold_has_slots_with_slot_candidates']['ratio']}"
     )
 
     if missing_crj_ids:
